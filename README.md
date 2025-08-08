@@ -39,6 +39,10 @@ claude mcp add --transport http takaro http://localhost:18000
 # Start Claude
 claude
 
+# Verify the MCP server is connected (you should see 'takaro' in the list)
+> /mcp
+
+# Now you can start creating modules!
 > Write me a module that says 'hello' to every player when they join
 ```
 
