@@ -32,6 +32,7 @@ Persistent key-value storage linked to GameServer, Player, and Module.
 
 ## Development Tips
 - Use `Promise.all` for parallel API calls
+- You can use Functions to put reusable code inside. This is VERY important to keep code DRY. Look at the teleports module as an example for this
 - Handle errors with `TakaroUserError`
 
 Every module component (command, hook, cronjob) should have this structure (note the imports and the main function):
@@ -87,3 +88,4 @@ You can debug failing modules using the events endpoint:
 5. **Empty logs + success:true** = Module bug (wrong method names, missing imports)
 
 **Custom Modules Guide**: https://docs.takaro.io/advanced/custom-modules
+Inside the module, you are using the takaro api client. If you are unsure about a function, input or output you can reference these web pages: https://docs.takaro.io/api-docs/modules/_takaro_apiclient.html
