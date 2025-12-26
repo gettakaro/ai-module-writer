@@ -46,11 +46,32 @@ claude
 > Write me a module that says 'hello' to every player when they join
 ```
 
+## Mock Game Server (Optional)
+
+The Docker setup includes a mock game server for testing modules. It simulates player activity (joins, chat, deaths, etc.) so you can test hooks and commands without a real game server.
+
+### Setup Mock Server
+
+1. Go to your Takaro dashboard
+2. Navigate to **Game Servers** → **Add Server**
+3. Select **Mock** as the server type
+4. Copy the **registration token** provided
+5. Add these to your `.env` file:
+   ```
+   TAKARO_MOCK_REGISTRATION_TOKEN=<paste-your-token>
+   TAKARO_MOCK_IDENTITY_TOKEN=my-local-mock-server
+   ```
+6. Restart Docker: `docker compose up -d`
+
+The mock server will appear in your Takaro dashboard as "Local Mock Server". Install modules on it to test them.
+
 ## How it Works
 
-The Docker container runs the Takaro MCP server on port 18000. Claude Code connects to it via HTTP, allowing you to create and manage Takaro modules directly through Claude.
+The Docker containers run:
+- **Takaro MCP server** (port 18000) - Claude Code connects here to manage modules
+- **Mock game server** (port 3002) - Simulates a game server for testing
 
 This repository includes:
 - **CLAUDE.md**: Instructions for Claude on how to write Takaro modules
 - **Custom commands**: Use `/test-module` in Claude to test and debug your modules
-- **Docker setup**: Pre-configured MCP server for module development
+- **Docker setup**: Pre-configured MCP server and mock game server for module development
