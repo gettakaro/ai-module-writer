@@ -1,6 +1,6 @@
 services:
   takaro-mcp:
-    image: ghcr.io/gettakaro/mcp:0.0.3
+    image: ghcr.io/gettakaro/mcp:latest
     ports:
       - "18000:3000"
     environment:

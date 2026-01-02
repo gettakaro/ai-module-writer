@@ -87,3 +87,9 @@ You can debug failing modules using the events endpoint:
 5. **Empty logs + success:true** = Module bug (wrong method names, missing imports)
 
 **Custom Modules Guide**: https://docs.takaro.io/advanced/custom-modules
+
+
+## CSMM Conversion
+
+Run `/convert-csmm` to convert CSMM exports to Takaro modules.
+See `commands/convert-csmm.md` for details.
