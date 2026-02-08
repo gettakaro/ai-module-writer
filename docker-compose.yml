@@ -8,3 +8,15 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+
+  mock-gameserver:
+    image: ghcr.io/gettakaro/takaro-app-mock-gameserver:latest
+    ports:
+      - "3002:3002"
+    environment:
+      - T_WS_URL=wss://connect.takaro.io
+      - MOCK_SERVER_NAME=Local Mock Server
+      - MOCK_SIM_AUTO_START=true
+    env_file:
+      - .env
+    restart: unless-stopped
