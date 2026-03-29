@@ -1,0 +1,14 @@
+{
+  "trigger": "topcurrency",
+  "description": "List the players with the highest balance.",
+  "helpText": "List of the top players with the highest balance.",
+  "arguments": [
+    {
+      "name": "count",
+      "type": "number",
+      "helpText": "Number of players to display (default 10, max 25).",
+      "position": 0,
+      "defaultValue": "10"
+    }
+  ]
+}

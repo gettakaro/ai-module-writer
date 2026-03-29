@@ -1,0 +1,6 @@
+{
+  "trigger": "confirmtransfer",
+  "description": "Confirms a pending transfer.",
+  "helpText": "Confirms a pending transfer.",
+  "arguments": []
+}

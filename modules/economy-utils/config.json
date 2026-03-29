@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "pendingAmount": {
+      "type": "number",
+      "description": "When a player transfers money, they must confirm the transfer when the amount is equal or above this value. Set to 0 to disable.",
+      "default": 0
+    },
+    "zombieKillReward": {
+      "type": "number",
+      "description": "The default amount of currency a player receives for killing an entity. This can be overridden by roles.",
+      "default": 1,
+      "minimum": 1
+    },
+    "transferTax": {
+      "type": "number",
+      "description": "Tax rate applied to player-to-player transfers. 0.05 means 5% tax. The tax amount vanishes from the economy. Set to 0 to disable.",
+      "default": 0,
+      "minimum": 0,
+      "maximum": 1
+    },
+    "maxTransferAmount": {
+      "type": "number",
+      "description": "Maximum amount a player can transfer in a single transaction. Set to 0 for unlimited.",
+      "default": 0,
+      "minimum": 0
+    },
+    "showBalanceOnLogin": {
+      "type": "boolean",
+      "description": "If true, players will receive a private message showing their balance when they connect to the server.",
+      "default": false
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}

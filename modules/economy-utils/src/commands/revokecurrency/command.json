@@ -1,0 +1,19 @@
+{
+  "trigger": "revokecurrency",
+  "description": "Revoke money from a player.",
+  "helpText": "Revokes money from a player. The money disappears.",
+  "arguments": [
+    {
+      "name": "receiver",
+      "type": "player",
+      "helpText": "The player to revoke currency from.",
+      "position": 0
+    },
+    {
+      "name": "amount",
+      "type": "number",
+      "helpText": "The amount of money.",
+      "position": 1
+    }
+  ]
+}

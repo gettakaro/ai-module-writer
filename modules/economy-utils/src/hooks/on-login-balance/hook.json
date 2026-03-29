@@ -1,0 +1,4 @@
+{
+  "eventType": "player-connected",
+  "description": "Shows the player their balance when they connect to the server."
+}

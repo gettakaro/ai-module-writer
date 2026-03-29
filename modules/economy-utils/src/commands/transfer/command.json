@@ -1,0 +1,19 @@
+{
+  "trigger": "transfer",
+  "description": "Transfer money to another player.",
+  "helpText": "Transfer money to another player.",
+  "arguments": [
+    {
+      "name": "receiver",
+      "type": "player",
+      "helpText": "The player to transfer money to.",
+      "position": 0
+    },
+    {
+      "name": "amount",
+      "type": "number",
+      "helpText": "The amount of money to transfer.",
+      "position": 1
+    }
+  ]
+}

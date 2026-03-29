@@ -1,0 +1,4 @@
+{
+  "temporalValue": "*/5 * * * *",
+  "description": "Awards currency to players for entity kills since the last run."
+}

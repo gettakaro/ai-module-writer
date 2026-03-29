@@ -1,0 +1,6 @@
+{
+  "trigger": "balance",
+  "description": "Check your currency balance.",
+  "helpText": "Check your balance.",
+  "arguments": []
+}

@@ -1,0 +1,6 @@
+{
+  "name": "test-economy-utils",
+  "description": "Currency management, player-to-player transfers, in-game shop browsing, and entity kill rewards.",
+  "version": "latest",
+  "supportedGames": ["all"]
+}

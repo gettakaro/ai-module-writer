@@ -1,0 +1,14 @@
+[
+  {
+    "permission": "ECONOMY_UTILS_MANAGE_CURRENCY",
+    "friendlyName": "Manage currency",
+    "description": "Allows players to manage currency of other players. This includes granting and revoking currency.",
+    "canHaveCount": false
+  },
+  {
+    "permission": "ZOMBIE_KILL_REWARD_OVERRIDE",
+    "friendlyName": "Zombie kill reward override",
+    "description": "Allows a role to override the amount of currency a player receives for killing an entity.",
+    "canHaveCount": true
+  }
+]
