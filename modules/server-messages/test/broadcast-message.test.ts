@@ -235,6 +235,29 @@ describe('server-messages: broadcast-message cronjob', () => {
     );
   });
 
+  it('honors fractional minPlayers thresholds without rounding down', async () => {
+    const expectedOnlineCount = await getOnlinePlayerCount();
+    const minPlayers = expectedOnlineCount + 0.1;
+
+    await reinstallModule({
+      messages: ['Need just a bit more'],
+      mode: 'sequential',
+      minPlayers,
+    });
+
+    const { success, logs } = await triggerBroadcast();
+
+    assert.equal(success, true, `Expected cronjob to succeed, logs: ${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((msg) => msg.includes(`below minPlayers ${minPlayers}`)),
+      `Expected fractional minPlayers skip log, got: ${JSON.stringify(logs)}`,
+    );
+    assert.ok(
+      logs.every((msg) => !msg.includes('sent message')),
+      `Expected no broadcast when onlineCount=${expectedOnlineCount} and minPlayers=${minPlayers}, got: ${JSON.stringify(logs)}`,
+    );
+  });
+
   it('skips when no players are online', async () => {
     await reinstallModule({
       messages: ['Anyone there?'],
