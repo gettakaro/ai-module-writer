@@ -50,17 +50,29 @@ describe('server-messages: broadcast-message cronjob', () => {
   });
 
   after(async () => {
-    try {
-      await uninstallModule(client, moduleId, ctx.gameServer.id);
-    } catch (err) {
-      console.error('Cleanup: failed to uninstall module:', err);
+    if (client && moduleId && ctx?.gameServer?.id) {
+      try {
+        await uninstallModule(client, moduleId, ctx.gameServer.id);
+      } catch (err) {
+        console.error('Cleanup: failed to uninstall module:', err);
+      }
     }
-    try {
-      await deleteModule(client, moduleId);
-    } catch (err) {
-      console.error('Cleanup: failed to delete module:', err);
+
+    if (client && moduleId) {
+      try {
+        await deleteModule(client, moduleId);
+      } catch (err) {
+        console.error('Cleanup: failed to delete module:', err);
+      }
     }
-    await stopMockServer(ctx.server, client, ctx.gameServer.id);
+
+    if (client && ctx?.server && ctx?.gameServer?.id) {
+      try {
+        await stopMockServer(ctx.server, client, ctx.gameServer.id);
+      } catch (err) {
+        console.error('Cleanup: failed to stop mock server:', err);
+      }
+    }
   });
 
   async function clearMessageIndex(): Promise<void> {
@@ -124,6 +136,8 @@ describe('server-messages: broadcast-message cronjob', () => {
     gameServerName?: string | null | undefined;
     getOneError?: Error;
     sendMessageError?: Error;
+    gameServerId?: string;
+    moduleId?: string;
   }): Promise<{
     logs: string[];
     errors: string[];
@@ -148,14 +162,16 @@ describe('server-messages: broadcast-message cronjob', () => {
     const setIndexes: number[] = [];
     const onlineCount = options.onlineCount ?? 3;
     const storedIndex = options.storedIndex ?? 0;
+    const unitGameServerId = options.gameServerId ?? 'unit-test-gameserver-id';
+    const unitModuleId = options.moduleId ?? 'unit-test-module-id';
 
     const mockGlobal = {
       __mocks: {
         helpers: {
           data: {
-            gameServerId: ctx.gameServer.id,
+            gameServerId: unitGameServerId,
             module: {
-              moduleId,
+              moduleId: unitModuleId,
               userConfig: options.userConfig,
             },
           },
