@@ -117,19 +117,6 @@ describe('server-messages: broadcast-message cronjob', () => {
     return { success, logs };
   }
 
-  async function updateGameServerName(name: string): Promise<void> {
-    const updated = await client.gameserver.gameServerControllerUpdate(ctx.gameServer.id, {
-      name,
-      connectionInfo: ctx.gameServer.connectionInfo,
-      type: ctx.gameServer.type as never,
-      enabled: ctx.gameServer.enabled,
-      reachable: ctx.gameServer.reachable,
-    });
-
-    ctx.gameServer = updated.data.data;
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-
   async function executeCronjobUnitTest(options: {
     userConfig: Record<string, unknown>;
     onlineCount?: number;
@@ -270,32 +257,33 @@ describe('server-messages: broadcast-message cronjob', () => {
     );
   });
 
-  it('empty messages skips', async () => {
-    await reinstallModule({
-      messages: [],
-      mode: 'sequential',
-      minPlayers: 0,
+  it('empty messages skips without sending a broadcast', async () => {
+    const result = await executeCronjobUnitTest({
+      userConfig: {
+        messages: [],
+        mode: 'sequential',
+        minPlayers: 0,
+      },
     });
 
-    const result = await triggerBroadcast();
-
-    assert.equal(result.success, true, `Expected cronjob success, logs: ${JSON.stringify(result.logs)}`);
+    assert.deepEqual(result.sentMessages, []);
     assert.ok(
       result.logs.some((msg) => msg.includes('skipping broadcast because no messages are configured')),
       `Expected empty-messages skip log, got: ${JSON.stringify(result.logs)}`,
     );
   });
 
-  it('minPlayers threshold skips broadcast', async () => {
-    await reinstallModule({
-      messages: ['Needs more players'],
-      mode: 'sequential',
-      minPlayers: 999,
+  it('minPlayers threshold skips broadcast without sending a message', async () => {
+    const result = await executeCronjobUnitTest({
+      userConfig: {
+        messages: ['Needs more players'],
+        mode: 'sequential',
+        minPlayers: 999,
+      },
+      onlineCount: 3,
     });
 
-    const result = await triggerBroadcast();
-
-    assert.equal(result.success, true, `Expected cronjob success, logs: ${JSON.stringify(result.logs)}`);
+    assert.deepEqual(result.sentMessages, []);
     assert.ok(
       result.logs.some((msg) => msg.includes('below minPlayers 999')),
       `Expected minPlayers skip log, got: ${JSON.stringify(result.logs)}`,
@@ -319,27 +307,19 @@ describe('server-messages: broadcast-message cronjob', () => {
   });
 
   it('template variables resolve serverName from the gameserver lookup', async () => {
-    const originalName = ctx.gameServer.name;
-    const renamedServer = `Broadcast Test ${Date.now()}`;
-
-    await updateGameServerName(renamedServer);
     await reinstallModule({
       messages: ['Welcome to {serverName}'],
       mode: 'sequential',
       minPlayers: 0,
     });
 
-    try {
-      const result = await triggerBroadcast();
+    const result = await triggerBroadcast();
 
-      assert.equal(result.success, true, `Expected cronjob success, logs: ${JSON.stringify(result.logs)}`);
-      assert.ok(
-        result.logs.some((msg) => msg.includes(`sent message: Welcome to ${renamedServer}`)),
-        `Expected resolved serverName in logs, got: ${JSON.stringify(result.logs)}`,
-      );
-    } finally {
-      await updateGameServerName(originalName);
-    }
+    assert.equal(result.success, true, `Expected cronjob success, logs: ${JSON.stringify(result.logs)}`);
+    assert.ok(
+      result.logs.some((msg) => msg.includes(`sent message: Welcome to ${ctx.gameServer.name}`)),
+      `Expected resolved serverName in logs, got: ${JSON.stringify(result.logs)}`,
+    );
   });
 
   it('template variables fall back to Unknown Server when the lookup fails', async () => {
