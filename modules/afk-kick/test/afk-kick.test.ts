@@ -82,6 +82,20 @@ describe('afk-kick: check-afk cronjob', () => {
       ctx.gameServer.id,
       ['IMMUNE_TO_AFK_KICK'],
     );
+
+    // The cron runs on a 1-minute schedule. If it auto-fired during setup, the tracking
+    // variable would already have idleCount=1 for all players, causing the sequential
+    // idle-count tests to fail. Delete any stale tracking state so tests start clean.
+    const staleVars = await client.variable.variableControllerSearch({
+      filters: {
+        key: ['afk_tracking'],
+        gameServerId: [ctx.gameServer.id],
+        moduleId: [moduleId],
+      },
+    });
+    for (const v of staleVars.data.data) {
+      await client.variable.variableControllerDelete(v.id);
+    }
   });
 
   after(async () => {

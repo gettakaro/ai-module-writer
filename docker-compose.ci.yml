@@ -1,0 +1,136 @@
+services:
+  postgresql:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: takaro-ci
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: takaro-ci-db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U takaro-ci -d takaro-ci-db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgresql_kratos:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: takaro-ci
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: takaro-ci-db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U takaro-ci -d takaro-ci-db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  kratos-migrate:
+    image: oryd/kratos:v1.2.0
+    depends_on:
+      postgresql_kratos:
+        condition: service_healthy
+    environment:
+      DSN: postgres://takaro-ci:${POSTGRES_PASSWORD}@postgresql_kratos:5432/takaro-ci-db?sslmode=disable
+    volumes:
+      - ./containers/ory/kratos:/etc/config/kratos
+    command: migrate sql -e --yes -c /etc/config/kratos/kratos.yml
+    restart: on-failure
+
+  kratos:
+    image: oryd/kratos:v1.2.0
+    depends_on:
+      postgresql_kratos:
+        condition: service_healthy
+      kratos-migrate:
+        condition: service_completed_successfully
+    environment:
+      DSN: postgres://takaro-ci:${POSTGRES_PASSWORD}@postgresql_kratos:5432/takaro-ci-db?sslmode=disable
+    volumes:
+      - ./containers/ory/kratos:/etc/config/kratos
+    command: serve -c /etc/config/kratos/kratos.yml --dev --watch-courier
+    ports:
+      - "4433:4433"
+      - "4434:4434"
+    restart: unless-stopped
+
+  mailhog:
+    image: mailhog/mailhog
+    logging:
+      driver: none
+
+  takaro_api:
+    # DOCKER_TAG defaults to 'latest'; set explicitly for reproducible builds
+    image: ${AWS_ECR_REGISTRY}/takaro-app-api:${DOCKER_TAG:-latest}
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      LOGGING_LEVEL: warn
+      REDIS_HOST: redis
+      JWT_SECRET: ${JWT_SECRET}
+      FUNCTIONS_EXECUTION_MODE: local
+      POSTGRES_USER: takaro-ci
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: takaro-ci-db
+      POSTGRES_HOST: postgresql
+      POSTGRES_ENCRYPTION_KEY: ${POSTGRES_ENCRYPTION_KEY}
+      ADMIN_CLIENT_SECRET: ${ADMIN_CLIENT_SECRET}
+      TAKARO_HOST: http://takaro_api:3000
+      MOCK_GAMESERVER_HOST: http://takaro_mock_gameserver:3002
+      CORS_ALLOWED_ORIGINS: http://127.0.0.1:13000
+      CONNECTOR_HOST: http://takaro_connector:3003
+      KRATOS_ADMIN_URL: http://kratos:4434
+    ports:
+      - "13000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  takaro_connector:
+    # DOCKER_TAG defaults to 'latest'; set explicitly for reproducible builds
+    image: ${AWS_ECR_REGISTRY}/takaro-app-connector:${DOCKER_TAG:-latest}
+    depends_on:
+      redis:
+        condition: service_healthy
+      takaro_api:
+        condition: service_healthy
+    environment:
+      LOGGING_LEVEL: warn
+      REDIS_HOST: redis
+      ADMIN_CLIENT_SECRET: ${ADMIN_CLIENT_SECRET}
+      TAKARO_HOST: http://takaro_api:3000
+    ports:
+      - "3003:3003"
+      - "3004:3004"
+    restart: unless-stopped
+
+  takaro_mock_gameserver:
+    # DOCKER_TAG defaults to 'latest'; set explicitly for reproducible builds
+    image: ${AWS_ECR_REGISTRY}/takaro-app-mock-gameserver:${DOCKER_TAG:-latest}
+    depends_on:
+      redis:
+        condition: service_healthy
+      takaro_api:
+        condition: service_healthy
+    environment:
+      LOGGING_LEVEL: warn
+      REDIS_HOST: redis
+      T_WS_URL: ws://takaro_connector:3004
+    ports:
+      - "3002:3002"
+    restart: unless-stopped
