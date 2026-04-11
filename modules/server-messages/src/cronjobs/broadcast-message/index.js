@@ -43,6 +43,7 @@ async function main() {
 
   let selectedMessage = messages[0];
   let selectedIndex = 0;
+  let nextIndex = null;
 
   if (mode === 'random') {
     selectedIndex = Math.floor(Math.random() * messages.length);
@@ -52,8 +53,7 @@ async function main() {
     const storedIndex = await getMessageIndex(gameServerId, moduleId);
     selectedIndex = storedIndex % messages.length;
     selectedMessage = messages[selectedIndex] ?? messages[0];
-    const nextIndex = (selectedIndex + 1) % messages.length;
-    await setMessageIndex(gameServerId, moduleId, nextIndex);
+    nextIndex = (selectedIndex + 1) % messages.length;
     console.log(`broadcast-message: sequential index=${selectedIndex} nextIndex=${nextIndex}`);
   }
 
@@ -77,6 +77,10 @@ async function main() {
     message: resolvedMessage,
     opts: {},
   });
+
+  if (mode === 'sequential' && nextIndex !== null) {
+    await setMessageIndex(gameServerId, moduleId, nextIndex);
+  }
 
   console.log(`broadcast-message: sent message: ${resolvedMessage}`);
 }

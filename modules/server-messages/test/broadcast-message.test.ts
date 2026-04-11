@@ -123,7 +123,14 @@ describe('server-messages: broadcast-message cronjob', () => {
     storedIndex?: number;
     gameServerName?: string | null | undefined;
     getOneError?: Error;
-  }): Promise<{ logs: string[]; errors: string[]; sentMessages: string[] }> {
+    sendMessageError?: Error;
+  }): Promise<{
+    logs: string[];
+    errors: string[];
+    sentMessages: string[];
+    setIndexes: number[];
+    executionError: unknown;
+  }> {
     const cronjobSource = await readFile(path.join(MODULE_DIR, 'src/cronjobs/broadcast-message/index.js'), 'utf8');
     const transformedSource = cronjobSource
       .replace(
@@ -138,6 +145,7 @@ describe('server-messages: broadcast-message cronjob', () => {
     const logs: string[] = [];
     const errors: string[] = [];
     const sentMessages: string[] = [];
+    const setIndexes: number[] = [];
     const onlineCount = options.onlineCount ?? 3;
     const storedIndex = options.storedIndex ?? 0;
 
@@ -171,6 +179,7 @@ describe('server-messages: broadcast-message cronjob', () => {
                 };
               },
               gameServerControllerSendMessage: async (_gameServerId: string, payload: { message: string }) => {
+                if (options.sendMessageError) throw options.sendMessageError;
                 sentMessages.push(payload.message);
               },
             },
@@ -178,7 +187,9 @@ describe('server-messages: broadcast-message cronjob', () => {
         },
         moduleHelpers: {
           getMessageIndex: async () => storedIndex,
-          setMessageIndex: async () => undefined,
+          setMessageIndex: async (_gameServerId: string, _moduleId: string, index: number) => {
+            setIndexes.push(index);
+          },
           resolveTemplates: (message: string, vars: Record<string, string | number>) => message.replace(
             /\{(\w+)\}/g,
             (_match: string, key: string) => String(vars[key] ?? `{${key}}`),
@@ -197,9 +208,14 @@ describe('server-messages: broadcast-message cronjob', () => {
     ) => (...callArgs: unknown[]) => Promise<void>;
     const runCronjob = new AsyncFunction('globalThis', 'console', transformedSource);
 
-    await runCronjob(mockGlobal, mockConsole);
+    let executionError: unknown;
+    try {
+      await runCronjob(mockGlobal, mockConsole);
+    } catch (err) {
+      executionError = err;
+    }
 
-    return { logs, errors, sentMessages };
+    return { logs, errors, sentMessages, setIndexes, executionError };
   }
 
   it('sequential cycles in order', async () => {
@@ -340,6 +356,43 @@ describe('server-messages: broadcast-message cronjob', () => {
     assert.ok(
       result.errors.some((msg) => msg.includes('failed to fetch server name for template resolution')),
       `Expected server lookup failure log, got: ${JSON.stringify(result.errors)}`,
+    );
+  });
+
+  it('does not advance the sequential index when sending fails', async () => {
+    const failedAttempt = await executeCronjobUnitTest({
+      userConfig: {
+        messages: ['Alpha', 'Bravo', 'Charlie'],
+        mode: 'sequential',
+        minPlayers: 0,
+      },
+      storedIndex: 1,
+      sendMessageError: new Error('send failed'),
+    });
+
+    assert.match(String(failedAttempt.executionError), /send failed/);
+    assert.deepEqual(failedAttempt.sentMessages, []);
+    assert.deepEqual(failedAttempt.setIndexes, []);
+    assert.ok(
+      failedAttempt.logs.some((msg) => msg.includes('sequential index=1 nextIndex=2')),
+      `Expected failing attempt to select the second message, got: ${JSON.stringify(failedAttempt.logs)}`,
+    );
+
+    const successfulRetry = await executeCronjobUnitTest({
+      userConfig: {
+        messages: ['Alpha', 'Bravo', 'Charlie'],
+        mode: 'sequential',
+        minPlayers: 0,
+      },
+      storedIndex: 1,
+    });
+
+    assert.equal(successfulRetry.executionError, undefined);
+    assert.deepEqual(successfulRetry.sentMessages, ['Bravo']);
+    assert.deepEqual(successfulRetry.setIndexes, [2]);
+    assert.ok(
+      successfulRetry.logs.some((msg) => msg.includes('sequential index=1 nextIndex=2')),
+      `Expected retry to reuse the same sequential index, got: ${JSON.stringify(successfulRetry.logs)}`,
     );
   });
 });
