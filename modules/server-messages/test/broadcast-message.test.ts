@@ -1,5 +1,6 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { Client, EventSearchInputAllowedFiltersEventNameEnum } from '@takaro/apiclient';
@@ -116,6 +117,104 @@ describe('server-messages: broadcast-message cronjob', () => {
     return { success, logs };
   }
 
+  async function updateGameServerName(name: string): Promise<void> {
+    const updated = await client.gameserver.gameServerControllerUpdate(ctx.gameServer.id, {
+      name,
+      connectionInfo: ctx.gameServer.connectionInfo,
+      type: ctx.gameServer.type as never,
+      enabled: ctx.gameServer.enabled,
+      reachable: ctx.gameServer.reachable,
+    });
+
+    ctx.gameServer = updated.data.data;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  async function executeCronjobUnitTest(options: {
+    userConfig: Record<string, unknown>;
+    onlineCount?: number;
+    storedIndex?: number;
+    gameServerName?: string | null | undefined;
+    getOneError?: Error;
+  }): Promise<{ logs: string[]; errors: string[]; sentMessages: string[] }> {
+    const cronjobSource = await readFile(path.join(MODULE_DIR, 'src/cronjobs/broadcast-message/index.js'), 'utf8');
+    const transformedSource = cronjobSource
+      .replace(
+        "import { data, takaro } from '@takaro/helpers';",
+        'const { data, takaro } = globalThis.__mocks.helpers;',
+      )
+      .replace(
+        "import { getMessageIndex, setMessageIndex, resolveTemplates } from './server-messages-helpers.js';",
+        'const { getMessageIndex, setMessageIndex, resolveTemplates } = globalThis.__mocks.moduleHelpers;',
+      );
+
+    const logs: string[] = [];
+    const errors: string[] = [];
+    const sentMessages: string[] = [];
+    const onlineCount = options.onlineCount ?? 3;
+    const storedIndex = options.storedIndex ?? 0;
+
+    const mockGlobal = {
+      __mocks: {
+        helpers: {
+          data: {
+            gameServerId: ctx.gameServer.id,
+            module: {
+              moduleId,
+              userConfig: options.userConfig,
+            },
+          },
+          takaro: {
+            playerOnGameserver: {
+              playerOnGameServerControllerSearch: async () => ({
+                data: {
+                  meta: { total: onlineCount },
+                },
+              }),
+            },
+            gameserver: {
+              gameServerControllerGetOne: async () => {
+                if (options.getOneError) throw options.getOneError;
+                return {
+                  data: {
+                    data: {
+                      name: options.gameServerName,
+                    },
+                  },
+                };
+              },
+              gameServerControllerSendMessage: async (_gameServerId: string, payload: { message: string }) => {
+                sentMessages.push(payload.message);
+              },
+            },
+          },
+        },
+        moduleHelpers: {
+          getMessageIndex: async () => storedIndex,
+          setMessageIndex: async () => undefined,
+          resolveTemplates: (message: string, vars: Record<string, string | number>) => message.replace(
+            /\{(\w+)\}/g,
+            (_match: string, key: string) => String(vars[key] ?? `{${key}}`),
+          ),
+        },
+      },
+    };
+
+    const mockConsole = {
+      log: (...args: unknown[]) => logs.push(args.map(String).join(' ')),
+      error: (...args: unknown[]) => errors.push(args.map(String).join(' ')),
+    };
+
+    const AsyncFunction = Object.getPrototypeOf(async function noop() {}).constructor as new (
+      ...args: string[]
+    ) => (...callArgs: unknown[]) => Promise<void>;
+    const runCronjob = new AsyncFunction('globalThis', 'console', transformedSource);
+
+    await runCronjob(mockGlobal, mockConsole);
+
+    return { logs, errors, sentMessages };
+  }
+
   it('sequential cycles in order', async () => {
     await reinstallModule({
       messages: ['Alpha', 'Bravo', 'Charlie'],
@@ -216,6 +315,51 @@ describe('server-messages: broadcast-message cronjob', () => {
     assert.ok(
       result.logs.some((msg) => msg.includes('sent message: Players online: 3')),
       `Expected resolved playerCount in logs, got: ${JSON.stringify(result.logs)}`,
+    );
+  });
+
+  it('template variables resolve serverName from the gameserver lookup', async () => {
+    const originalName = ctx.gameServer.name;
+    const renamedServer = `Broadcast Test ${Date.now()}`;
+
+    await updateGameServerName(renamedServer);
+    await reinstallModule({
+      messages: ['Welcome to {serverName}'],
+      mode: 'sequential',
+      minPlayers: 0,
+    });
+
+    try {
+      const result = await triggerBroadcast();
+
+      assert.equal(result.success, true, `Expected cronjob success, logs: ${JSON.stringify(result.logs)}`);
+      assert.ok(
+        result.logs.some((msg) => msg.includes(`sent message: Welcome to ${renamedServer}`)),
+        `Expected resolved serverName in logs, got: ${JSON.stringify(result.logs)}`,
+      );
+    } finally {
+      await updateGameServerName(originalName);
+    }
+  });
+
+  it('template variables fall back to Unknown Server when the lookup fails', async () => {
+    const result = await executeCronjobUnitTest({
+      userConfig: {
+        messages: ['Welcome to {serverName}'],
+        mode: 'sequential',
+        minPlayers: 0,
+      },
+      getOneError: new Error('lookup failed'),
+    });
+
+    assert.deepEqual(result.sentMessages, ['Welcome to Unknown Server']);
+    assert.ok(
+      result.logs.some((msg) => msg.includes('sent message: Welcome to Unknown Server')),
+      `Expected Unknown Server fallback log, got: ${JSON.stringify(result.logs)}`,
+    );
+    assert.ok(
+      result.errors.some((msg) => msg.includes('failed to fetch server name for template resolution')),
+      `Expected server lookup failure log, got: ${JSON.stringify(result.errors)}`,
     );
   });
 });
