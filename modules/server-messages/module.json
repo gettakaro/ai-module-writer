@@ -1,0 +1,55 @@
+{
+  "name": "test-server-messages",
+  "description": "Broadcasts rotating server announcements to online players on a schedule.",
+  "version": "latest",
+  "supportedGames": [
+    "all"
+  ],
+  "config": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "messages": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "Welcome!",
+          "Join our Discord!",
+          "Type /help for commands"
+        ],
+        "description": "Messages to rotate through"
+      },
+      "mode": {
+        "type": "string",
+        "enum": [
+          "sequential",
+          "random"
+        ],
+        "default": "sequential",
+        "description": "How to select the next announcement"
+      },
+      "minPlayers": {
+        "type": "number",
+        "minimum": 0,
+        "default": 0,
+        "description": "Minimum online players required before broadcasting (0 disables the threshold, but broadcasts still skip when nobody is online)"
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  },
+  "cronJobs": {
+    "broadcast-message": {
+      "temporalValue": "*/30 * * * *",
+      "description": "Broadcast a rotating announcement to all online players",
+      "function": "src/cronjobs/broadcast-message/index.js"
+    }
+  },
+  "functions": {
+    "server-messages-helpers": {
+      "function": "src/functions/server-messages-helpers.js"
+    }
+  }
+}
