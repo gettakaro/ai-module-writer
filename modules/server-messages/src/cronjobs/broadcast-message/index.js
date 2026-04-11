@@ -46,12 +46,13 @@ async function main() {
   }
 
   let selectedIndex = 0;
+  let nextSequentialIndex;
   if (mode === 'random') {
     selectedIndex = Math.floor(Math.random() * messages.length);
   } else {
     const currentIndex = await getMessageIndex(gameServerId, mod.moduleId);
     selectedIndex = currentIndex % messages.length;
-    await setMessageIndex(gameServerId, mod.moduleId, (selectedIndex + 1) % messages.length);
+    nextSequentialIndex = (selectedIndex + 1) % messages.length;
   }
 
   let resolvedMessage = messages[selectedIndex];
@@ -70,6 +71,10 @@ async function main() {
     message: resolvedMessage,
     opts: {},
   });
+
+  if (mode === 'sequential') {
+    await setMessageIndex(gameServerId, mod.moduleId, nextSequentialIndex);
+  }
 
   console.log(
     `broadcast-message: sent message (mode=${mode}, index=${selectedIndex}, onlineCount=${onlineCount}): ${resolvedMessage}`,

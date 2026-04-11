@@ -96,6 +96,19 @@ describe('server-messages: broadcast-message cronjob', () => {
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 
+  async function getOnlinePlayerCount(): Promise<number> {
+    const res = await client.playerOnGameserver.playerOnGameServerControllerSearch({
+      filters: {
+        gameServerId: [ctx.gameServer.id],
+        online: [true],
+      },
+      page: 0,
+      limit: 1,
+    });
+
+    return res.data.meta.total ?? 0;
+  }
+
   async function triggerBroadcast(): Promise<{ success: boolean; logs: string[] }> {
     const before = new Date();
 
@@ -205,19 +218,38 @@ describe('server-messages: broadcast-message cronjob', () => {
     );
   });
 
-  it('template variables resolve', async () => {
+  it('template variables resolve playerCount using live player data', async () => {
     await reinstallModule({
       messages: ['There are {playerCount} players online'],
       mode: 'sequential',
       minPlayers: 0,
     });
 
+    const expectedOnlineCount = await getOnlinePlayerCount();
     const { success, logs } = await triggerBroadcast();
 
     assert.equal(success, true, `Expected cronjob to succeed, logs: ${JSON.stringify(logs)}`);
     assert.ok(
-      logs.some((msg) => msg.includes(`There are ${ctx.players.length} players online`)),
-      `Expected playerCount template to resolve to ${ctx.players.length}, got: ${JSON.stringify(logs)}`,
+      logs.some((msg) => msg.includes(`There are ${expectedOnlineCount} players online`)),
+      `Expected playerCount template to resolve to ${expectedOnlineCount}, got: ${JSON.stringify(logs)}`,
+    );
+  });
+
+  it('template variables resolve serverName', async () => {
+    await reinstallModule({
+      messages: ['Welcome to {serverName}'],
+      mode: 'sequential',
+      minPlayers: 0,
+    });
+
+    const gameServer = (await client.gameserver.gameServerControllerGetOne(ctx.gameServer.id)).data.data;
+    const expectedServerName = gameServer?.name ?? 'Unknown Server';
+    const { success, logs } = await triggerBroadcast();
+
+    assert.equal(success, true, `Expected cronjob to succeed, logs: ${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((msg) => msg.includes(`Welcome to ${expectedServerName}`)),
+      `Expected serverName template to resolve to ${expectedServerName}, got: ${JSON.stringify(logs)}`,
     );
   });
 });
