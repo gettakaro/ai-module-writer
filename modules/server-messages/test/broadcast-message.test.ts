@@ -109,6 +109,23 @@ describe('server-messages: broadcast-message cronjob', () => {
     return res.data.meta.total ?? 0;
   }
 
+  async function waitForOnlinePlayerCount(expectedCount: number): Promise<void> {
+    const maxWaitMs = 30000;
+    const pollIntervalMs = 2000;
+    const start = Date.now();
+
+    while (Date.now() - start < maxWaitMs) {
+      const onlineCount = await getOnlinePlayerCount();
+      if (onlineCount === expectedCount) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+
+    const finalCount = await getOnlinePlayerCount();
+    throw new Error(`Timed out waiting for online player count ${expectedCount}; final count was ${finalCount}`);
+  }
+
   async function triggerBroadcast(): Promise<{ success: boolean; logs: string[] }> {
     const before = new Date();
 
@@ -216,6 +233,30 @@ describe('server-messages: broadcast-message cronjob', () => {
       logs.some((msg) => msg.includes('below minPlayers 999')),
       `Expected minPlayers skip log, got: ${JSON.stringify(logs)}`,
     );
+  });
+
+  it('skips when no players are online', async () => {
+    await reinstallModule({
+      messages: ['Anyone there?'],
+      mode: 'sequential',
+      minPlayers: 0,
+    });
+
+    await ctx.server.executeConsoleCommand('disconnectAll');
+    await waitForOnlinePlayerCount(0);
+
+    try {
+      const { success, logs } = await triggerBroadcast();
+
+      assert.equal(success, true, `Expected cronjob to succeed, logs: ${JSON.stringify(logs)}`);
+      assert.ok(
+        logs.some((msg) => msg.includes('skipping') && msg.includes('no players online')),
+        `Expected no-players-online skip log, got: ${JSON.stringify(logs)}`,
+      );
+    } finally {
+      await ctx.server.executeConsoleCommand('connectAll');
+      await waitForOnlinePlayerCount(ctx.players.length);
+    }
   });
 
   it('template variables resolve playerCount using live player data', async () => {
