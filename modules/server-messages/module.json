@@ -1,0 +1,68 @@
+{
+  "name": "test-server-messages",
+  "description": "Broadcast scheduled server announcements with sequential or weighted shuffle-bag rotation.",
+  "version": "latest",
+  "supportedGames": [
+    "all"
+  ],
+  "config": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "messages": {
+        "type": "array",
+        "description": "Messages to broadcast. Empty arrays are allowed and cause the cronjob to exit quietly.",
+        "default": [],
+        "items": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "description": "Exact message text to broadcast. Supports {playerCount} and {serverName} placeholders."
+            },
+            "weight": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "description": "Relative weight used only when order is set to random."
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "interval": {
+        "type": "string",
+        "default": "*/15 * * * *",
+        "description": "Cron expression for the announcement schedule. The cronjob is defined with the same default expression for this module version."
+      },
+      "order": {
+        "type": "string",
+        "enum": [
+          "sequential",
+          "random"
+        ],
+        "default": "sequential",
+        "description": "Message rotation strategy. Random uses a weighted shuffle-bag."
+      }
+    },
+    "required": [
+      "messages"
+    ],
+    "additionalProperties": false
+  },
+  "cronJobs": {
+    "broadcast-messages": {
+      "temporalValue": "*/15 * * * *",
+      "description": "Broadcast the next configured server message to all connected players.",
+      "function": "src/cronjobs/broadcast-messages/index.js"
+    }
+  },
+  "functions": {
+    "server-message-helpers": {
+      "function": "src/functions/server-message-helpers.js"
+    }
+  }
+}
