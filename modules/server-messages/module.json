@@ -11,13 +11,8 @@
     "properties": {
       "messages": {
         "type": "array",
-        "description": "Messages to broadcast. Add at least one non-empty message before installing so the module cannot sit in a silent no-op state.",
-        "default": [
-          {
-            "text": "Welcome to {serverName}! There are {playerCount} players online."
-          }
-        ],
-        "minItems": 1,
+        "description": "Messages to broadcast. Empty arrays are allowed and cause the cronjob to exit quietly without sending or advancing rotation state.",
+        "default": [],
         "maxItems": 100,
         "items": {
           "type": "object",
@@ -33,7 +28,7 @@
               "minimum": 1,
               "maximum": 20,
               "default": 1,
-              "description": "Relative weight used only when order is set to random. Higher values are capped to keep shuffle-bag state bounded."
+              "description": "Relative weight used only when order is set to random. Enter a whole number from 1 to 20; larger values are rejected during validation."
             }
           },
           "required": [
@@ -51,7 +46,7 @@
           "0 * * * *",
           "30 18 * * 1-5"
         ],
-        "description": "Five-field cron expression for the announcement schedule (minute hour day-of-month month day-of-week). Matching is evaluated in UTC because the module compares against getUTC* values. Common examples: */15 * * * * = every 15 minutes, 0 * * * * = at the top of every UTC hour, 30 18 * * 1-5 = 18:30 UTC on weekdays. If you want a local 18:30 announcement, convert that time to UTC before saving. The module polls every minute and only broadcasts on ticks that match this expression."
+        "description": "Five-field cron expression for the announcement schedule (minute hour day-of-month month day-of-week). Matching is evaluated in UTC because the module compares against getUTC* values. Common examples: */15 * * * * = every 15 minutes, 0 * * * * = at the top of every UTC hour, 30 18 * * 1-5 = 18:30 UTC on weekdays. To reduce timezone mistakes, pick the UTC wall-clock time you actually want to run: for example 09:00 New York is usually 14:00 UTC in winter and 13:00 UTC in summer, while 09:00 Berlin is usually 08:00 UTC in winter and 07:00 UTC in summer. Re-check the UTC value when daylight saving rules change. The module polls every minute and only broadcasts on ticks that match this expression."
       },
       "order": {
         "type": "string",

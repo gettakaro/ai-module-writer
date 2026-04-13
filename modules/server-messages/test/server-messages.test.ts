@@ -21,11 +21,11 @@ const __dirname = path.dirname(__filename);
 const MODULE_DIR = path.resolve(__dirname, '..');
 const HELPER_SOURCE_PATH = path.resolve(MODULE_DIR, 'src/functions/server-message-helpers.js');
 const helperModuleSource = await fs.readFile(HELPER_SOURCE_PATH, 'utf8');
-const helperFns = await import(
-  `data:text/javascript;base64,${Buffer.from(
-    helperModuleSource.replace("import { takaro } from '@takaro/helpers';", 'const takaro = {};'),
-  ).toString('base64')}`
-);
+const helperModuleDataUrl = `data:text/javascript;base64,${Buffer.from(
+  helperModuleSource.replace("import { takaro } from '@takaro/helpers';", 'const takaro = {};'),
+).toString('base64')}`;
+const helperFns = await import(helperModuleDataUrl);
+const cronjobSource = await fs.readFile(path.resolve(MODULE_DIR, 'src/cronjobs/broadcast-messages/index.js'), 'utf8');
 const {
   MAX_MESSAGES,
   MAX_WEIGHT,
@@ -369,19 +369,20 @@ describe('server-messages integration', () => {
     assert.equal(parseJsonLogField(resumed.logs, 'rendered'), 'Alpha message');
   });
 
-  it('rejects empty message lists, whitespace-only messages, and invalid cron expressions at install time', async () => {
-    await safeUninstall();
+  it('allows empty message lists to exit quietly, while still rejecting whitespace-only messages and invalid cron expressions at install time', async () => {
+    await reinstall({
+      messages: [],
+      order: 'sequential',
+      interval: '* * * * *',
+    });
 
-    await assert.rejects(
-      installModule(client, versionId, ctx.gameServer.id, {
-        userConfig: {
-          messages: [],
-          order: 'sequential',
-          interval: '* * * * *',
-        },
-      }),
-      /400|minitems|bad request|validation/i,
-    );
+    const emptyRun = await triggerCronjob();
+    assert.equal(emptyRun.success, true, `Expected empty-message cron trigger to succeed, logs: ${JSON.stringify(emptyRun.logs)}`);
+    assert.ok(emptyRun.logs.some((log) => log.includes('no messages configured')));
+    await assertNoEvent(EventSearchInputAllowedFiltersEventNameEnum.ChatMessage, emptyRun.triggeredAt);
+    assert.equal(await readModuleVariable(STATE_KEY), null, 'Expected empty-message runs to avoid creating rotation state');
+
+    await safeUninstall();
 
     await assert.rejects(
       installModule(client, versionId, ctx.gameServer.id, {
@@ -411,12 +412,12 @@ describe('server-messages integration', () => {
 
   it('skips valid-but-not-due cron ticks without broadcasting or advancing state', async () => {
     const now = new Date();
-    const nextMinute = (now.getUTCMinutes() + 1) % 60;
+    const differentMonth = ((now.getUTCMonth() + 1) % 12) + 1;
 
     await reinstall({
       messages: [{ text: 'First' }, { text: 'Second' }],
       order: 'sequential',
-      interval: cronExpressionForNow({ minute: String(nextMinute) }),
+      interval: `${now.getUTCMinutes()} ${now.getUTCHours()} ${now.getUTCDate()} ${differentMonth} *`,
     });
 
     const expectedMessages = normalizeMessages([{ text: 'First', weight: 1 }, { text: 'Second', weight: 1 }]);
@@ -615,6 +616,13 @@ describe('server-messages integration', () => {
 
     const lockAfterFailure = await readModuleVariable(LOCK_KEY);
     assert.equal(lockAfterFailure, null, 'Expected execution lock to be cleared after a failed cron run');
+
+    const stateAfterFailure = await readModuleVariable(STATE_KEY);
+    assert.deepEqual(
+      JSON.parse(stateAfterFailure!.value),
+      { order: 'sequential', index: 0 },
+      'Expected failed sends to roll rotation state back so the skipped message is retried later',
+    );
   });
 });
 
@@ -663,6 +671,41 @@ describe('server-message helper unit tests', () => {
     assert.equal(truncatedBag?.nextState.bag.length, 3);
     assert.equal(truncatedBag?.nextState.bag.filter((entry: number) => entry === 0).length, 1);
     assert.equal(truncatedBag?.nextState.bag.filter((entry: number) => entry === 1).length, 2);
+  });
+
+  it('counts online players correctly when Takaro omits pagination totals', async () => {
+    const calls: number[] = [];
+    (globalThis as typeof globalThis & { __testTakaro?: unknown }).__testTakaro = {
+      playerOnGameserver: {
+        playerOnGameServerControllerSearch: async ({ page }: { page: number }) => {
+          calls.push(page);
+          const counts = [100, 100, 7];
+          return {
+            data: {
+              data: Array.from({ length: counts[page] ?? 0 }, (_, index) => ({ id: `${page}-${index}` })),
+              meta: {},
+            },
+          };
+        },
+      },
+    };
+
+    try {
+      const paginatedCronjobModule = await import(
+        `data:text/javascript;base64,${Buffer.from(
+          cronjobSource
+            .replace("import { data, takaro } from '@takaro/helpers';", 'const data = {}; const takaro = globalThis.__testTakaro;')
+            .replace("from './server-message-helpers.js';", `from '${helperModuleDataUrl}';`)
+            .replace(/await main\(\);\s*$/, ''),
+        ).toString('base64')}`
+      );
+
+      const count = await paginatedCronjobModule.countOnlinePlayers('gs-1');
+      assert.equal(count, 207);
+      assert.deepEqual(calls, [0, 1, 2]);
+    } finally {
+      delete (globalThis as typeof globalThis & { __testTakaro?: unknown }).__testTakaro;
+    }
   });
 
   it('applies standard cron semantics and rejects descending ranges', () => {

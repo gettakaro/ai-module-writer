@@ -17,7 +17,7 @@ import {
   setState,
 } from './server-message-helpers.js';
 
-async function countOnlinePlayers(gameServerId) {
+export async function countOnlinePlayers(gameServerId) {
   const pageSize = 100;
   const firstPage = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
     filters: {
@@ -55,7 +55,7 @@ async function countOnlinePlayers(gameServerId) {
   return count;
 }
 
-async function main() {
+export async function main() {
   const { gameServerId, module: mod } = data;
   const order = normalizeOrder(mod.userConfig.order);
   const interval = normalizeInterval(mod.userConfig.interval);
@@ -124,11 +124,21 @@ async function main() {
       serverName,
     });
 
-    await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-      message: rendered,
-    });
-
+    const rollbackState = state ?? getInitialState(order, messages);
     await setState(gameServerId, mod.moduleId, selection.nextState);
+
+    try {
+      await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
+        message: rendered,
+      });
+    } catch (err) {
+      try {
+        await setState(gameServerId, mod.moduleId, rollbackState);
+      } catch (rollbackErr) {
+        console.error(`server-messages: failed to roll back rotation state after send failure: ${rollbackErr}`);
+      }
+      throw err;
+    }
 
     if (order === 'random') {
       console.log(
