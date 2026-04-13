@@ -30,8 +30,9 @@ async function main() {
 
   const intervalStatus = getIntervalStatus(interval);
   if (!intervalStatus.valid) {
-    console.log(`server-messages: invalid interval=${JSON.stringify(interval)}, skipping without advancing state`);
-    return;
+    throw new Error(
+      `server-messages: invalid interval=${JSON.stringify(interval)}. Use a valid five-field UTC cron expression.`,
+    );
   }
 
   if (!intervalStatus.matches) {

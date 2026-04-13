@@ -1,5 +1,5 @@
 {
-  "name": "server-messages",
+  "name": "test-server-messages",
   "description": "Broadcast scheduled server announcements with sequential or weighted shuffle-bag rotation.",
   "version": "latest",
   "supportedGames": [
@@ -39,9 +39,9 @@
       },
       "interval": {
         "type": "string",
-        "pattern": "^\\S+(?:\\s+\\S+){4}$",
+        "pattern": "^(?:\\*(?:\\/(?:[1-9]|[1-5]\\d))?|(?:[0-5]?\\d)-(?:[0-5]?\\d)(?:\\/(?:[1-9]|[1-5]\\d))?|[0-5]?\\d)(?:,(?:\\*(?:\\/(?:[1-9]|[1-5]\\d))?|(?:[0-5]?\\d)-(?:[0-5]?\\d)(?:\\/(?:[1-9]|[1-5]\\d))?|[0-5]?\\d))*\\s+(?:\\*(?:\\/(?:[1-9]|1\\d|2[0-3]))?|(?:[01]?\\d|2[0-3])-(?:[01]?\\d|2[0-3])(?:\\/(?:[1-9]|1\\d|2[0-3]))?|(?:[01]?\\d|2[0-3]))(?:,(?:\\*(?:\\/(?:[1-9]|1\\d|2[0-3]))?|(?:[01]?\\d|2[0-3])-(?:[01]?\\d|2[0-3])(?:\\/(?:[1-9]|1\\d|2[0-3]))?|(?:[01]?\\d|2[0-3])))*\\s+(?:\\*(?:\\/(?:[1-9]|[12]\\d|3[01]))?|(?:[1-9]|[12]\\d|3[01])-(?:[1-9]|[12]\\d|3[01])(?:\\/(?:[1-9]|[12]\\d|3[01]))?|(?:[1-9]|[12]\\d|3[01]))(?:,(?:\\*(?:\\/(?:[1-9]|[12]\\d|3[01]))?|(?:[1-9]|[12]\\d|3[01])-(?:[1-9]|[12]\\d|3[01])(?:\\/(?:[1-9]|[12]\\d|3[01]))?|(?:[1-9]|[12]\\d|3[01])))*\\s+(?:\\*(?:\\/(?:[1-9]|1[0-2]))?|(?:[1-9]|1[0-2])-(?:[1-9]|1[0-2])(?:\\/(?:[1-9]|1[0-2]))?|(?:[1-9]|1[0-2]))(?:,(?:\\*(?:\\/(?:[1-9]|1[0-2]))?|(?:[1-9]|1[0-2])-(?:[1-9]|1[0-2])(?:\\/(?:[1-9]|1[0-2]))?|(?:[1-9]|1[0-2])))*\\s+(?:\\*(?:\\/[1-7])?|[0-7]-[0-7](?:\\/[1-7])?|[0-7])(?:,(?:\\*(?:\\/[1-7])?|[0-7]-[0-7](?:\\/[1-7])?|[0-7]))*$",
         "default": "*/15 * * * *",
-        "description": "Five-field cron expression for the announcement schedule (minute hour day-of-month month day-of-week). Supports *, ranges, steps, and comma lists. The module polls every minute and only broadcasts on ticks that match this expression."
+        "description": "Five-field cron expression for the announcement schedule (minute hour day-of-month month day-of-week). Supports *, ranges, steps, and comma lists. Matching is evaluated in UTC because the module compares against getUTC* values. The module polls every minute and only broadcasts on ticks that match this expression."
       },
       "order": {
         "type": "string",

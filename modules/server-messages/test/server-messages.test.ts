@@ -43,9 +43,9 @@ type CronResult = {
   logs: string[];
 };
 
-async function waitForSafeTriggerWindow(minSecondsRemaining = 20) {
+async function waitForSafeTriggerWindow(minSecondsRemaining = 5) {
   while (60 - new Date().getUTCSeconds() < minSecondsRemaining) {
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
 }
 
@@ -116,11 +116,9 @@ describe('server-messages integration', () => {
 
   async function reinstall(userConfig: Record<string, unknown>) {
     await safeUninstall();
-    await wait(2000);
     await waitForLockToClear();
     await clearModuleVariables();
     await installModule(client, versionId, ctx.gameServer.id, { userConfig });
-    await wait(2000);
     await ctx.server.executeConsoleCommand('connectAll');
     await waitForOnlineCount(3);
   }
@@ -265,7 +263,7 @@ describe('server-messages integration', () => {
   }
 
   async function assertNoEvent(eventName: EventSearchInputAllowedFiltersEventNameEnum, after: Date) {
-    await wait(1500);
+    await wait(500);
     const result = await client.event.eventControllerSearch({
       filters: {
         eventName: [eventName],
@@ -380,7 +378,7 @@ describe('server-messages integration', () => {
     await assertNoEvent(EventSearchInputAllowedFiltersEventNameEnum.ChatMessage, result.triggeredAt);
   });
 
-  it('rejects whitespace-only messages and invalid cron expressions at install time', async () => {
+  it('rejects whitespace-only messages and structurally invalid cron expressions at install time', async () => {
     await safeUninstall();
 
     await assert.rejects(
@@ -394,16 +392,32 @@ describe('server-messages integration', () => {
       /400|pattern|minLength|bad request|validation/i,
     );
 
-    await assert.rejects(
-      installModule(client, versionId, ctx.gameServer.id, {
-        userConfig: {
-          messages: [{ text: 'Valid message' }],
-          order: 'sequential',
-          interval: 'not-a-cron',
-        },
-      }),
-      /400|pattern|bad request|validation/i,
-    );
+    for (const interval of ['not-a-cron', '61 * * * *', '*/99 * * * *', '* * 32 * *']) {
+      await assert.rejects(
+        installModule(client, versionId, ctx.gameServer.id, {
+          userConfig: {
+            messages: [{ text: 'Valid message' }],
+            order: 'sequential',
+            interval,
+          },
+        }),
+        /400|pattern|bad request|validation/i,
+        `Expected install-time validation to reject interval ${interval}`,
+      );
+    }
+  });
+
+  it('fails loudly for semantically invalid cron ranges that still pass the schema', async () => {
+    await reinstall({
+      messages: [{ text: 'Should not send' }],
+      order: 'sequential',
+      interval: '5-1 * * * *',
+    });
+
+    const result = await triggerCronjob();
+    assert.equal(result.success, false, `Expected invalid runtime cron trigger to fail, logs: ${JSON.stringify(result.logs)}`);
+    assert.ok(result.logs.some((log) => log.includes('invalid interval')));
+    await assertNoEvent(EventSearchInputAllowedFiltersEventNameEnum.ChatMessage, result.triggeredAt);
   });
 
   it('uses standard cron matching semantics, including day-of-month/day-of-week OR behavior and supported field syntax', async () => {
