@@ -2,6 +2,11 @@ import { takaro } from '@takaro/helpers';
 
 export const STATE_KEY = 'server_messages_state';
 export const FINGERPRINT_KEY = 'server_messages_fingerprint';
+export const LOCK_KEY = 'server_messages_lock';
+export const DEFAULT_INTERVAL = '*/15 * * * *';
+export const MAX_MESSAGES = 100;
+export const MAX_WEIGHT = 20;
+const LOCK_TIMEOUT_MS = 15000;
 
 async function findVariable(gameServerId, moduleId, key) {
   const res = await takaro.variable.variableControllerSearch({
@@ -28,6 +33,38 @@ async function upsertVariable(gameServerId, moduleId, key, value) {
     gameServerId,
     moduleId,
   });
+}
+
+export async function acquireExecutionLock(gameServerId, moduleId) {
+  const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+  try {
+    await takaro.variable.variableControllerCreate({
+      key: LOCK_KEY,
+      value: token,
+      gameServerId,
+      moduleId,
+      expiresAt: new Date(Date.now() + LOCK_TIMEOUT_MS).toISOString(),
+    });
+    return token;
+  } catch (err) {
+    const message = String(err?.message ?? err).toLowerCase();
+    const status = err?.response?.status;
+    const isLockContention =
+      status === 409 || message.includes('409') || message.includes('duplicate') || message.includes('unique');
+
+    if (isLockContention) {
+      return null;
+    }
+
+    throw err;
+  }
+}
+
+export async function releaseExecutionLock(gameServerId, moduleId, token) {
+  const variable = await findVariable(gameServerId, moduleId, LOCK_KEY);
+  if (!variable || variable.value !== token) return;
+  await takaro.variable.variableControllerDelete(variable.id);
 }
 
 export async function getFingerprint(gameServerId, moduleId) {
@@ -60,6 +97,7 @@ export function normalizeMessages(messages) {
 
   return messages
     .filter((message) => message && typeof message.text === 'string')
+    .slice(0, MAX_MESSAGES)
     .map((message) => ({
       text: message.text,
       weight: normalizeWeight(message.weight),
@@ -70,10 +108,16 @@ export function normalizeOrder(order) {
   return order === 'random' ? 'random' : 'sequential';
 }
 
+export function normalizeInterval(interval) {
+  if (typeof interval !== 'string') return DEFAULT_INTERVAL;
+  const trimmed = interval.trim();
+  return trimmed || DEFAULT_INTERVAL;
+}
+
 export function normalizeWeight(weight) {
   const parsed = Number(weight);
-  if (Number.isInteger(parsed) && parsed > 0) return parsed;
-  return 1;
+  if (!Number.isInteger(parsed) || parsed < 1) return 1;
+  return Math.min(parsed, MAX_WEIGHT);
 }
 
 export function computeFingerprint(order, messages) {
@@ -119,20 +163,19 @@ export function getNextSelection(order, messages, state) {
       workingState = getInitialState(order, messages);
     }
 
-    const messageIndex = workingState.bag[workingState.cursor];
-    if (!Number.isInteger(messageIndex) || messageIndex < 0 || messageIndex >= messages.length) {
+    const selectedIndex = workingState.bag[workingState.cursor];
+    if (!Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex >= messages.length) {
       workingState = getInitialState(order, messages);
     }
 
-    const selectedIndex = workingState.bag[workingState.cursor];
     return {
-      messageIndex: selectedIndex,
+      messageIndex: workingState.bag[workingState.cursor],
       nextState: {
         order: 'random',
         bag: [...workingState.bag],
         cursor: workingState.cursor + 1,
       },
-      bag: [...workingState.bag],
+      bagSize: workingState.bag.length,
       cursor: workingState.cursor,
     };
   }
@@ -174,6 +217,64 @@ export function shuffleBag(messages) {
   }
 
   return bag;
+}
+
+export function getIntervalStatus(interval, now = new Date()) {
+  const normalized = normalizeInterval(interval);
+  const parts = normalized.split(/\s+/);
+  if (parts.length !== 5) {
+    return { valid: false, matches: false, normalized };
+  }
+
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+  const matches =
+    matchesCronField(minute, now.getUTCMinutes(), 0, 59) &&
+    matchesCronField(hour, now.getUTCHours(), 0, 23) &&
+    matchesCronField(dayOfMonth, now.getUTCDate(), 1, 31) &&
+    matchesCronField(month, now.getUTCMonth() + 1, 1, 12) &&
+    matchesCronField(dayOfWeek, now.getUTCDay(), 0, 7, { normalizeDayOfWeek: true });
+
+  return { valid: true, matches, normalized };
+}
+
+function matchesCronField(field, value, min, max, options = {}) {
+  return field.split(',').some((segment) => matchesCronSegment(segment.trim(), value, min, max, options));
+}
+
+function matchesCronSegment(segment, value, min, max, options = {}) {
+  if (!segment) return false;
+
+  const [base, rawStep] = segment.split('/');
+  const step = rawStep === undefined ? 1 : Number(rawStep);
+  if (!Number.isInteger(step) || step < 1) return false;
+
+  if (base === '*') {
+    return isSteppedMatch(value, min, step);
+  }
+
+  if (base.includes('-')) {
+    const [startRaw, endRaw] = base.split('-');
+    const start = parseCronValue(startRaw, options);
+    const end = parseCronValue(endRaw, options);
+    if (!Number.isInteger(start) || !Number.isInteger(end)) return false;
+    if (start < min || end > max || start > end) return false;
+    return value >= start && value <= end && isSteppedMatch(value, start, step);
+  }
+
+  const exact = parseCronValue(base, options);
+  if (!Number.isInteger(exact) || exact < min || exact > max) return false;
+  return value === exact;
+}
+
+function parseCronValue(raw, options = {}) {
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed)) return null;
+  if (options.normalizeDayOfWeek && parsed === 7) return 0;
+  return parsed;
+}
+
+function isSteppedMatch(value, start, step) {
+  return (value - start) % step === 0;
 }
 
 function isValidRandomState(state, messageCount) {

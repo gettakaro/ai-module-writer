@@ -1,5 +1,5 @@
 {
-  "name": "test-server-messages",
+  "name": "server-messages",
   "description": "Broadcast scheduled server announcements with sequential or weighted shuffle-bag rotation.",
   "version": "latest",
   "supportedGames": [
@@ -13,6 +13,7 @@
         "type": "array",
         "description": "Messages to broadcast. Empty arrays are allowed and cause the cronjob to exit quietly.",
         "default": [],
+        "maxItems": 100,
         "items": {
           "type": "object",
           "properties": {
@@ -23,8 +24,9 @@
             "weight": {
               "type": "integer",
               "minimum": 1,
+              "maximum": 20,
               "default": 1,
-              "description": "Relative weight used only when order is set to random."
+              "description": "Relative weight used only when order is set to random. Higher values are capped to keep shuffle-bag state bounded."
             }
           },
           "required": [
@@ -36,7 +38,7 @@
       "interval": {
         "type": "string",
         "default": "*/15 * * * *",
-        "description": "Cron expression for the announcement schedule. The cronjob is defined with the same default expression for this module version."
+        "description": "Cron expression for the announcement schedule. The module polls every minute and only broadcasts on ticks that match this expression."
       },
       "order": {
         "type": "string",
@@ -55,8 +57,8 @@
   },
   "cronJobs": {
     "broadcast-messages": {
-      "temporalValue": "*/15 * * * *",
-      "description": "Broadcast the next configured server message to all connected players.",
+      "temporalValue": "* * * * *",
+      "description": "Poll once per minute and broadcast the next configured server message when the configured interval matches.",
       "function": "src/cronjobs/broadcast-messages/index.js"
     }
   },
