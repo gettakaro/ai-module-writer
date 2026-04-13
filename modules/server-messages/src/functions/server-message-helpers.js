@@ -163,7 +163,8 @@ export function getNextSelection(order, messages, state) {
 
   if (order === 'random') {
     let workingState = state;
-    if (!isValidRandomState(workingState, messages.length)) {
+    if (!isValidRandomState(workingState, messages.length, messages)) {
+      console.warn('server-message-helpers: random state bag is inconsistent with configured weights, rebuilding');
       workingState = getInitialState(order, messages);
     }
 
@@ -356,10 +357,26 @@ function normalizeCronValue(value, options = {}) {
   return value;
 }
 
-function isValidRandomState(state, messageCount) {
+function isValidRandomState(state, messageCount, messages) {
   if (!state || state.order !== 'random') return false;
   if (!Array.isArray(state.bag)) return false;
   if (!Number.isInteger(state.cursor) || state.cursor < 0) return false;
+  if (state.cursor > state.bag.length) return false;
 
-  return state.bag.every((entry) => Number.isInteger(entry) && entry >= 0 && entry < messageCount);
+  const expectedCounts = new Array(messageCount).fill(0);
+  for (let index = 0; index < messages.length; index++) {
+    expectedCounts[index] = messages[index].weight;
+  }
+
+  const actualCounts = new Array(messageCount).fill(0);
+  for (const entry of state.bag) {
+    if (!Number.isInteger(entry) || entry < 0 || entry >= messageCount) return false;
+    actualCounts[entry] += 1;
+  }
+
+  if (state.bag.length !== expectedCounts.reduce((sum, count) => sum + count, 0)) {
+    return false;
+  }
+
+  return actualCounts.every((count, index) => count === expectedCounts[index]);
 }

@@ -17,6 +17,44 @@ import {
   setState,
 } from './server-message-helpers.js';
 
+async function countOnlinePlayers(gameServerId) {
+  const pageSize = 100;
+  const firstPage = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
+    filters: {
+      gameServerId: [gameServerId],
+      online: [true],
+    },
+    limit: pageSize,
+    page: 0,
+  });
+
+  const total = firstPage.data.meta?.total;
+  if (typeof total === 'number') {
+    return total;
+  }
+
+  let count = firstPage.data.data.length;
+  let page = 1;
+  let pageLength = firstPage.data.data.length;
+
+  while (pageLength === pageSize) {
+    const nextPage = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
+      filters: {
+        gameServerId: [gameServerId],
+        online: [true],
+      },
+      limit: pageSize,
+      page,
+    });
+
+    pageLength = nextPage.data.data.length;
+    count += pageLength;
+    page += 1;
+  }
+
+  return count;
+}
+
 async function main() {
   const { gameServerId, module: mod } = data;
   const order = normalizeOrder(mod.userConfig.order);
@@ -64,19 +102,10 @@ async function main() {
       console.log(`server-messages: config fingerprint changed, reset rotation state (order=${order})`);
     }
 
-    const [serverResult, playerResult] = await Promise.all([
+    const [serverResult, playerCount] = await Promise.all([
       takaro.gameserver.gameServerControllerGetOne(gameServerId),
-      takaro.playerOnGameserver.playerOnGameServerControllerSearch({
-        filters: {
-          gameServerId: [gameServerId],
-          online: [true],
-        },
-        limit: 1,
-        page: 0,
-      }),
+      countOnlinePlayers(gameServerId),
     ]);
-
-    const playerCount = playerResult.data.meta?.total ?? playerResult.data.data.length;
     if (playerCount === 0) {
       console.log('server-messages: no players online, skipping without advancing state');
       return;

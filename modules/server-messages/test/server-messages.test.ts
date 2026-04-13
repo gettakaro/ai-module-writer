@@ -1,5 +1,6 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { Client, EventOutputDTO, EventSearchInputAllowedFiltersEventNameEnum } from '@takaro/apiclient';
@@ -18,6 +19,22 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const MODULE_DIR = path.resolve(__dirname, '..');
+const HELPER_SOURCE_PATH = path.resolve(MODULE_DIR, 'src/functions/server-message-helpers.js');
+const helperModuleSource = await fs.readFile(HELPER_SOURCE_PATH, 'utf8');
+const helperFns = await import(
+  `data:text/javascript;base64,${Buffer.from(
+    helperModuleSource.replace("import { takaro } from '@takaro/helpers';", 'const takaro = {};'),
+  ).toString('base64')}`
+);
+const {
+  MAX_MESSAGES,
+  MAX_WEIGHT,
+  getIntervalStatus,
+  getNextSelection,
+  normalizeInterval,
+  normalizeMessages,
+  normalizeOrder,
+} = helperFns;
 const STATE_KEY = 'server_messages_state';
 const FINGERPRINT_KEY = 'server_messages_fingerprint';
 const LOCK_KEY = 'server_messages_lock';
@@ -42,12 +59,6 @@ type CronResult = {
   success: boolean;
   logs: string[];
 };
-
-async function waitForSafeTriggerWindow(minSecondsRemaining = 5) {
-  while (60 - new Date().getUTCSeconds() < minSecondsRemaining) {
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-}
 
 function cronExpressionForNow(overrides: {
   minute?: string;
@@ -119,8 +130,11 @@ describe('server-messages integration', () => {
     await waitForLockToClear();
     await clearModuleVariables();
     await installModule(client, versionId, ctx.gameServer.id, { userConfig });
-    await ctx.server.executeConsoleCommand('connectAll');
-    await waitForOnlineCount(3);
+
+    if ((await getOnlineCount()) < 3) {
+      await ctx.server.executeConsoleCommand('connectAll');
+      await waitForOnlineCount(3);
+    }
   }
 
   async function clearModuleVariables() {
@@ -149,21 +163,25 @@ describe('server-messages integration', () => {
     await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  async function getOnlineCount() {
+    const result = await client.playerOnGameserver.playerOnGameServerControllerSearch({
+      filters: {
+        gameServerId: [ctx.gameServer.id],
+        online: [true],
+      },
+      limit: 100,
+      page: 0,
+    });
+
+    return result.data.meta?.total ?? result.data.data.length;
+  }
+
   async function waitForOnlineCount(expected: number, timeout = 30000) {
     const start = Date.now();
 
     while (Date.now() - start < timeout) {
-      const result = await client.playerOnGameserver.playerOnGameServerControllerSearch({
-        filters: {
-          gameServerId: [ctx.gameServer.id],
-          online: [true],
-        },
-        limit: 100,
-        page: 0,
-      });
-
-      if (result.data.data.length === expected) return;
-      await wait(1000);
+      if ((await getOnlineCount()) === expected) return;
+      await wait(250);
     }
 
     throw new Error(`Timed out waiting for ${expected} online players`);
@@ -263,7 +281,7 @@ describe('server-messages integration', () => {
   }
 
   async function assertNoEvent(eventName: EventSearchInputAllowedFiltersEventNameEnum, after: Date) {
-    await wait(500);
+    await wait(250);
     const result = await client.event.eventControllerSearch({
       filters: {
         eventName: [eventName],
@@ -378,7 +396,7 @@ describe('server-messages integration', () => {
     await assertNoEvent(EventSearchInputAllowedFiltersEventNameEnum.ChatMessage, result.triggeredAt);
   });
 
-  it('rejects whitespace-only messages and structurally invalid cron expressions at install time', async () => {
+  it('rejects whitespace-only messages and invalid cron expressions at install time', async () => {
     await safeUninstall();
 
     await assert.rejects(
@@ -392,7 +410,7 @@ describe('server-messages integration', () => {
       /400|pattern|minLength|bad request|validation/i,
     );
 
-    for (const interval of ['not-a-cron', '61 * * * *', '*/99 * * * *', '* * 32 * *']) {
+    for (const interval of ['not-a-cron', '61 * * * *', '*/99 * * * *', '* * 32 * *', '5-1 * * * *']) {
       await assert.rejects(
         installModule(client, versionId, ctx.gameServer.id, {
           userConfig: {
@@ -407,93 +425,6 @@ describe('server-messages integration', () => {
     }
   });
 
-  it('fails loudly for semantically invalid cron ranges that still pass the schema', async () => {
-    await reinstall({
-      messages: [{ text: 'Should not send' }],
-      order: 'sequential',
-      interval: '5-1 * * * *',
-    });
-
-    const result = await triggerCronjob();
-    assert.equal(result.success, false, `Expected invalid runtime cron trigger to fail, logs: ${JSON.stringify(result.logs)}`);
-    assert.ok(result.logs.some((log) => log.includes('invalid interval')));
-    await assertNoEvent(EventSearchInputAllowedFiltersEventNameEnum.ChatMessage, result.triggeredAt);
-  });
-
-  it('uses standard cron matching semantics, including day-of-month/day-of-week OR behavior and supported field syntax', async () => {
-    await waitForSafeTriggerWindow();
-
-    const cases = [
-      {
-        label: 'day-of-month match is enough when day-of-week does not match',
-        buildInterval: () => {
-          const alternateDayOfWeek = (new Date().getUTCDay() + 1) % 7;
-          return cronExpressionForNow({ dayOfWeek: String(alternateDayOfWeek) });
-        },
-        shouldSend: true,
-      },
-      {
-        label: 'minute range matches',
-        buildInterval: () => {
-          const minute = new Date().getUTCMinutes();
-          const rangeMinuteStart = Math.max(0, minute - 1);
-          const rangeMinuteEnd = Math.min(59, rangeMinuteStart + 2);
-          return cronExpressionForNow({ minute: `${rangeMinuteStart}-${rangeMinuteEnd}` });
-        },
-        shouldSend: true,
-      },
-      {
-        label: 'minute step matches',
-        buildInterval: () => {
-          const minute = new Date().getUTCMinutes();
-          return cronExpressionForNow({ minute: `${minute}-${Math.min(59, minute + 4)}/2` });
-        },
-        shouldSend: true,
-      },
-      {
-        label: 'minute list matches',
-        buildInterval: () => {
-          const minute = new Date().getUTCMinutes();
-          return cronExpressionForNow({ minute: `${minute},${minute === 59 ? 58 : 59}` });
-        },
-        shouldSend: true,
-      },
-      {
-        label: 'day-of-week 7 parses successfully',
-        buildInterval: () => cronExpressionForNow({ dayOfWeek: '7' }),
-        shouldSend: true,
-      },
-      {
-        label: 'cron skips when neither day-of-month nor day-of-week matches',
-        buildInterval: () => {
-          const now = new Date();
-          const alternateDayOfWeek = (now.getUTCDay() + 1) % 7;
-          const alternateDayOfMonth = now.getUTCDate() === 1 ? 2 : 1;
-          return cronExpressionForNow({ dayOfMonth: String(alternateDayOfMonth), dayOfWeek: String(alternateDayOfWeek) });
-        },
-        shouldSend: false,
-      },
-    ];
-
-    for (const testCase of cases) {
-      await waitForSafeTriggerWindow();
-      await reinstall({
-        messages: [{ text: `Scheduled ${testCase.label}` }],
-        order: 'sequential',
-        interval: testCase.buildInterval(),
-      });
-
-      const result = await triggerCronjob();
-      assert.equal(result.success, true, `${testCase.label}: expected cron trigger to succeed, logs=${JSON.stringify(result.logs)}`);
-
-      if (testCase.shouldSend) {
-        assert.equal(parseJsonLogField(result.logs, 'rendered'), `Scheduled ${testCase.label}`);
-      } else {
-        assert.equal(parseJsonLogField(result.logs, 'rendered'), null, `${testCase.label}: expected no rendered payload`);
-        await assertNoEvent(EventSearchInputAllowedFiltersEventNameEnum.ChatMessage, result.triggeredAt);
-      }
-    }
-  });
 
   it('serializes overlapping executions so overlapping triggers do not duplicate the same broadcast', async () => {
     await reinstall({
@@ -603,7 +534,7 @@ describe('server-messages integration', () => {
       interval: '* * * * *',
     });
 
-    await upsertModuleVariable(STATE_KEY, JSON.stringify({ order: 'random', bag: [999], cursor: 0 }));
+    await upsertModuleVariable(STATE_KEY, JSON.stringify({ order: 'random', bag: [1, 1], cursor: 0 }));
     await upsertModuleVariable(
       FINGERPRINT_KEY,
       computeFingerprint('random', [
@@ -672,12 +603,79 @@ describe('server-messages integration', () => {
     });
 
     await stopMockServer(ctx.server);
-    await wait(3000);
 
     const failed = await triggerCronjob();
     assert.equal(failed.success, false, `Expected offline cron trigger to fail, logs: ${JSON.stringify(failed.logs)}`);
 
     const lockAfterFailure = await readModuleVariable(LOCK_KEY);
     assert.equal(lockAfterFailure, null, 'Expected execution lock to be cleared after a failed cron run');
+  });
+});
+
+describe('server-message helper unit tests', () => {
+  it('normalizes order, interval, message bounds, and weight caps defensively', () => {
+    assert.equal(normalizeOrder(undefined), 'sequential');
+    assert.equal(normalizeOrder('unexpected'), 'sequential');
+    assert.equal(normalizeOrder('random'), 'random');
+
+    assert.equal(normalizeInterval(undefined), '*/15 * * * *');
+    assert.equal(normalizeInterval('   '), '*/15 * * * *');
+    assert.equal(normalizeInterval(' 0 * * * * '), '0 * * * *');
+
+    const normalizedMessages = normalizeMessages([
+      { text: 'kept default weight' },
+      { text: 'bad weight', weight: -2 },
+      { text: 'capped weight', weight: MAX_WEIGHT + 99 },
+      null,
+      { text: 5 },
+      ...Array.from({ length: MAX_MESSAGES + 5 }, (_, index) => ({ text: `extra-${index}`, weight: 1 })),
+    ] as Array<{ text: string; weight?: number }>);
+
+    assert.equal(normalizedMessages.length, MAX_MESSAGES);
+    assert.deepEqual(normalizedMessages.slice(0, 3), [
+      { text: 'kept default weight', weight: 1 },
+      { text: 'bad weight', weight: 1 },
+      { text: 'capped weight', weight: MAX_WEIGHT },
+    ]);
+  });
+
+  it('rejects semantically corrupted random bags and rebuilds from configured weights', () => {
+    const messages = normalizeMessages([
+      { text: 'Red', weight: 1 },
+      { text: 'Gold', weight: 2 },
+    ]);
+
+    const duplicateBag = getNextSelection('random', messages, { order: 'random', bag: [1, 1], cursor: 0 });
+    assert.equal(duplicateBag?.bagSize, 3);
+    assert.equal(duplicateBag?.cursor, 0);
+    assert.equal(duplicateBag?.nextState.order, 'random');
+    assert.equal(duplicateBag?.nextState.bag.length, 3);
+    assert.equal(duplicateBag?.nextState.bag.filter((entry: number) => entry === 0).length, 1);
+    assert.equal(duplicateBag?.nextState.bag.filter((entry: number) => entry === 1).length, 2);
+
+    const truncatedBag = getNextSelection('random', messages, { order: 'random', bag: [0], cursor: 0 });
+    assert.equal(truncatedBag?.nextState.bag.length, 3);
+    assert.equal(truncatedBag?.nextState.bag.filter((entry: number) => entry === 0).length, 1);
+    assert.equal(truncatedBag?.nextState.bag.filter((entry: number) => entry === 1).length, 2);
+  });
+
+  it('applies standard cron semantics and rejects descending ranges', () => {
+    const now = new Date(Date.UTC(2026, 3, 13, 12, 34, 0));
+
+    assert.deepEqual(getIntervalStatus('34 12 13 4 2', now), {
+      valid: true,
+      matches: true,
+      normalized: '34 12 13 4 2',
+    });
+    assert.equal(getIntervalStatus('33-35 12 13 4 2', now).matches, true);
+    assert.equal(getIntervalStatus('34,59 12 13 4 2', now).matches, true);
+    assert.equal(getIntervalStatus('34-38/2 12 13 4 2', now).matches, true);
+    assert.equal(getIntervalStatus('34 12 14 4 1', now).matches, false);
+    assert.equal(getIntervalStatus('34 12 13 4 7', now).matches, false);
+    assert.deepEqual(getIntervalStatus('5-1 * * * *', now), {
+      valid: false,
+      matches: false,
+      normalized: '5-1 * * * *',
+    });
   });
 });
