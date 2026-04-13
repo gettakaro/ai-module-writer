@@ -43,12 +43,37 @@ type CronResult = {
   logs: string[];
 };
 
+async function waitForSafeTriggerWindow(minSecondsRemaining = 20) {
+  while (60 - new Date().getUTCSeconds() < minSecondsRemaining) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
+
+function cronExpressionForNow(overrides: {
+  minute?: string;
+  hour?: string;
+  dayOfMonth?: string;
+  month?: string;
+  dayOfWeek?: string;
+} = {}) {
+  const now = new Date();
+
+  return [
+    overrides.minute ?? String(now.getUTCMinutes()),
+    overrides.hour ?? String(now.getUTCHours()),
+    overrides.dayOfMonth ?? String(now.getUTCDate()),
+    overrides.month ?? String(now.getUTCMonth() + 1),
+    overrides.dayOfWeek ?? String(now.getUTCDay()),
+  ].join(' ');
+}
+
 describe('server-messages integration', () => {
   let client: Client;
   let ctx: MockServerContext;
   let moduleId: string;
   let versionId: string;
   let cronjobId: string;
+  const staleContexts: MockServerContext[] = [];
 
   before(async () => {
     client = await createClient();
@@ -72,6 +97,11 @@ describe('server-messages integration', () => {
       await deleteModule(client, moduleId);
     } catch (err) {
       console.error('Cleanup: failed to delete server-messages test module:', err);
+    }
+    for (const staleCtx of staleContexts) {
+      await stopMockServer(staleCtx.server, client, staleCtx.gameServer.id).catch((err) => {
+        console.error('Cleanup: failed to stop stale mock server:', err);
+      });
     }
     await stopMockServer(ctx.server, client, ctx.gameServer.id);
   });
@@ -350,30 +380,105 @@ describe('server-messages integration', () => {
     await assertNoEvent(EventSearchInputAllowedFiltersEventNameEnum.ChatMessage, result.triggeredAt);
   });
 
-  it('uses the configured interval to decide whether a trigger should broadcast', async () => {
-    const matchingInterval = '* * * * *';
-    const nonMatchingInterval = '0 0 31 2 *';
+  it('rejects whitespace-only messages and invalid cron expressions at install time', async () => {
+    await safeUninstall();
 
-    await reinstall({
-      messages: [{ text: 'Scheduled message' }],
-      order: 'sequential',
-      interval: nonMatchingInterval,
-    });
+    await assert.rejects(
+      installModule(client, versionId, ctx.gameServer.id, {
+        userConfig: {
+          messages: [{ text: '   ' }],
+          order: 'sequential',
+          interval: '* * * * *',
+        },
+      }),
+      /400|pattern|minLength|bad request|validation/i,
+    );
 
-    const skipped = await triggerCronjob();
-    assert.equal(skipped.success, true, `Expected off-schedule trigger to succeed, logs: ${JSON.stringify(skipped.logs)}`);
-    assert.equal(parseJsonLogField(skipped.logs, 'rendered'), null, `Expected no rendered payload, got: ${JSON.stringify(skipped.logs)}`);
-    await assertNoEvent(EventSearchInputAllowedFiltersEventNameEnum.ChatMessage, skipped.triggeredAt);
+    await assert.rejects(
+      installModule(client, versionId, ctx.gameServer.id, {
+        userConfig: {
+          messages: [{ text: 'Valid message' }],
+          order: 'sequential',
+          interval: 'not-a-cron',
+        },
+      }),
+      /400|pattern|bad request|validation/i,
+    );
+  });
 
-    await reinstall({
-      messages: [{ text: 'Scheduled message' }],
-      order: 'sequential',
-      interval: matchingInterval,
-    });
+  it('uses standard cron matching semantics, including day-of-month/day-of-week OR behavior and supported field syntax', async () => {
+    await waitForSafeTriggerWindow();
 
-    const sent = await triggerCronjob();
-    assert.equal(sent.success, true, `Expected matching trigger to succeed, logs: ${JSON.stringify(sent.logs)}`);
-    assert.equal(parseJsonLogField(sent.logs, 'rendered'), 'Scheduled message');
+    const cases = [
+      {
+        label: 'day-of-month match is enough when day-of-week does not match',
+        buildInterval: () => {
+          const alternateDayOfWeek = (new Date().getUTCDay() + 1) % 7;
+          return cronExpressionForNow({ dayOfWeek: String(alternateDayOfWeek) });
+        },
+        shouldSend: true,
+      },
+      {
+        label: 'minute range matches',
+        buildInterval: () => {
+          const minute = new Date().getUTCMinutes();
+          const rangeMinuteStart = Math.max(0, minute - 1);
+          const rangeMinuteEnd = Math.min(59, rangeMinuteStart + 2);
+          return cronExpressionForNow({ minute: `${rangeMinuteStart}-${rangeMinuteEnd}` });
+        },
+        shouldSend: true,
+      },
+      {
+        label: 'minute step matches',
+        buildInterval: () => {
+          const minute = new Date().getUTCMinutes();
+          return cronExpressionForNow({ minute: `${minute}-${Math.min(59, minute + 4)}/2` });
+        },
+        shouldSend: true,
+      },
+      {
+        label: 'minute list matches',
+        buildInterval: () => {
+          const minute = new Date().getUTCMinutes();
+          return cronExpressionForNow({ minute: `${minute},${minute === 59 ? 58 : 59}` });
+        },
+        shouldSend: true,
+      },
+      {
+        label: 'day-of-week 7 parses successfully',
+        buildInterval: () => cronExpressionForNow({ dayOfWeek: '7' }),
+        shouldSend: true,
+      },
+      {
+        label: 'cron skips when neither day-of-month nor day-of-week matches',
+        buildInterval: () => {
+          const now = new Date();
+          const alternateDayOfWeek = (now.getUTCDay() + 1) % 7;
+          const alternateDayOfMonth = now.getUTCDate() === 1 ? 2 : 1;
+          return cronExpressionForNow({ dayOfMonth: String(alternateDayOfMonth), dayOfWeek: String(alternateDayOfWeek) });
+        },
+        shouldSend: false,
+      },
+    ];
+
+    for (const testCase of cases) {
+      await waitForSafeTriggerWindow();
+      await reinstall({
+        messages: [{ text: `Scheduled ${testCase.label}` }],
+        order: 'sequential',
+        interval: testCase.buildInterval(),
+      });
+
+      const result = await triggerCronjob();
+      assert.equal(result.success, true, `${testCase.label}: expected cron trigger to succeed, logs=${JSON.stringify(result.logs)}`);
+
+      if (testCase.shouldSend) {
+        assert.equal(parseJsonLogField(result.logs, 'rendered'), `Scheduled ${testCase.label}`);
+      } else {
+        assert.equal(parseJsonLogField(result.logs, 'rendered'), null, `${testCase.label}: expected no rendered payload`);
+        await assertNoEvent(EventSearchInputAllowedFiltersEventNameEnum.ChatMessage, result.triggeredAt);
+      }
+    }
   });
 
   it('serializes overlapping executions so overlapping triggers do not duplicate the same broadcast', async () => {
@@ -543,5 +648,22 @@ describe('server-messages integration', () => {
 
     const stateAfterChange = await readModuleVariable(STATE_KEY);
     assert.deepEqual(JSON.parse(stateAfterChange!.value), { order: 'sequential', index: 1 });
+  });
+
+  it('releases the execution lock when broadcasting fails after the lock is acquired', async () => {
+    await reinstall({
+      messages: [{ text: 'This send should fail once the mock server is offline' }],
+      order: 'sequential',
+      interval: '* * * * *',
+    });
+
+    await stopMockServer(ctx.server);
+    await wait(3000);
+
+    const failed = await triggerCronjob();
+    assert.equal(failed.success, false, `Expected offline cron trigger to fail, logs: ${JSON.stringify(failed.logs)}`);
+
+    const lockAfterFailure = await readModuleVariable(LOCK_KEY);
+    assert.equal(lockAfterFailure, null, 'Expected execution lock to be cleared after a failed cron run');
   });
 });

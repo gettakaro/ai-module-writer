@@ -19,7 +19,9 @@
           "properties": {
             "text": {
               "type": "string",
-              "description": "Exact message text to broadcast. Supports {playerCount} and {serverName} placeholders."
+              "minLength": 1,
+              "pattern": ".*[^\\s].*",
+              "description": "Exact message text to broadcast. Supports {playerCount} and {serverName} placeholders and must contain at least one non-whitespace character."
             },
             "weight": {
               "type": "integer",
@@ -37,8 +39,9 @@
       },
       "interval": {
         "type": "string",
+        "pattern": "^\\S+(?:\\s+\\S+){4}$",
         "default": "*/15 * * * *",
-        "description": "Cron expression for the announcement schedule. The module polls every minute and only broadcasts on ticks that match this expression."
+        "description": "Five-field cron expression for the announcement schedule (minute hour day-of-month month day-of-week). Supports *, ranges, steps, and comma lists. The module polls every minute and only broadcasts on ticks that match this expression."
       },
       "order": {
         "type": "string",

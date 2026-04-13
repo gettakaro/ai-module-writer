@@ -6,7 +6,8 @@ export const LOCK_KEY = 'server_messages_lock';
 export const DEFAULT_INTERVAL = '*/15 * * * *';
 export const MAX_MESSAGES = 100;
 export const MAX_WEIGHT = 20;
-const LOCK_TIMEOUT_MS = 15000;
+const LOCK_TIMEOUT_MS = 2 * 60 * 1000;
+const LOCK_REFRESH_INTERVAL_MS = 30 * 1000;
 
 async function findVariable(gameServerId, moduleId, key) {
   const res = await takaro.variable.variableControllerSearch({
@@ -59,6 +60,39 @@ export async function acquireExecutionLock(gameServerId, moduleId) {
 
     throw err;
   }
+}
+
+async function refreshExecutionLock(gameServerId, moduleId, token) {
+  const variable = await findVariable(gameServerId, moduleId, LOCK_KEY);
+  if (!variable || variable.value !== token) return;
+
+  await takaro.variable.variableControllerUpdate(variable.id, {
+    value: token,
+    expiresAt: new Date(Date.now() + LOCK_TIMEOUT_MS).toISOString(),
+  });
+}
+
+export function startExecutionLockHeartbeat(gameServerId, moduleId, token) {
+  let stopped = false;
+  let refreshInFlight = Promise.resolve();
+
+  const timer = setInterval(() => {
+    if (stopped) return;
+
+    refreshInFlight = refreshExecutionLock(gameServerId, moduleId, token).catch((err) => {
+      console.error(`server-message-helpers: failed to refresh execution lock: ${err}`);
+    });
+  }, LOCK_REFRESH_INTERVAL_MS);
+
+  if (typeof timer.unref === 'function') {
+    timer.unref();
+  }
+
+  return async function stopHeartbeat() {
+    stopped = true;
+    clearInterval(timer);
+    await refreshInFlight;
+  };
 }
 
 export async function releaseExecutionLock(gameServerId, moduleId, token) {
@@ -226,55 +260,126 @@ export function getIntervalStatus(interval, now = new Date()) {
     return { valid: false, matches: false, normalized };
   }
 
-  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
-  const matches =
-    matchesCronField(minute, now.getUTCMinutes(), 0, 59) &&
-    matchesCronField(hour, now.getUTCHours(), 0, 23) &&
-    matchesCronField(dayOfMonth, now.getUTCDate(), 1, 31) &&
-    matchesCronField(month, now.getUTCMonth() + 1, 1, 12) &&
-    matchesCronField(dayOfWeek, now.getUTCDay(), 0, 7, { normalizeDayOfWeek: true });
+  const [minuteField, hourField, dayOfMonthField, monthField, dayOfWeekField] = parts;
+  const minuteMatches = matchesCronField(minuteField, now.getUTCMinutes(), 0, 59);
+  const hourMatches = matchesCronField(hourField, now.getUTCHours(), 0, 23);
+  const monthMatches = matchesCronField(monthField, now.getUTCMonth() + 1, 1, 12);
+  const dayOfMonthMatches = matchesCronField(dayOfMonthField, now.getUTCDate(), 1, 31);
+  const dayOfWeekMatches = matchesCronField(dayOfWeekField, now.getUTCDay(), 0, 7, { normalizeDayOfWeek: true });
 
-  return { valid: true, matches, normalized };
+  if (
+    minuteMatches === null ||
+    hourMatches === null ||
+    monthMatches === null ||
+    dayOfMonthMatches === null ||
+    dayOfWeekMatches === null
+  ) {
+    return { valid: false, matches: false, normalized };
+  }
+
+  const daysMatch = getDayMatchStatus(dayOfMonthField, dayOfMonthMatches, dayOfWeekField, dayOfWeekMatches);
+
+  return {
+    valid: true,
+    matches: minuteMatches && hourMatches && monthMatches && daysMatch,
+    normalized,
+  };
+}
+
+function getDayMatchStatus(dayOfMonthField, dayOfMonthMatches, dayOfWeekField, dayOfWeekMatches) {
+  const dayOfMonthIsWildcard = isWildcardField(dayOfMonthField);
+  const dayOfWeekIsWildcard = isWildcardField(dayOfWeekField);
+
+  if (dayOfMonthIsWildcard && dayOfWeekIsWildcard) return true;
+  if (dayOfMonthIsWildcard) return dayOfWeekMatches;
+  if (dayOfWeekIsWildcard) return dayOfMonthMatches;
+  return dayOfMonthMatches || dayOfWeekMatches;
+}
+
+function isWildcardField(field) {
+  return field.trim() === '*';
 }
 
 function matchesCronField(field, value, min, max, options = {}) {
-  return field.split(',').some((segment) => matchesCronSegment(segment.trim(), value, min, max, options));
+  const allowedValues = parseCronField(field, min, max, options);
+  if (!allowedValues) return null;
+  return allowedValues.has(value);
 }
 
-function matchesCronSegment(segment, value, min, max, options = {}) {
-  if (!segment) return false;
+function parseCronField(field, min, max, options = {}) {
+  const segments = field.split(',').map((segment) => segment.trim());
+  if (segments.length === 0 || segments.some((segment) => !segment)) return null;
 
-  const [base, rawStep] = segment.split('/');
+  const allowedValues = new Set();
+
+  for (const segment of segments) {
+    const segmentValues = parseCronSegmentValues(segment, min, max, options);
+    if (!segmentValues) return null;
+
+    for (const entry of segmentValues) {
+      allowedValues.add(entry);
+    }
+  }
+
+  return allowedValues;
+}
+
+function parseCronSegmentValues(segment, min, max, options = {}) {
+  if (!segment) return null;
+
+  const stepParts = segment.split('/');
+  if (stepParts.length > 2) return null;
+
+  const [base, rawStep] = stepParts;
   const step = rawStep === undefined ? 1 : Number(rawStep);
-  if (!Number.isInteger(step) || step < 1) return false;
+  if (!Number.isInteger(step) || step < 1) return null;
 
   if (base === '*') {
-    return isSteppedMatch(value, min, step);
+    return buildCronValueSet(min, max, min, max, step, options);
   }
 
   if (base.includes('-')) {
-    const [startRaw, endRaw] = base.split('-');
-    const start = parseCronValue(startRaw, options);
-    const end = parseCronValue(endRaw, options);
-    if (!Number.isInteger(start) || !Number.isInteger(end)) return false;
-    if (start < min || end > max || start > end) return false;
-    return value >= start && value <= end && isSteppedMatch(value, start, step);
+    const rangeParts = base.split('-');
+    if (rangeParts.length !== 2) return null;
+
+    const [startRaw, endRaw] = rangeParts;
+    const start = Number(startRaw);
+    const end = Number(endRaw);
+    if (!isAllowedCronNumber(start, min, max, options) || !isAllowedCronNumber(end, min, max, options)) {
+      return null;
+    }
+    if (start > end) return null;
+
+    return buildCronValueSet(start, end, min, max, step, options);
   }
 
-  const exact = parseCronValue(base, options);
-  if (!Number.isInteger(exact) || exact < min || exact > max) return false;
-  return value === exact;
+  if (rawStep !== undefined) return null;
+
+  const exact = Number(base);
+  if (!isAllowedCronNumber(exact, min, max, options)) return null;
+  return new Set([normalizeCronValue(exact, options)]);
 }
 
-function parseCronValue(raw, options = {}) {
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed)) return null;
-  if (options.normalizeDayOfWeek && parsed === 7) return 0;
-  return parsed;
+function buildCronValueSet(start, end, min, max, step, options = {}) {
+  const values = new Set();
+
+  for (let current = start; current <= end; current += step) {
+    if (!isAllowedCronNumber(current, min, max, options)) return null;
+    values.add(normalizeCronValue(current, options));
+  }
+
+  return values;
 }
 
-function isSteppedMatch(value, start, step) {
-  return (value - start) % step === 0;
+function isAllowedCronNumber(value, min, max, options = {}) {
+  if (!Number.isInteger(value)) return false;
+  if (options.normalizeDayOfWeek && value === 7) return true;
+  return value >= min && value <= max;
+}
+
+function normalizeCronValue(value, options = {}) {
+  if (options.normalizeDayOfWeek && value === 7) return 0;
+  return value;
 }
 
 function isValidRandomState(state, messageCount) {

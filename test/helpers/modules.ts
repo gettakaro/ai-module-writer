@@ -19,6 +19,67 @@ export interface InstallModuleConfig {
   systemConfig?: Record<string, unknown>;
 }
 
+const TRANSIENT_INSTALLATION_RETRY_DELAY_MS = 1500;
+const DEFAULT_INSTALLATION_WAIT_TIMEOUT_MS = 30000;
+
+function isTransientTakaroError(err: unknown): boolean {
+  const status = (err as { response?: { status?: number } })?.response?.status;
+  const message = String((err as { message?: string })?.message ?? err).toLowerCase();
+
+  return status === 500 || message.includes('econnreset') || message.includes('socket hang up');
+}
+
+async function waitForModuleInstallationState(
+  client: Client,
+  moduleId: string,
+  gameServerId: string,
+  shouldExist: boolean,
+  timeoutMs = DEFAULT_INSTALLATION_WAIT_TIMEOUT_MS,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    try {
+      await client.module.moduleInstallationsControllerGetModuleInstallation(moduleId, gameServerId);
+      if (shouldExist) return;
+    } catch (err) {
+      if ((err as { response?: { status?: number } }).response?.status === 404) {
+        if (!shouldExist) return;
+      } else {
+        throw err;
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  throw new Error(
+    `Timed out waiting for module installation ${shouldExist ? 'to exist' : 'to be removed'}: moduleId=${moduleId} gameServerId=${gameServerId}`,
+  );
+}
+
+async function withInstallationRetries<T>(fn: () => Promise<T>, description: string): Promise<T> {
+  const maxAttempts = 3;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt === maxAttempts || !isTransientTakaroError(err)) throw err;
+      console.warn(
+        `${description} failed with a transient Takaro error on attempt ${attempt}/${maxAttempts}; retrying...`,
+        err,
+        (err as { response?: { data?: unknown } })?.response?.data,
+      );
+      await new Promise((resolve) => setTimeout(resolve, TRANSIENT_INSTALLATION_RETRY_DELAY_MS * attempt));
+    }
+  }
+
+  throw lastError;
+}
+
 /**
  * Push a local module to Takaro via the import API.
  * If a module with the same name already exists, deletes it first (idempotent).
@@ -97,12 +158,20 @@ export async function installModule(
   gameServerId: string,
   config?: InstallModuleConfig,
 ): Promise<void> {
-  await client.module.moduleInstallationsControllerInstallModule({
-    versionId,
-    gameServerId,
-    userConfig: config?.userConfig ? JSON.stringify(config.userConfig) : undefined,
-    systemConfig: config?.systemConfig ? JSON.stringify(config.systemConfig) : undefined,
-  });
+  await withInstallationRetries(
+    async () => {
+      await client.module.moduleInstallationsControllerInstallModule({
+        versionId,
+        gameServerId,
+        userConfig: config?.userConfig ? JSON.stringify(config.userConfig) : undefined,
+        systemConfig: config?.systemConfig ? JSON.stringify(config.systemConfig) : undefined,
+      });
+    },
+    'installModule',
+  );
+
+  const version = await client.module.moduleVersionControllerGetModuleVersion(versionId);
+  await waitForModuleInstallationState(client, version.data.data.moduleId, gameServerId, true);
 }
 
 /**
@@ -113,7 +182,14 @@ export async function uninstallModule(
   moduleId: string,
   gameServerId: string,
 ): Promise<void> {
-  await client.module.moduleInstallationsControllerUninstallModule(moduleId, gameServerId);
+  await withInstallationRetries(
+    async () => {
+      await client.module.moduleInstallationsControllerUninstallModule(moduleId, gameServerId);
+    },
+    'uninstallModule',
+  );
+
+  await waitForModuleInstallationState(client, moduleId, gameServerId, false);
 }
 
 /**

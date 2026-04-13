@@ -12,6 +12,7 @@ import {
   normalizeOrder,
   releaseExecutionLock,
   renderPlaceholders,
+  startExecutionLockHeartbeat,
   setFingerprint,
   setState,
 } from './server-message-helpers.js';
@@ -45,6 +46,8 @@ async function main() {
     console.log('server-messages: another execution already holds the rotation lock, skipping without advancing state');
     return;
   }
+
+  const stopLockHeartbeat = startExecutionLockHeartbeat(gameServerId, mod.moduleId, lockToken);
 
   try {
     const fingerprint = computeFingerprint(order, messages);
@@ -108,6 +111,9 @@ async function main() {
       `server-messages: sent order=sequential messageIndex=${selection.messageIndex} nextIndex=${selection.nextState.index} rendered=${JSON.stringify(rendered)}`,
     );
   } finally {
+    await stopLockHeartbeat().catch((err) => {
+      console.error(`server-messages: failed to stop execution lock heartbeat: ${err}`);
+    });
     await releaseExecutionLock(gameServerId, mod.moduleId, lockToken).catch((err) => {
       console.error(`server-messages: failed to release execution lock: ${err}`);
     });
