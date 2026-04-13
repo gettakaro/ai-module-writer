@@ -22,11 +22,33 @@ export interface InstallModuleConfig {
 const TRANSIENT_INSTALLATION_RETRY_DELAY_MS = 1500;
 const DEFAULT_INSTALLATION_WAIT_TIMEOUT_MS = 30000;
 
+function getTakaroErrorStatus(err: unknown): number | undefined {
+  return (err as { response?: { status?: number } })?.response?.status;
+}
+
+function getTakaroErrorMessage(err: unknown): string {
+  return String((err as { message?: string })?.message ?? err).toLowerCase();
+}
+
 function isTransientTakaroError(err: unknown): boolean {
-  const status = (err as { response?: { status?: number } })?.response?.status;
-  const message = String((err as { message?: string })?.message ?? err).toLowerCase();
+  const status = getTakaroErrorStatus(err);
+  const message = getTakaroErrorMessage(err);
 
   return status === 500 || message.includes('econnreset') || message.includes('socket hang up');
+}
+
+function isAlreadyInstalledError(err: unknown): boolean {
+  const status = getTakaroErrorStatus(err);
+  const message = getTakaroErrorMessage(err);
+
+  return status === 409 || (status === 400 && message.includes('already')) || message.includes('already installed');
+}
+
+function isNotInstalledError(err: unknown): boolean {
+  const status = getTakaroErrorStatus(err);
+  const message = getTakaroErrorMessage(err);
+
+  return status === 404 || (status === 400 && message.includes('not installed')) || message.includes('not installed');
 }
 
 async function waitForModuleInstallationState(
@@ -58,7 +80,31 @@ async function waitForModuleInstallationState(
   );
 }
 
-async function withInstallationRetries<T>(fn: () => Promise<T>, description: string): Promise<T> {
+async function reconcileInstallationState(
+  client: Client,
+  moduleId: string,
+  gameServerId: string,
+  shouldExist: boolean,
+  timeoutMs = DEFAULT_INSTALLATION_WAIT_TIMEOUT_MS,
+): Promise<boolean> {
+  try {
+    await waitForModuleInstallationState(client, moduleId, gameServerId, shouldExist, timeoutMs);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function withInstallationRetries<T>(options: {
+  fn: () => Promise<T>;
+  description: string;
+  client: Client;
+  moduleId: string;
+  gameServerId: string;
+  shouldExist: boolean;
+  isTerminalStateError?: (err: unknown) => boolean;
+}): Promise<T | undefined> {
+  const { fn, description, client, moduleId, gameServerId, shouldExist, isTerminalStateError } = options;
   const maxAttempts = 3;
   let lastError: unknown;
 
@@ -67,6 +113,27 @@ async function withInstallationRetries<T>(fn: () => Promise<T>, description: str
       return await fn();
     } catch (err) {
       lastError = err;
+
+      if (await reconcileInstallationState(client, moduleId, gameServerId, shouldExist, 5000)) {
+        console.warn(
+          `${description} request failed on attempt ${attempt}/${maxAttempts}, but installation state reconciled as expected; treating as success.`,
+          err,
+          (err as { response?: { data?: unknown } })?.response?.data,
+        );
+        return undefined;
+      }
+
+      if (isTerminalStateError?.(err)) {
+        if (await reconcileInstallationState(client, moduleId, gameServerId, shouldExist)) {
+          console.warn(
+            `${description} hit a terminal state error on retry because the desired installation state was already reached; treating as success.`,
+            err,
+            (err as { response?: { data?: unknown } })?.response?.data,
+          );
+          return undefined;
+        }
+      }
+
       if (attempt === maxAttempts || !isTransientTakaroError(err)) throw err;
       console.warn(
         `${description} failed with a transient Takaro error on attempt ${attempt}/${maxAttempts}; retrying...`,
@@ -158,8 +225,11 @@ export async function installModule(
   gameServerId: string,
   config?: InstallModuleConfig,
 ): Promise<void> {
-  await withInstallationRetries(
-    async () => {
+  const version = await client.module.moduleVersionControllerGetModuleVersion(versionId);
+  const moduleId = version.data.data.moduleId;
+
+  await withInstallationRetries({
+    fn: async () => {
       await client.module.moduleInstallationsControllerInstallModule({
         versionId,
         gameServerId,
@@ -167,11 +237,15 @@ export async function installModule(
         systemConfig: config?.systemConfig ? JSON.stringify(config.systemConfig) : undefined,
       });
     },
-    'installModule',
-  );
+    description: 'installModule',
+    client,
+    moduleId,
+    gameServerId,
+    shouldExist: true,
+    isTerminalStateError: isAlreadyInstalledError,
+  });
 
-  const version = await client.module.moduleVersionControllerGetModuleVersion(versionId);
-  await waitForModuleInstallationState(client, version.data.data.moduleId, gameServerId, true);
+  await waitForModuleInstallationState(client, moduleId, gameServerId, true);
 }
 
 /**
@@ -182,12 +256,17 @@ export async function uninstallModule(
   moduleId: string,
   gameServerId: string,
 ): Promise<void> {
-  await withInstallationRetries(
-    async () => {
+  await withInstallationRetries({
+    fn: async () => {
       await client.module.moduleInstallationsControllerUninstallModule(moduleId, gameServerId);
     },
-    'uninstallModule',
-  );
+    description: 'uninstallModule',
+    client,
+    moduleId,
+    gameServerId,
+    shouldExist: false,
+    isTerminalStateError: isNotInstalledError,
+  });
 
   await waitForModuleInstallationState(client, moduleId, gameServerId, false);
 }

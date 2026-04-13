@@ -29,6 +29,7 @@ const helperFns = await import(
 const {
   MAX_MESSAGES,
   MAX_WEIGHT,
+  computeFingerprint,
   getIntervalStatus,
   getNextSelection,
   normalizeInterval,
@@ -38,21 +39,6 @@ const {
 const STATE_KEY = 'server_messages_state';
 const FINGERPRINT_KEY = 'server_messages_fingerprint';
 const LOCK_KEY = 'server_messages_lock';
-
-function computeFingerprint(order: string, messages: Array<{ text: string; weight: number }>) {
-  return hashString(JSON.stringify({ order, messages }));
-}
-
-function hashString(input: string) {
-  let hash = 0x811c9dc5;
-
-  for (let i = 0; i < input.length; i++) {
-    hash ^= input.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-
-  return hash.toString(16).padStart(8, '0');
-}
 
 type CronResult = {
   triggeredAt: Date;
@@ -383,21 +369,19 @@ describe('server-messages integration', () => {
     assert.equal(parseJsonLogField(resumed.logs, 'rendered'), 'Alpha message');
   });
 
-  it('handles empty message lists quietly', async () => {
-    await reinstall({
-      messages: [],
-      order: 'sequential',
-      interval: '* * * * *',
-    });
-
-    const result = await triggerCronjob();
-    assert.equal(result.success, true, `Expected empty-message cron trigger to succeed, logs: ${JSON.stringify(result.logs)}`);
-    assert.ok(result.logs.some((log) => log.includes('no messages configured')));
-    await assertNoEvent(EventSearchInputAllowedFiltersEventNameEnum.ChatMessage, result.triggeredAt);
-  });
-
-  it('rejects whitespace-only messages and invalid cron expressions at install time', async () => {
+  it('rejects empty message lists, whitespace-only messages, and invalid cron expressions at install time', async () => {
     await safeUninstall();
+
+    await assert.rejects(
+      installModule(client, versionId, ctx.gameServer.id, {
+        userConfig: {
+          messages: [],
+          order: 'sequential',
+          interval: '* * * * *',
+        },
+      }),
+      /400|minitems|bad request|validation/i,
+    );
 
     await assert.rejects(
       installModule(client, versionId, ctx.gameServer.id, {
@@ -407,7 +391,7 @@ describe('server-messages integration', () => {
           interval: '* * * * *',
         },
       }),
-      /400|pattern|minLength|bad request|validation/i,
+      /400|pattern|minlength|bad request|validation/i,
     );
 
     for (const interval of ['not-a-cron', '61 * * * *', '*/99 * * * *', '* * 32 * *', '5-1 * * * *']) {
@@ -425,6 +409,28 @@ describe('server-messages integration', () => {
     }
   });
 
+  it('skips valid-but-not-due cron ticks without broadcasting or advancing state', async () => {
+    const now = new Date();
+    const nextMinute = (now.getUTCMinutes() + 1) % 60;
+
+    await reinstall({
+      messages: [{ text: 'First' }, { text: 'Second' }],
+      order: 'sequential',
+      interval: cronExpressionForNow({ minute: String(nextMinute) }),
+    });
+
+    const expectedMessages = normalizeMessages([{ text: 'First', weight: 1 }, { text: 'Second', weight: 1 }]);
+    await upsertModuleVariable(STATE_KEY, JSON.stringify({ order: 'sequential', index: 1 }));
+    await upsertModuleVariable(FINGERPRINT_KEY, computeFingerprint('sequential', expectedMessages));
+
+    const skipped = await triggerCronjob();
+    assert.equal(skipped.success, true, `Expected not-due cron trigger to succeed, logs: ${JSON.stringify(skipped.logs)}`);
+    assert.ok(skipped.logs.some((log) => log.includes('not due')));
+    await assertNoEvent(EventSearchInputAllowedFiltersEventNameEnum.ChatMessage, skipped.triggeredAt);
+
+    const stateAfterSkip = await readModuleVariable(STATE_KEY);
+    assert.deepEqual(JSON.parse(stateAfterSkip!.value), { order: 'sequential', index: 1 });
+  });
 
   it('serializes overlapping executions so overlapping triggers do not duplicate the same broadcast', async () => {
     await reinstall({
@@ -670,8 +676,9 @@ describe('server-message helper unit tests', () => {
     assert.equal(getIntervalStatus('33-35 12 13 4 2', now).matches, true);
     assert.equal(getIntervalStatus('34,59 12 13 4 2', now).matches, true);
     assert.equal(getIntervalStatus('34-38/2 12 13 4 2', now).matches, true);
-    assert.equal(getIntervalStatus('34 12 14 4 1', now).matches, false);
-    assert.equal(getIntervalStatus('34 12 13 4 7', now).matches, false);
+    assert.equal(getIntervalStatus('34 12 14 4 1', now).matches, true);
+    assert.equal(getIntervalStatus('34 12 13 4 7', now).matches, true);
+    assert.equal(getIntervalStatus('34 12 14 4 2', now).matches, false);
     assert.deepEqual(getIntervalStatus('5-1 * * * *', now), {
       valid: false,
       matches: false,
