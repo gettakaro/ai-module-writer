@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 
 const ROOT_DIR = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..');
 const BOT_PORT = Number(process.env.BOT_PORT || 3101);
-const MODULE_NAME = 'server-messages';
+const MODULE_NAME = 'test-server-messages';
 const BOT_NAME = `srvmsg${Math.random().toString(36).slice(2, 8)}`;
 const RUN_ID = `srvmsg-${Date.now().toString(36)}`;
 const evidenceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'server-messages-live-'));
@@ -115,11 +115,25 @@ function extractRenderedSeqA(message, serverName) {
   );
 }
 
+function assertSafeSelectedServer(server) {
+  const allowNonTestServer = process.env.SERVER_MESSAGES_ALLOW_NON_TEST_SERVER === '1';
+  const looksLikeTestServer = /^test[-_]/i.test(server.name) || /server-messages/i.test(server.name);
+
+  if (!looksLikeTestServer && !allowNonTestServer) {
+    throw new Error(
+      `Refusing to run live verification against non-test server '${server.name}' (${server.id}). ` +
+        'Use a dedicated test server via SERVER_MESSAGES_GAMESERVER_ID or SERVER_MESSAGES_GAMESERVER_NAME, ' +
+        'or set SERVER_MESSAGES_ALLOW_NON_TEST_SERVER=1 if you intentionally want to mutate a shared server.',
+    );
+  }
+}
+
 function pickGameServer(gameServers) {
   const requestedId = process.env.SERVER_MESSAGES_GAMESERVER_ID;
   if (requestedId) {
     const exact = gameServers.find((server) => server.id === requestedId);
     if (!exact) throw new Error(`SERVER_MESSAGES_GAMESERVER_ID=${requestedId} was not found in Takaro`);
+    assertSafeSelectedServer(exact);
     return exact;
   }
 
@@ -127,18 +141,15 @@ function pickGameServer(gameServers) {
   if (requestedName) {
     const exact = gameServers.find((server) => server.name === requestedName);
     if (!exact) throw new Error(`SERVER_MESSAGES_GAMESERVER_NAME=${requestedName} was not found in Takaro`);
+    assertSafeSelectedServer(exact);
     return exact;
   }
 
-  const candidates = gameServers.filter((server) => !server.name.startsWith('test-'));
-  const paperLike = candidates.filter((server) => /paper|minecraft/i.test(server.name));
-
-  if (paperLike.length === 1) return paperLike[0];
-  if (candidates.length === 1) return candidates[0];
-
-  const printable = candidates.map((server) => `${server.name} (${server.id})`).join(', ') || 'none';
+  const printable = gameServers.map((server) => `${server.name} (${server.id})`).join(', ') || 'none';
   throw new Error(
-    `Unable to choose a unique live Paper server automatically. Set SERVER_MESSAGES_GAMESERVER_ID or SERVER_MESSAGES_GAMESERVER_NAME. Candidates: ${printable}`,
+    'Refusing to auto-select a game server for live verification. ' +
+      'Set SERVER_MESSAGES_GAMESERVER_ID or SERVER_MESSAGES_GAMESERVER_NAME to an explicit dedicated test server. ' +
+      `Available servers: ${printable}`,
   );
 }
 
@@ -204,21 +215,32 @@ async function uninstallIfPresent(moduleId, gameServerId) {
 async function install(versionId, moduleId, gameServerId, userConfig) {
   await uninstallIfPresent(moduleId, gameServerId);
 
-  try {
-    api('POST', '/module/installation/', {
-      versionId,
-      gameServerId,
-      userConfig: JSON.stringify(userConfig),
-    });
-  } catch (error) {
-    await waitForInstallation(moduleId, gameServerId, true).catch(() => {
-      throw error;
-    });
-    console.warn(`Install request returned an error, but installation was observed live and will be treated as success: ${error.stderr ?? error.message}`);
-    return;
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      api('POST', '/module/installation/', {
+        versionId,
+        gameServerId,
+        userConfig: JSON.stringify(userConfig),
+      });
+      await waitForInstallation(moduleId, gameServerId, true);
+      return;
+    } catch (error) {
+      lastError = error;
+      const installed = await waitForInstallation(moduleId, gameServerId, true).then(
+        () => true,
+        () => false,
+      );
+      if (installed) {
+        return;
+      }
+      if (attempt < 3) {
+        await sleep(1000 * attempt);
+      }
+    }
   }
 
-  await waitForInstallation(moduleId, gameServerId, true);
+  throw lastError;
 }
 
 async function fetchEvents(filters, after, limit = 20) {

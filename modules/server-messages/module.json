@@ -1,5 +1,5 @@
 {
-  "name": "server-messages",
+  "name": "test-server-messages",
   "description": "Broadcast scheduled server announcements with sequential or weighted shuffle-bag rotation.",
   "version": "latest",
   "supportedGames": [
@@ -28,7 +28,7 @@
               "minimum": 1,
               "maximum": 20,
               "default": 1,
-              "description": "Relative weight used only when order is set to random. Enter a whole number from 1 to 20; larger values are rejected during validation."
+              "description": "Relative weight used only when order is set to random. If order is sequential, this field is ignored and can usually stay at 1. Enter a whole number from 1 to 20; larger values are rejected during validation."
             }
           },
           "required": [
@@ -69,7 +69,7 @@
           "0 * * * *",
           "30 18 * * 1-5"
         ],
-        "description": "Announcement schedule in five-field UTC cron format (minute hour day-of-month month day-of-week). For common routines, pick one of the preset UTC schedules above. Use a custom expression only when you need something more specific. Matching is always evaluated in UTC because the module compares against getUTC* values. Common examples: */15 * * * * = every 15 minutes, 0 * * * * = at the top of every UTC hour, 30 18 * * 1-5 = 18:30 UTC on weekdays. To avoid timezone mistakes, first decide the UTC wall-clock time you want on the server, then enter that UTC time here: for example 09:00 New York is usually 14:00 UTC in winter and 13:00 UTC in summer, while 09:00 Berlin is usually 08:00 UTC in winter and 07:00 UTC in summer. Re-check the UTC value whenever daylight saving rules change. The module polls every minute and only broadcasts on ticks that match this expression."
+        "description": "Announcement schedule in five-field UTC cron format (minute hour day-of-month month day-of-week). For common routines, pick one of the preset UTC schedules above. Use a custom expression only when you need something more specific. Matching is always evaluated in UTC because the module compares against getUTC* values. Common examples: */15 * * * * = every 15 minutes, 0 * * * * = at the top of every UTC hour, 30 18 * * 1-5 = 18:30 UTC on weekdays. Important syntax note: this validator expects plain numbers without zero-padding, so use 5 9 * * 1-5 instead of 05 09 * * 1-5. If validation fails, first remove leading zeros and then double-check each field range. To avoid timezone mistakes, first decide the UTC wall-clock time you want on the server, then enter that UTC time here: for example 09:00 New York is usually 14:00 UTC in winter and 13:00 UTC in summer, while 09:00 Berlin is usually 08:00 UTC in winter and 07:00 UTC in summer. Re-check the UTC value whenever daylight saving rules change. The module polls every minute and only broadcasts on ticks that match this expression."
       },
       "order": {
         "type": "string",
@@ -78,7 +78,7 @@
           "random"
         ],
         "default": "sequential",
-        "description": "Message rotation strategy. Sequential sends messages in order and wraps back to the start. Random puts each message into a bag as many times as its weight, shuffles that bag, then sends one entry at a time. In practice, higher-weight messages appear more often, but every weighted slot is used before the bag is reshuffled."
+        "description": "Message rotation strategy. Sequential sends messages in order and wraps back to the start. Random puts each message into a bag as many times as its weight, shuffles that bag, then sends one entry at a time. Weights only matter in random mode; sequential mode ignores them. In practice, higher-weight messages appear more often, but every weighted slot is used before the bag is reshuffled."
       }
     },
     "required": [

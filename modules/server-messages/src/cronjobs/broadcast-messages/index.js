@@ -86,9 +86,11 @@ export async function main() {
     return;
   }
 
-  const stopLockHeartbeat = startExecutionLockHeartbeat(gameServerId, mod.moduleId, lockToken);
+  const { heartbeat: refreshLockHeartbeat, stopHeartbeat } = startExecutionLockHeartbeat(gameServerId, mod.moduleId, lockToken);
 
   try {
+    await refreshLockHeartbeat();
+
     const fingerprint = computeFingerprint(order, messages);
     let state = await getState(gameServerId, mod.moduleId);
     const storedFingerprint = await getFingerprint(gameServerId, mod.moduleId);
@@ -102,6 +104,8 @@ export async function main() {
       console.log(`server-messages: config fingerprint changed, reset rotation state (order=${order})`);
     }
 
+    await refreshLockHeartbeat();
+
     const [serverResult, playerCount] = await Promise.all([
       takaro.gameserver.gameServerControllerGetOne(gameServerId),
       countOnlinePlayers(gameServerId),
@@ -110,6 +114,8 @@ export async function main() {
       console.log('server-messages: no players online, skipping without advancing state');
       return;
     }
+
+    await refreshLockHeartbeat();
 
     const selection = getNextSelection(order, messages, state);
     if (!selection) {
@@ -126,6 +132,7 @@ export async function main() {
 
     const rollbackState = state ?? getInitialState(order, messages);
     await setState(gameServerId, mod.moduleId, selection.nextState);
+    await refreshLockHeartbeat();
 
     try {
       await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
@@ -151,7 +158,7 @@ export async function main() {
       `server-messages: sent order=sequential messageIndex=${selection.messageIndex} nextIndex=${selection.nextState.index} rendered=${JSON.stringify(rendered)}`,
     );
   } finally {
-    await stopLockHeartbeat().catch((err) => {
+    await stopHeartbeat().catch((err) => {
       console.error(`server-messages: failed to stop execution lock heartbeat: ${err}`);
     });
     await releaseExecutionLock(gameServerId, mod.moduleId, lockToken).catch((err) => {

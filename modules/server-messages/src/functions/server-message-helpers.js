@@ -6,7 +6,7 @@ export const LOCK_KEY = 'server_messages_lock';
 export const DEFAULT_INTERVAL = '*/15 * * * *';
 export const MAX_MESSAGES = 100;
 export const MAX_WEIGHT = 20;
-const LOCK_TIMEOUT_MS = 15 * 60 * 1000;
+const LOCK_TIMEOUT_MS = 3 * 60 * 1000;
 
 async function findVariable(gameServerId, moduleId, key) {
   const res = await takaro.variable.variableControllerSearch({
@@ -61,11 +61,32 @@ export async function acquireExecutionLock(gameServerId, moduleId) {
   }
 }
 
-export function startExecutionLockHeartbeat() {
-  return async function stopHeartbeat() {
-    // Takaro's function sandbox does not expose timer globals such as setInterval.
-    // Use a generously long lock TTL instead of an in-process heartbeat so live
-    // Paper executions work the same way as the integration harness.
+export async function refreshExecutionLock(gameServerId, moduleId, token) {
+  const variable = await findVariable(gameServerId, moduleId, LOCK_KEY);
+  if (!variable || variable.value !== token) return false;
+
+  await takaro.variable.variableControllerUpdate(variable.id, {
+    value: token,
+    expiresAt: new Date(Date.now() + LOCK_TIMEOUT_MS).toISOString(),
+  });
+  return true;
+}
+
+export function startExecutionLockHeartbeat(gameServerId, moduleId, token) {
+  let stopped = false;
+
+  async function heartbeat() {
+    if (stopped) return false;
+    return refreshExecutionLock(gameServerId, moduleId, token);
+  }
+
+  async function stopHeartbeat() {
+    stopped = true;
+  }
+
+  return {
+    heartbeat,
+    stopHeartbeat,
   };
 }
 

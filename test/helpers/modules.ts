@@ -19,7 +19,7 @@ export interface InstallModuleConfig {
   systemConfig?: Record<string, unknown>;
 }
 
-const TRANSIENT_INSTALLATION_RETRY_DELAY_MS = 1500;
+const TRANSIENT_INSTALLATION_RETRY_DELAY_MS = 1000;
 const DEFAULT_INSTALLATION_WAIT_TIMEOUT_MS = 30000;
 
 function getTakaroErrorStatus(err: unknown): number | undefined {
@@ -49,6 +49,12 @@ function isNotInstalledError(err: unknown): boolean {
   const message = getTakaroErrorMessage(err);
 
   return status === 404 || (status === 400 && message.includes('not installed')) || message.includes('not installed');
+}
+
+function summarizeTakaroError(err: unknown): string {
+  const status = getTakaroErrorStatus(err);
+  const message = String((err as { message?: string })?.message ?? err);
+  return status ? `status=${status} message=${message}` : message;
 }
 
 async function waitForModuleInstallationState(
@@ -116,19 +122,15 @@ async function withInstallationRetries<T>(options: {
 
       if (await reconcileInstallationState(client, moduleId, gameServerId, shouldExist, 5000)) {
         console.warn(
-          `${description} request failed on attempt ${attempt}/${maxAttempts}, but installation state reconciled as expected; treating as success.`,
-          err,
-          (err as { response?: { data?: unknown } })?.response?.data,
+          `${description} request failed on attempt ${attempt}/${maxAttempts}, but installation state reconciled as expected; treating as success (${summarizeTakaroError(err)}).`,
         );
         return undefined;
       }
 
       if (isTerminalStateError?.(err)) {
-        if (await reconcileInstallationState(client, moduleId, gameServerId, shouldExist)) {
+        if (await reconcileInstallationState(client, moduleId, gameServerId, shouldExist, 5000)) {
           console.warn(
-            `${description} hit a terminal state error on retry because the desired installation state was already reached; treating as success.`,
-            err,
-            (err as { response?: { data?: unknown } })?.response?.data,
+            `${description} hit a terminal-state error after the desired installation state was already reached; treating as success (${summarizeTakaroError(err)}).`,
           );
           return undefined;
         }
@@ -136,9 +138,7 @@ async function withInstallationRetries<T>(options: {
 
       if (attempt === maxAttempts || !isTransientTakaroError(err)) throw err;
       console.warn(
-        `${description} failed with a transient Takaro error on attempt ${attempt}/${maxAttempts}; retrying...`,
-        err,
-        (err as { response?: { data?: unknown } })?.response?.data,
+        `${description} failed with a transient Takaro error on attempt ${attempt}/${maxAttempts}; retrying (${summarizeTakaroError(err)}).`,
       );
       await new Promise((resolve) => setTimeout(resolve, TRANSIENT_INSTALLATION_RETRY_DELAY_MS * attempt));
     }

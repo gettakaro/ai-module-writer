@@ -15,13 +15,13 @@ The script:
 - waits for Paper startup completion and the bot API before exercising the module
 - builds and authenticates
 - pushes `modules/server-messages`
-- installs it on the selected live Paper game server
+- installs it on the explicitly selected live Paper test game server
 - disables the cronjob's automatic schedule during the run so only the explicit trigger steps are measured
 - creates a real bot with a Minecraft-safe username
 - verifies sequential delivery, placeholder rendering, zero-player skip-without-advance, and weighted random shuffle-bag behavior using a unique run id embedded in the broadcast text
 - writes labeled evidence summaries to temp JSON files, writes a durable summary to `modules/server-messages/test/live-verification.latest.json`, and prints explicit PASS/FAIL lines
 
-If Takaro has more than one non-test game server, set one of these env vars before running the script so it cannot target the wrong server:
+You must set one of these env vars before running the script. The verifier refuses to auto-select a server, and it also refuses to touch a non-test server unless you explicitly opt in with `SERVER_MESSAGES_ALLOW_NON_TEST_SERVER=1`:
 
 ```bash
 export SERVER_MESSAGES_GAMESERVER_ID=<uuid>
@@ -43,7 +43,7 @@ export SERVER_MESSAGES_GAMESERVER_NAME=<exact-name>
 4. **Weighted random mode works live**
    - across three triggers with weights `Red=1` and `Gold=2`, the evidence shows exactly one `Red` and two `Gold` broadcasts before reshuffle
 5. **Module remains reinstallable**
-   - the script always uninstalls then reinstalls the latest config before each phase
+   - the script always uninstalls then reinstalls the latest config before each phase on the explicitly selected test server
 
 ## Suggested evidence capture
 
