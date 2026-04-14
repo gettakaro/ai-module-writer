@@ -8,7 +8,6 @@ import {
   getNextSelection,
   getState,
   isValidTimeZone,
-  findUnknownPlaceholders,
   normalizeInterval,
   normalizeMessages,
   normalizeOrder,
@@ -73,14 +72,6 @@ export async function main() {
   if (!isValidTimeZone(timeZone)) {
     throw new Error(
       `server-messages: invalid timeZone=${JSON.stringify(timeZone)}. Use a valid IANA timezone such as UTC, America/New_York, or Europe/Berlin.`,
-    );
-  }
-
-  const unknownPlaceholders = [...new Set(messages.flatMap((message) => findUnknownPlaceholders(message.text)))];
-  if (unknownPlaceholders.length > 0) {
-    throw new Error(
-      `server-messages: unsupported placeholders ${unknownPlaceholders.map((key) => `{${key}}`).join(', ')}. ` +
-        'Supported placeholders are {playerCount} and {serverName}.',
     );
   }
 

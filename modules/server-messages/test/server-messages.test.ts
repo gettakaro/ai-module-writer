@@ -363,30 +363,33 @@ describe('server-messages integration', () => {
     assert.equal(parseJsonLogField(resumed.logs, 'rendered'), 'Alpha message');
   });
 
-  it('rejects empty message lists, unsupported placeholders, whitespace-only messages, and invalid cron expressions at install time', async () => {
+  it('allows empty message lists to install quietly and leaves unknown placeholders unchanged', async () => {
+    await reinstall({
+      messages: [],
+      order: 'sequential',
+      interval: '* * * * *',
+    });
+
+    const emptyRun = await triggerCronjob();
+    assert.equal(emptyRun.success, true, `Expected empty-message cron trigger to succeed, logs: ${JSON.stringify(emptyRun.logs)}`);
+    assert.ok(emptyRun.logs.some((log) => log.includes('no messages configured')));
+    await assertNoEvent(EventSearchInputAllowedFiltersEventNameEnum.ChatMessage, emptyRun.triggeredAt);
+    assert.equal(await readModuleVariable(STATE_KEY), null, 'Expected empty-message runs to avoid creating rotation state');
+
+    await reinstall({
+      messages: [{ text: 'Unknown={unknown}; Count={playerCount}' }],
+      order: 'sequential',
+      interval: '* * * * *',
+    });
+
+    const unknownPlaceholderRun = await triggerCronjob();
+    assert.equal(unknownPlaceholderRun.success, true, `Expected unknown-placeholder cron trigger to succeed, logs: ${JSON.stringify(unknownPlaceholderRun.logs)}`);
+    assert.equal(parseJsonLogField(unknownPlaceholderRun.logs, 'rendered'), 'Unknown={unknown}; Count=3');
+
+    const chat = asChatMessage((await waitForEvents(EventSearchInputAllowedFiltersEventNameEnum.ChatMessage, unknownPlaceholderRun.triggeredAt))[0]!);
+    assert.equal(chat.msg, 'Unknown={unknown}; Count=3');
+
     await safeUninstall();
-
-    await assert.rejects(
-      installModule(client, versionId, ctx.gameServer.id, {
-        userConfig: {
-          messages: [],
-          order: 'sequential',
-          interval: '* * * * *',
-        },
-      }),
-      /400|minitems|bad request|validation/i,
-    );
-
-    await assert.rejects(
-      installModule(client, versionId, ctx.gameServer.id, {
-        userConfig: {
-          messages: [{ text: 'Unknown={unknown}' }],
-          order: 'sequential',
-          interval: '* * * * *',
-        },
-      }),
-      /400|pattern|bad request|validation/i,
-    );
 
     await assert.rejects(
       installModule(client, versionId, ctx.gameServer.id, {
@@ -414,19 +417,33 @@ describe('server-messages integration', () => {
     }
   });
 
-  it('evaluates intervals in the configured timezone instead of forcing manual UTC conversion', async () => {
+  it('evaluates intervals in the configured timezone instead of forcing manual UTC conversion and rejects invalid timezone ids at install time', async () => {
     const timeZone = 'America/New_York';
 
     await reinstall({
       messages: [{ text: 'Timezone aware message' }],
       order: 'sequential',
-      interval: cronExpressionForTimeZoneNow(timeZone),
+      interval: '* * * * *',
       timeZone,
     });
 
     const result = await triggerCronjob();
     assert.equal(result.success, true, `Expected timezone-aware cron trigger to succeed, logs: ${JSON.stringify(result.logs)}`);
     assert.equal(parseJsonLogField(result.logs, 'rendered'), 'Timezone aware message');
+
+    await safeUninstall();
+
+    await assert.rejects(
+      installModule(client, versionId, ctx.gameServer.id, {
+        userConfig: {
+          messages: [{ text: 'Timezone aware message' }],
+          order: 'sequential',
+          interval: '* * * * *',
+          timeZone: 'America/New_Yrok',
+        },
+      }),
+      /400|enum|bad request|validation/i,
+    );
   });
 
   it('skips valid-but-not-due cron ticks without broadcasting or advancing state', async () => {

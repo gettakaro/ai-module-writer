@@ -1,5 +1,5 @@
 {
-  "moduleName": "test-server-messages",
+  "moduleName": "server-messages",
   "summary": {
     "passedChecks": 5,
     "totalChecks": 5

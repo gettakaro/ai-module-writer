@@ -8,7 +8,8 @@ export const DEFAULT_TIME_ZONE = 'UTC';
 export const MAX_MESSAGES = 100;
 export const MAX_WEIGHT = 20;
 export const SUPPORTED_PLACEHOLDERS = ['playerCount', 'serverName'];
-const LOCK_TIMEOUT_MS = 3 * 60 * 1000;
+const LOCK_TIMEOUT_MS = 15 * 60 * 1000;
+const HEARTBEAT_INTERVAL_MS = 60 * 1000;
 const WEEKDAY_TO_CRON_DAY = {
   Sun: 0,
   Mon: 1,
@@ -85,15 +86,57 @@ export async function refreshExecutionLock(gameServerId, moduleId, token) {
 
 export function startExecutionLockHeartbeat(gameServerId, moduleId, token) {
   let stopped = false;
+  let heartbeatInFlight = null;
+  let timerHandle = null;
+
+  function clearHeartbeatTimer() {
+    if (timerHandle && typeof clearTimeout === 'function') {
+      clearTimeout(timerHandle);
+    }
+    timerHandle = null;
+  }
+
+  function scheduleNextHeartbeat() {
+    if (stopped || typeof setTimeout !== 'function') return;
+
+    clearHeartbeatTimer();
+    timerHandle = setTimeout(() => {
+      heartbeat().catch((err) => {
+        console.error(`server-message-helpers: execution lock heartbeat failed: ${err}`);
+      });
+    }, HEARTBEAT_INTERVAL_MS);
+  }
 
   async function heartbeat() {
     if (stopped) return false;
-    return refreshExecutionLock(gameServerId, moduleId, token);
+    if (heartbeatInFlight) return heartbeatInFlight;
+
+    heartbeatInFlight = (async () => {
+      const refreshed = await refreshExecutionLock(gameServerId, moduleId, token);
+      if (refreshed) {
+        scheduleNextHeartbeat();
+      } else {
+        clearHeartbeatTimer();
+      }
+      return refreshed;
+    })();
+
+    try {
+      return await heartbeatInFlight;
+    } finally {
+      heartbeatInFlight = null;
+    }
   }
 
   async function stopHeartbeat() {
     stopped = true;
+    clearHeartbeatTimer();
+    if (heartbeatInFlight) {
+      await heartbeatInFlight.catch(() => false);
+    }
   }
+
+  scheduleNextHeartbeat();
 
   return {
     heartbeat,
