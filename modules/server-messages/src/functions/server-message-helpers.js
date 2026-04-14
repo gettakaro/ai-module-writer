@@ -4,9 +4,20 @@ export const STATE_KEY = 'server_messages_state';
 export const FINGERPRINT_KEY = 'server_messages_fingerprint';
 export const LOCK_KEY = 'server_messages_lock';
 export const DEFAULT_INTERVAL = '*/15 * * * *';
+export const DEFAULT_TIME_ZONE = 'UTC';
 export const MAX_MESSAGES = 100;
 export const MAX_WEIGHT = 20;
+export const SUPPORTED_PLACEHOLDERS = ['playerCount', 'serverName'];
 const LOCK_TIMEOUT_MS = 3 * 60 * 1000;
+const WEEKDAY_TO_CRON_DAY = {
+  Sun: 0,
+  Mon: 1,
+  Tue: 2,
+  Wed: 3,
+  Thu: 4,
+  Fri: 5,
+  Sat: 6,
+};
 
 async function findVariable(gameServerId, moduleId, key) {
   const res = await takaro.variable.variableControllerSearch({
@@ -149,6 +160,29 @@ export function normalizeWeight(weight) {
   return Math.min(parsed, MAX_WEIGHT);
 }
 
+export function normalizeTimeZone(timeZone) {
+  if (typeof timeZone !== 'string') return DEFAULT_TIME_ZONE;
+  const trimmed = timeZone.trim();
+  return trimmed || DEFAULT_TIME_ZONE;
+}
+
+export function isValidTimeZone(timeZone) {
+  try {
+    Intl.DateTimeFormat('en-US', {
+      timeZone,
+      minute: 'numeric',
+      hour: 'numeric',
+      day: 'numeric',
+      month: 'numeric',
+      weekday: 'short',
+      hourCycle: 'h23',
+    }).formatToParts(new Date());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function computeFingerprint(order, messages) {
   return hashString(JSON.stringify({ order, messages }));
 }
@@ -222,6 +256,19 @@ export function getNextSelection(order, messages, state) {
   };
 }
 
+export function findUnknownPlaceholders(text) {
+  const unknown = new Set();
+
+  text.replace(/\{([a-zA-Z0-9_]+)\}/g, (_match, key) => {
+    if (!SUPPORTED_PLACEHOLDERS.includes(key)) {
+      unknown.add(key);
+    }
+    return _match;
+  });
+
+  return [...unknown].sort();
+}
+
 export function renderPlaceholders(text, context) {
   return text.replace(/\{([a-zA-Z0-9_]+)\}/g, (match, key) => {
     if (key === 'playerCount') return String(context.playerCount);
@@ -249,19 +296,24 @@ export function shuffleBag(messages) {
   return bag;
 }
 
-export function getIntervalStatus(interval, now = new Date()) {
+export function getIntervalStatus(interval, now = new Date(), timeZone = DEFAULT_TIME_ZONE) {
   const normalized = normalizeInterval(interval);
   const parts = normalized.split(/\s+/);
   if (parts.length !== 5) {
     return { valid: false, matches: false, normalized };
   }
 
+  const timeParts = getCronTimeParts(now, timeZone);
+  if (!timeParts) {
+    return { valid: false, matches: false, normalized };
+  }
+
   const [minuteField, hourField, dayOfMonthField, monthField, dayOfWeekField] = parts;
-  const minuteMatches = matchesCronField(minuteField, now.getUTCMinutes(), 0, 59);
-  const hourMatches = matchesCronField(hourField, now.getUTCHours(), 0, 23);
-  const monthMatches = matchesCronField(monthField, now.getUTCMonth() + 1, 1, 12);
-  const dayOfMonthMatches = matchesCronField(dayOfMonthField, now.getUTCDate(), 1, 31);
-  const dayOfWeekMatches = matchesCronField(dayOfWeekField, now.getUTCDay(), 0, 7, { normalizeDayOfWeek: true });
+  const minuteMatches = matchesCronField(minuteField, timeParts.minute, 0, 59);
+  const hourMatches = matchesCronField(hourField, timeParts.hour, 0, 23);
+  const monthMatches = matchesCronField(monthField, timeParts.month, 1, 12);
+  const dayOfMonthMatches = matchesCronField(dayOfMonthField, timeParts.dayOfMonth, 1, 31);
+  const dayOfWeekMatches = matchesCronField(dayOfWeekField, timeParts.dayOfWeek, 0, 7, { normalizeDayOfWeek: true });
 
   if (
     minuteMatches === null ||
@@ -280,6 +332,34 @@ export function getIntervalStatus(interval, now = new Date()) {
     matches: minuteMatches && hourMatches && monthMatches && daysMatch,
     normalized,
   };
+}
+
+function getCronTimeParts(now, timeZone) {
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      minute: 'numeric',
+      hour: 'numeric',
+      day: 'numeric',
+      month: 'numeric',
+      weekday: 'short',
+      hourCycle: 'h23',
+    });
+
+    const formattedParts = formatter.formatToParts(now);
+    const getPart = (type) => formattedParts.find((part) => part.type === type)?.value;
+    const weekday = getPart('weekday');
+
+    return {
+      minute: Number(getPart('minute')),
+      hour: Number(getPart('hour')),
+      dayOfMonth: Number(getPart('day')),
+      month: Number(getPart('month')),
+      dayOfWeek: WEEKDAY_TO_CRON_DAY[weekday] ?? Number.NaN,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function getDayMatchStatus(dayOfMonthField, dayOfMonthMatches, dayOfWeekField, dayOfWeekMatches) {

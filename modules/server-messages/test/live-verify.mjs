@@ -174,7 +174,8 @@ async function waitForGameServerSelection() {
     try {
       return pickGameServer(gameServers);
     } catch (error) {
-      if (String(error.message ?? error).includes('Candidates: none')) {
+      const message = String(error.message ?? error);
+      if (message.includes('Available servers: none') || message.includes('Candidates: none')) {
         await sleep(2000);
         continue;
       }
@@ -465,17 +466,16 @@ try {
 
   const failures = verificationResults.filter((result) => result.status === 'FAIL');
   evidenceReport = {
-    executedAt: new Date().toISOString(),
-    runId: RUN_ID,
-    gameServer: { id: gameServer.id, name: gameServer.name },
-    module: { id: moduleId, versionId },
-    cronjobId: cronjob.id,
-    evidenceDir,
-    sequentialEvidenceFile: path.join(evidenceDir, 'sequential.json'),
-    randomEvidenceFile: path.join(evidenceDir, 'random.json'),
-    results: verificationResults,
-    passedChecks: verificationResults.length - failures.length,
-    totalChecks: verificationResults.length,
+    moduleName: MODULE_NAME,
+    summary: {
+      passedChecks: verificationResults.length - failures.length,
+      totalChecks: verificationResults.length,
+    },
+    results: verificationResults.map((result) => ({
+      description: result.description,
+      status: result.status,
+    })),
+    note: 'Environment-specific identifiers, temp paths, and raw execution logs are written only to the temporary evidence directory printed by the script at runtime.',
   };
 
   await fs.writeFile(repoEvidencePath, `${JSON.stringify(evidenceReport, null, 2)}\n`);

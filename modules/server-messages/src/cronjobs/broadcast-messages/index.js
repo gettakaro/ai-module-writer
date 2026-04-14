@@ -7,9 +7,12 @@ import {
   getIntervalStatus,
   getNextSelection,
   getState,
+  isValidTimeZone,
+  findUnknownPlaceholders,
   normalizeInterval,
   normalizeMessages,
   normalizeOrder,
+  normalizeTimeZone,
   releaseExecutionLock,
   renderPlaceholders,
   startExecutionLockHeartbeat,
@@ -59,6 +62,7 @@ export async function main() {
   const { gameServerId, module: mod } = data;
   const order = normalizeOrder(mod.userConfig.order);
   const interval = normalizeInterval(mod.userConfig.interval);
+  const timeZone = normalizeTimeZone(mod.userConfig.timeZone);
   const messages = normalizeMessages(mod.userConfig.messages);
 
   if (messages.length === 0) {
@@ -66,16 +70,30 @@ export async function main() {
     return;
   }
 
-  const intervalStatus = getIntervalStatus(interval);
+  if (!isValidTimeZone(timeZone)) {
+    throw new Error(
+      `server-messages: invalid timeZone=${JSON.stringify(timeZone)}. Use a valid IANA timezone such as UTC, America/New_York, or Europe/Berlin.`,
+    );
+  }
+
+  const unknownPlaceholders = [...new Set(messages.flatMap((message) => findUnknownPlaceholders(message.text)))];
+  if (unknownPlaceholders.length > 0) {
+    throw new Error(
+      `server-messages: unsupported placeholders ${unknownPlaceholders.map((key) => `{${key}}`).join(', ')}. ` +
+        'Supported placeholders are {playerCount} and {serverName}.',
+    );
+  }
+
+  const intervalStatus = getIntervalStatus(interval, new Date(), timeZone);
   if (!intervalStatus.valid) {
     throw new Error(
-      `server-messages: invalid interval=${JSON.stringify(interval)}. Use a valid five-field UTC cron expression.`,
+      `server-messages: invalid interval=${JSON.stringify(interval)}. Use a valid five-field cron expression for timeZone=${JSON.stringify(timeZone)}.`,
     );
   }
 
   if (!intervalStatus.matches) {
     console.log(
-      `server-messages: interval=${JSON.stringify(intervalStatus.normalized)} not due at=${new Date().toISOString()}, skipping without advancing state`,
+      `server-messages: interval=${JSON.stringify(intervalStatus.normalized)} timeZone=${JSON.stringify(timeZone)} not due at=${new Date().toISOString()}, skipping without advancing state`,
     );
     return;
   }

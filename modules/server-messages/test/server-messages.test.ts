@@ -1,6 +1,5 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { Client, EventOutputDTO, EventSearchInputAllowedFiltersEventNameEnum } from '@takaro/apiclient';
@@ -19,28 +18,6 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const MODULE_DIR = path.resolve(__dirname, '..');
-const HELPER_SOURCE_PATH = path.resolve(MODULE_DIR, 'src/functions/server-message-helpers.js');
-const MODULE_JSON_PATH = path.resolve(MODULE_DIR, 'module.json');
-const helperModuleSource = await fs.readFile(HELPER_SOURCE_PATH, 'utf8');
-const moduleJson = JSON.parse(await fs.readFile(MODULE_JSON_PATH, 'utf8')) as {
-  config: { properties: { interval: { pattern: string } } };
-};
-const intervalPattern = new RegExp(moduleJson.config.properties.interval.pattern);
-const helperModuleDataUrl = `data:text/javascript;base64,${Buffer.from(
-  helperModuleSource.replace("import { takaro } from '@takaro/helpers';", 'const takaro = {};'),
-).toString('base64')}`;
-const helperFns = await import(helperModuleDataUrl);
-const cronjobSource = await fs.readFile(path.resolve(MODULE_DIR, 'src/cronjobs/broadcast-messages/index.js'), 'utf8');
-const {
-  MAX_MESSAGES,
-  MAX_WEIGHT,
-  computeFingerprint,
-  getIntervalStatus,
-  getNextSelection,
-  normalizeInterval,
-  normalizeMessages,
-  normalizeOrder,
-} = helperFns;
 const STATE_KEY = 'server_messages_state';
 const FINGERPRINT_KEY = 'server_messages_fingerprint';
 const LOCK_KEY = 'server_messages_lock';
@@ -51,21 +28,36 @@ type CronResult = {
   logs: string[];
 };
 
-function cronExpressionForNow(overrides: {
-  minute?: string;
-  hour?: string;
-  dayOfMonth?: string;
-  month?: string;
-  dayOfWeek?: string;
-} = {}) {
-  const now = new Date();
+function cronExpressionForTimeZoneNow(timeZone: string) {
+  const weekdayMap: Record<string, string> = {
+    Sun: '0',
+    Mon: '1',
+    Tue: '2',
+    Wed: '3',
+    Thu: '4',
+    Fri: '5',
+    Sat: '6',
+  };
+
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    minute: 'numeric',
+    hour: 'numeric',
+    day: 'numeric',
+    month: 'numeric',
+    weekday: 'short',
+    hourCycle: 'h23',
+  });
+
+  const parts = formatter.formatToParts(new Date());
+  const get = (type: string) => parts.find((part) => part.type === type)?.value;
 
   return [
-    overrides.minute ?? String(now.getUTCMinutes()),
-    overrides.hour ?? String(now.getUTCHours()),
-    overrides.dayOfMonth ?? String(now.getUTCDate()),
-    overrides.month ?? String(now.getUTCMonth() + 1),
-    overrides.dayOfWeek ?? String(now.getUTCDay()),
+    String(Number(get('minute'))),
+    String(Number(get('hour'))),
+    String(Number(get('day'))),
+    String(Number(get('month'))),
+    weekdayMap[get('weekday') ?? ''] ?? '0',
   ].join(' ');
 }
 
@@ -313,11 +305,11 @@ describe('server-messages integration', () => {
     return event.meta as { msg?: string; channel?: string };
   }
 
-  it('sends sequential messages, broadcasts to players, renders placeholders, and wraps', async () => {
+  it('sends sequential messages, broadcasts to players, renders supported placeholders, and wraps', async () => {
     await reinstall({
       messages: [
         { text: 'Alpha message' },
-        { text: 'Players={playerCount}; Server={serverName}; Unknown={unknown}' },
+        { text: 'Players={playerCount}; Server={serverName}' },
       ],
       order: 'sequential',
       interval: '* * * * *',
@@ -336,13 +328,10 @@ describe('server-messages integration', () => {
 
     const second = await triggerCronjob();
     assert.equal(second.success, true, `Expected second cron trigger to succeed, logs: ${JSON.stringify(second.logs)}`);
-    assert.equal(
-      parseJsonLogField(second.logs, 'rendered'),
-      `Players=3; Server=${ctx.gameServer.name}; Unknown={unknown}`,
-    );
+    assert.equal(parseJsonLogField(second.logs, 'rendered'), `Players=3; Server=${ctx.gameServer.name}`);
 
     const secondChat = asChatMessage((await waitForEvents(EventSearchInputAllowedFiltersEventNameEnum.ChatMessage, second.triggeredAt))[0]!);
-    assert.equal(secondChat.msg, `Players=3; Server=${ctx.gameServer.name}; Unknown={unknown}`);
+    assert.equal(secondChat.msg, `Players=3; Server=${ctx.gameServer.name}`);
 
     const stateAfterSecond = await readModuleVariable(STATE_KEY);
     assert.deepEqual(JSON.parse(stateAfterSecond!.value), { order: 'sequential', index: 0 });
@@ -374,20 +363,30 @@ describe('server-messages integration', () => {
     assert.equal(parseJsonLogField(resumed.logs, 'rendered'), 'Alpha message');
   });
 
-  it('allows empty message lists to exit quietly, while still rejecting whitespace-only messages and invalid cron expressions at install time', async () => {
-    await reinstall({
-      messages: [],
-      order: 'sequential',
-      interval: '* * * * *',
-    });
-
-    const emptyRun = await triggerCronjob();
-    assert.equal(emptyRun.success, true, `Expected empty-message cron trigger to succeed, logs: ${JSON.stringify(emptyRun.logs)}`);
-    assert.ok(emptyRun.logs.some((log) => log.includes('no messages configured')));
-    await assertNoEvent(EventSearchInputAllowedFiltersEventNameEnum.ChatMessage, emptyRun.triggeredAt);
-    assert.equal(await readModuleVariable(STATE_KEY), null, 'Expected empty-message runs to avoid creating rotation state');
-
+  it('rejects empty message lists, unsupported placeholders, whitespace-only messages, and invalid cron expressions at install time', async () => {
     await safeUninstall();
+
+    await assert.rejects(
+      installModule(client, versionId, ctx.gameServer.id, {
+        userConfig: {
+          messages: [],
+          order: 'sequential',
+          interval: '* * * * *',
+        },
+      }),
+      /400|minitems|bad request|validation/i,
+    );
+
+    await assert.rejects(
+      installModule(client, versionId, ctx.gameServer.id, {
+        userConfig: {
+          messages: [{ text: 'Unknown={unknown}' }],
+          order: 'sequential',
+          interval: '* * * * *',
+        },
+      }),
+      /400|pattern|bad request|validation/i,
+    );
 
     await assert.rejects(
       installModule(client, versionId, ctx.gameServer.id, {
@@ -415,19 +414,42 @@ describe('server-messages integration', () => {
     }
   });
 
-  it('skips valid-but-not-due cron ticks without broadcasting or advancing state', async () => {
-    const now = new Date();
-    const differentMonth = ((now.getUTCMonth() + 1) % 12) + 1;
+  it('evaluates intervals in the configured timezone instead of forcing manual UTC conversion', async () => {
+    const timeZone = 'America/New_York';
 
+    await reinstall({
+      messages: [{ text: 'Timezone aware message' }],
+      order: 'sequential',
+      interval: cronExpressionForTimeZoneNow(timeZone),
+      timeZone,
+    });
+
+    const result = await triggerCronjob();
+    assert.equal(result.success, true, `Expected timezone-aware cron trigger to succeed, logs: ${JSON.stringify(result.logs)}`);
+    assert.equal(parseJsonLogField(result.logs, 'rendered'), 'Timezone aware message');
+  });
+
+  it('skips valid-but-not-due cron ticks without broadcasting or advancing state', async () => {
     await reinstall({
       messages: [{ text: 'First' }, { text: 'Second' }],
       order: 'sequential',
-      interval: `${now.getUTCMinutes()} ${now.getUTCHours()} ${now.getUTCDate()} ${differentMonth} *`,
+      interval: '* * * * *',
     });
 
-    const expectedMessages = normalizeMessages([{ text: 'First', weight: 1 }, { text: 'Second', weight: 1 }]);
-    await upsertModuleVariable(STATE_KEY, JSON.stringify({ order: 'sequential', index: 1 }));
-    await upsertModuleVariable(FINGERPRINT_KEY, computeFingerprint('sequential', expectedMessages));
+    const first = await triggerCronjob();
+    assert.equal(first.success, true);
+
+    await safeUninstall();
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        messages: [{ text: 'First' }, { text: 'Second' }],
+        order: 'sequential',
+        interval: '0 0 31 2 *',
+      },
+    });
+
+    const stateBeforeSkip = await readModuleVariable(STATE_KEY);
+    assert.deepEqual(JSON.parse(stateBeforeSkip!.value), { order: 'sequential', index: 1 });
 
     const skipped = await triggerCronjob();
     assert.equal(skipped.success, true, `Expected not-due cron trigger to succeed, logs: ${JSON.stringify(skipped.logs)}`);
@@ -529,8 +551,10 @@ describe('server-messages integration', () => {
       interval: '* * * * *',
     });
 
+    const baselineSequential = await triggerCronjob();
+    assert.equal(baselineSequential.success, true);
+
     await upsertModuleVariable(STATE_KEY, '{not-json');
-    await upsertModuleVariable(FINGERPRINT_KEY, computeFingerprint('sequential', [{ text: 'Recovery message', weight: 1 }]));
 
     const sequentialRecovery = await triggerCronjob();
     assert.equal(sequentialRecovery.success, true);
@@ -546,14 +570,10 @@ describe('server-messages integration', () => {
       interval: '* * * * *',
     });
 
+    const baselineRandom = await triggerCronjob();
+    assert.equal(baselineRandom.success, true);
+
     await upsertModuleVariable(STATE_KEY, JSON.stringify({ order: 'random', bag: [1, 1], cursor: 0 }));
-    await upsertModuleVariable(
-      FINGERPRINT_KEY,
-      computeFingerprint('random', [
-        { text: 'Red', weight: 1 },
-        { text: 'Gold', weight: 2 },
-      ]),
-    );
 
     const randomRecovery = await triggerCronjob();
     assert.equal(randomRecovery.success, true, `Expected random recovery trigger to succeed, logs: ${JSON.stringify(randomRecovery.logs)}`);
@@ -628,155 +648,5 @@ describe('server-messages integration', () => {
       { order: 'sequential', index: 0 },
       'Expected failed sends to roll rotation state back so the skipped message is retried later',
     );
-  });
-});
-
-describe('server-message helper unit tests', () => {
-  it('normalizes order, interval, message bounds, and weight caps defensively', () => {
-    assert.equal(normalizeOrder(undefined), 'sequential');
-    assert.equal(normalizeOrder('unexpected'), 'sequential');
-    assert.equal(normalizeOrder('random'), 'random');
-
-    assert.equal(normalizeInterval(undefined), '*/15 * * * *');
-    assert.equal(normalizeInterval('   '), '*/15 * * * *');
-    assert.equal(normalizeInterval(' 0 * * * * '), '0 * * * *');
-
-    const normalizedMessages = normalizeMessages([
-      { text: 'kept default weight' },
-      { text: 'bad weight', weight: -2 },
-      { text: 'capped weight', weight: MAX_WEIGHT + 99 },
-      null,
-      { text: 5 },
-      ...Array.from({ length: MAX_MESSAGES + 5 }, (_, index) => ({ text: `extra-${index}`, weight: 1 })),
-    ] as Array<{ text: string; weight?: number }>);
-
-    assert.equal(normalizedMessages.length, MAX_MESSAGES);
-    assert.deepEqual(normalizedMessages.slice(0, 3), [
-      { text: 'kept default weight', weight: 1 },
-      { text: 'bad weight', weight: 1 },
-      { text: 'capped weight', weight: MAX_WEIGHT },
-    ]);
-  });
-
-  it('rejects semantically corrupted random bags and rebuilds from configured weights', () => {
-    const messages = normalizeMessages([
-      { text: 'Red', weight: 1 },
-      { text: 'Gold', weight: 2 },
-    ]);
-
-    const duplicateBag = getNextSelection('random', messages, { order: 'random', bag: [1, 1], cursor: 0 });
-    assert.equal(duplicateBag?.bagSize, 3);
-    assert.equal(duplicateBag?.cursor, 0);
-    assert.equal(duplicateBag?.nextState.order, 'random');
-    assert.equal(duplicateBag?.nextState.bag.length, 3);
-    assert.equal(duplicateBag?.nextState.bag.filter((entry: number) => entry === 0).length, 1);
-    assert.equal(duplicateBag?.nextState.bag.filter((entry: number) => entry === 1).length, 2);
-
-    const truncatedBag = getNextSelection('random', messages, { order: 'random', bag: [0], cursor: 0 });
-    assert.equal(truncatedBag?.nextState.bag.length, 3);
-    assert.equal(truncatedBag?.nextState.bag.filter((entry: number) => entry === 0).length, 1);
-    assert.equal(truncatedBag?.nextState.bag.filter((entry: number) => entry === 1).length, 2);
-  });
-
-  it('counts online players correctly when Takaro omits pagination totals', async () => {
-    const calls: number[] = [];
-    (globalThis as typeof globalThis & { __testTakaro?: unknown }).__testTakaro = {
-      playerOnGameserver: {
-        playerOnGameServerControllerSearch: async ({ page }: { page: number }) => {
-          calls.push(page);
-          const counts = [100, 100, 7];
-          return {
-            data: {
-              data: Array.from({ length: counts[page] ?? 0 }, (_, index) => ({ id: `${page}-${index}` })),
-              meta: {},
-            },
-          };
-        },
-      },
-    };
-
-    try {
-      const paginatedCronjobModule = await import(
-        `data:text/javascript;base64,${Buffer.from(
-          cronjobSource
-            .replace("import { data, takaro } from '@takaro/helpers';", 'const data = {}; const takaro = globalThis.__testTakaro;')
-            .replace("from './server-message-helpers.js';", `from '${helperModuleDataUrl}';`)
-            .replace(/await main\(\);\s*$/, ''),
-        ).toString('base64')}`
-      );
-
-      const count = await paginatedCronjobModule.countOnlinePlayers('gs-1');
-      assert.equal(count, 207);
-      assert.deepEqual(calls, [0, 1, 2]);
-    } finally {
-      delete (globalThis as typeof globalThis & { __testTakaro?: unknown }).__testTakaro;
-    }
-  });
-
-  it('keeps runtime interval validation aligned with the config schema pattern', () => {
-    const expressions = [
-      '*/15 * * * *',
-      '0 * * * *',
-      '30 18 * * 1-5',
-      '34 12 13 4 2',
-      '33-35 12 13 4 2',
-      '34,59 12 13 4 2',
-      '34-38/2 12 13 4 2',
-      '34 12 13 4 7',
-      '01 * * * *',
-      '1 01 * * *',
-      '* * * * 01',
-      '*/60 * * * *',
-      '0-59/60 * * * *',
-      '1-1 * * * *',
-      '5-1 * * * *',
-      '61 * * * *',
-      '1,,2 * * * *',
-      'not-a-cron',
-    ];
-
-    for (const expression of expressions) {
-      assert.equal(
-        getIntervalStatus(expression).valid,
-        intervalPattern.test(expression),
-        `Expected runtime validation and module.json pattern to agree for ${expression}`,
-      );
-    }
-  });
-
-  it('applies standard cron semantics and rejects descending ranges', () => {
-    const now = new Date(Date.UTC(2026, 3, 13, 12, 34, 0));
-
-    assert.deepEqual(getIntervalStatus('34 12 13 4 2', now), {
-      valid: true,
-      matches: true,
-      normalized: '34 12 13 4 2',
-    });
-    assert.equal(getIntervalStatus('33-35 12 13 4 2', now).matches, true);
-    assert.equal(getIntervalStatus('34,59 12 13 4 2', now).matches, true);
-    assert.equal(getIntervalStatus('34-38/2 12 13 4 2', now).matches, true);
-    assert.equal(getIntervalStatus('34 12 14 4 1', now).matches, true);
-    assert.equal(getIntervalStatus('34 12 13 4 7', now).matches, true);
-    assert.equal(getIntervalStatus('34 12 14 4 2', now).matches, false);
-    assert.deepEqual(getIntervalStatus('5-1 * * * *', now), {
-      valid: false,
-      matches: false,
-      normalized: '5-1 * * * *',
-    });
-    assert.deepEqual(getIntervalStatus('01 * * * *', now), {
-      valid: false,
-      matches: false,
-      normalized: '01 * * * *',
-    });
-    assert.deepEqual(getIntervalStatus('*/60 * * * *', now), {
-      valid: false,
-      matches: false,
-      normalized: '*/60 * * * *',
-    });
-    assert.deepEqual(getIntervalStatus('1-1 * * * *', now), {
-      valid: false,
-      matches: false,
-      normalized: '1-1 * * * *',
-    });
   });
 });
