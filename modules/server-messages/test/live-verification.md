@@ -57,11 +57,6 @@ It also prints temp evidence file paths for the detailed sequential and random e
 
 ## Latest recorded run
 
-Latest checked-in run on this branch:
+Do not commit per-run timestamps, server ids, run ids, or other environment-specific details here. Instead, run the verifier when needed and inspect the generated temp evidence plus the stable summary file.
 
-- Executed at: `2026-04-14T01:23:44.866Z`
-- Game server: `nca-ai-paper` (`eaf1086a-a81d-41c4-b3f0-afa6a60ddda9`)
-- Run id: `srvmsg-mnxxrlwd`
-- Result: `5/5` live checks passed
-
-See `modules/server-messages/test/live-verification.latest.json` for the full sequential/random event evidence captured from that run.
+See `modules/server-messages/test/live-verification.latest.json` for the latest durable pass/fail summary without environment-specific metadata.

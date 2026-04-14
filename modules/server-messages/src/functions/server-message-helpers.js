@@ -481,7 +481,6 @@ function parseCronSegmentValues(segment, min, max, options = {}) {
 
 function parseCronNumberToken(token) {
   if (!/^\d+$/.test(token)) return Number.NaN;
-  if (token.length > 1 && token.startsWith('0')) return Number.NaN;
   return Number(token);
 }
 

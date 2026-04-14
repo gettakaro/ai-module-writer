@@ -2,6 +2,7 @@ import { data, takaro } from '@takaro/helpers';
 import {
   acquireExecutionLock,
   computeFingerprint,
+  findUnknownPlaceholders,
   getFingerprint,
   getInitialState,
   getIntervalStatus,
@@ -133,6 +134,13 @@ export async function main() {
     }
 
     const message = messages[selection.messageIndex];
+    const unknownPlaceholders = findUnknownPlaceholders(message.text);
+    if (unknownPlaceholders.length > 0) {
+      console.warn(
+        `server-messages: messageIndex=${selection.messageIndex} contains unsupported placeholders=${JSON.stringify(unknownPlaceholders)}; they will be left unchanged in the rendered broadcast`,
+      );
+    }
+
     const serverName = serverResult.data.data.name ?? '';
     const rendered = renderPlaceholders(message.text, {
       playerCount,

@@ -363,7 +363,7 @@ describe('server-messages integration', () => {
     assert.equal(parseJsonLogField(resumed.logs, 'rendered'), 'Alpha message');
   });
 
-  it('allows empty message lists to install quietly and leaves unknown placeholders unchanged', async () => {
+  it('allows empty message lists to install quietly, warns about unknown placeholders, and leaves them unchanged', async () => {
     await reinstall({
       messages: [],
       order: 'sequential',
@@ -384,6 +384,10 @@ describe('server-messages integration', () => {
 
     const unknownPlaceholderRun = await triggerCronjob();
     assert.equal(unknownPlaceholderRun.success, true, `Expected unknown-placeholder cron trigger to succeed, logs: ${JSON.stringify(unknownPlaceholderRun.logs)}`);
+    assert.ok(
+      unknownPlaceholderRun.logs.some((log) => log.includes('unsupported placeholders') && log.includes('unknown')),
+      `Expected unknown-placeholder run to log a warning, logs: ${JSON.stringify(unknownPlaceholderRun.logs)}`,
+    );
     assert.equal(parseJsonLogField(unknownPlaceholderRun.logs, 'rendered'), 'Unknown={unknown}; Count=3');
 
     const chat = asChatMessage((await waitForEvents(EventSearchInputAllowedFiltersEventNameEnum.ChatMessage, unknownPlaceholderRun.triggeredAt))[0]!);
@@ -401,6 +405,21 @@ describe('server-messages integration', () => {
       }),
       /400|pattern|minlength|bad request|validation/i,
     );
+
+    const zeroPaddedNowInterval = cronExpressionForTimeZoneNow('UTC')
+      .split(' ')
+      .map((segment, index) => (index < 2 ? segment.padStart(2, '0') : segment))
+      .join(' ');
+
+    await reinstall({
+      messages: [{ text: 'Leading zero cron works' }],
+      order: 'sequential',
+      interval: zeroPaddedNowInterval,
+    });
+
+    const zeroPaddedCronRun = await triggerCronjob();
+    assert.equal(zeroPaddedCronRun.success, true, `Expected zero-padded cron trigger to succeed, logs: ${JSON.stringify(zeroPaddedCronRun.logs)}`);
+    assert.equal(parseJsonLogField(zeroPaddedCronRun.logs, 'rendered'), 'Leading zero cron works');
 
     for (const interval of ['not-a-cron', '61 * * * *', '*/99 * * * *', '* * 32 * *', '5-1 * * * *']) {
       await assert.rejects(

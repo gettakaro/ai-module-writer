@@ -21,6 +21,8 @@ export interface InstallModuleConfig {
 
 const TRANSIENT_INSTALLATION_RETRY_DELAY_MS = 1000;
 const DEFAULT_INSTALLATION_WAIT_TIMEOUT_MS = 30000;
+const TEST_RUN_STARTED_AT_MS = Number(process.env['TEST_RUN_STARTED_AT'] ?? '0');
+const STALE_RESOURCE_SKEW_MS = 1000;
 
 function getTakaroErrorStatus(err: unknown): number | undefined {
   return (err as { response?: { status?: number } })?.response?.status;
@@ -55,6 +57,16 @@ function summarizeTakaroError(err: unknown): string {
   const status = getTakaroErrorStatus(err);
   const message = String((err as { message?: string })?.message ?? err);
   return status ? `status=${status} message=${message}` : message;
+}
+
+function isStaleTestResource(createdAt: string | undefined): boolean {
+  if (!TEST_RUN_STARTED_AT_MS) return true;
+  if (!createdAt) return true;
+
+  const createdAtMs = Date.parse(createdAt);
+  if (Number.isNaN(createdAtMs)) return true;
+
+  return createdAtMs < TEST_RUN_STARTED_AT_MS - STALE_RESOURCE_SKEW_MS;
 }
 
 async function waitForModuleInstallationState(
@@ -320,10 +332,14 @@ export async function cleanupTestModules(client: Client): Promise<void> {
       console.error('cleanupTestModules: search failed (non-fatal, skipping cleanup):', err);
       return;
     }
-    const mods = result.data.data.filter((m) => m.name.startsWith('test-'));
+    const mods = result.data.data.filter((m) => m.name.startsWith('test-') && isStaleTestResource(m.createdAt));
     if (mods.length === 0) break;
     for (const mod of mods) {
-      await client.module.moduleControllerRemove(mod.id);
+      try {
+        await client.module.moduleControllerRemove(mod.id);
+      } catch (err) {
+        if ((err as { response?: { status?: number } }).response?.status !== 404) throw err;
+      }
     }
   }
 }
@@ -409,10 +425,14 @@ export async function cleanupTestGameServers(client: Client): Promise<void> {
       limit,
       page: 0,
     });
-    const servers = result.data.data.filter((gs) => gs.name.startsWith('test-'));
+    const servers = result.data.data.filter((gs) => gs.name.startsWith('test-') && isStaleTestResource(gs.createdAt));
     if (servers.length === 0) break;
     for (const gs of servers) {
-      await client.gameserver.gameServerControllerRemove(gs.id);
+      try {
+        await client.gameserver.gameServerControllerRemove(gs.id);
+      } catch (err) {
+        if ((err as { response?: { status?: number } }).response?.status !== 404) throw err;
+      }
     }
   }
 }
