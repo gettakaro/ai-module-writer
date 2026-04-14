@@ -1,0 +1,176 @@
+import { data, takaro } from '@takaro/helpers';
+import {
+  acquireExecutionLock,
+  computeFingerprint,
+  findUnknownPlaceholders,
+  getFingerprint,
+  getInitialState,
+  getIntervalStatus,
+  getNextSelection,
+  getState,
+  isValidTimeZone,
+  normalizeInterval,
+  normalizeMessages,
+  normalizeOrder,
+  normalizeTimeZone,
+  releaseExecutionLock,
+  renderPlaceholders,
+  startExecutionLockHeartbeat,
+  setFingerprint,
+  setState,
+} from './server-message-helpers.js';
+
+export async function countOnlinePlayers(gameServerId) {
+  const pageSize = 100;
+  const firstPage = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
+    filters: {
+      gameServerId: [gameServerId],
+      online: [true],
+    },
+    limit: pageSize,
+    page: 0,
+  });
+
+  const total = firstPage.data.meta?.total;
+  if (typeof total === 'number') {
+    return total;
+  }
+
+  let count = firstPage.data.data.length;
+  let page = 1;
+  let pageLength = firstPage.data.data.length;
+
+  while (pageLength === pageSize) {
+    const nextPage = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
+      filters: {
+        gameServerId: [gameServerId],
+        online: [true],
+      },
+      limit: pageSize,
+      page,
+    });
+
+    pageLength = nextPage.data.data.length;
+    count += pageLength;
+    page += 1;
+  }
+
+  return count;
+}
+
+export async function main() {
+  const { gameServerId, module: mod } = data;
+  const order = normalizeOrder(mod.userConfig.order);
+  const interval = normalizeInterval(mod.userConfig.interval);
+  const timeZone = normalizeTimeZone(mod.userConfig.timeZone);
+  const messages = normalizeMessages(mod.userConfig.messages);
+
+  if (messages.length === 0) {
+    console.log('server-messages: no messages configured, skipping without advancing state');
+    return;
+  }
+
+  if (!isValidTimeZone(timeZone)) {
+    throw new Error(
+      `server-messages: invalid timeZone=${JSON.stringify(timeZone)}. Use a valid IANA timezone such as UTC, America/New_York, or Europe/Berlin.`,
+    );
+  }
+
+  const intervalStatus = getIntervalStatus(interval, new Date(), timeZone);
+  if (!intervalStatus.valid) {
+    throw new Error(
+      `server-messages: invalid interval=${JSON.stringify(interval)}. Use a valid five-field cron expression for timeZone=${JSON.stringify(timeZone)}.`,
+    );
+  }
+
+  if (!intervalStatus.matches) {
+    console.log(
+      `server-messages: interval=${JSON.stringify(intervalStatus.normalized)} timeZone=${JSON.stringify(timeZone)} not due at=${new Date().toISOString()}, skipping without advancing state`,
+    );
+    return;
+  }
+
+  const lockToken = await acquireExecutionLock(gameServerId, mod.moduleId);
+  if (!lockToken) {
+    console.log('server-messages: another execution already holds the rotation lock, skipping without advancing state');
+    return;
+  }
+
+  const { heartbeat: refreshLockHeartbeat, stopHeartbeat } = startExecutionLockHeartbeat(gameServerId, mod.moduleId, lockToken);
+
+  try {
+    await refreshLockHeartbeat();
+
+    const fingerprint = computeFingerprint(order, messages);
+    let state = await getState(gameServerId, mod.moduleId);
+    const storedFingerprint = await getFingerprint(gameServerId, mod.moduleId);
+
+    if (storedFingerprint !== fingerprint) {
+      state = getInitialState(order, messages);
+      await Promise.all([
+        setState(gameServerId, mod.moduleId, state),
+        setFingerprint(gameServerId, mod.moduleId, fingerprint),
+      ]);
+      console.log(`server-messages: config fingerprint changed, reset rotation state (order=${order})`);
+    }
+
+    await refreshLockHeartbeat();
+
+    const [serverResult, playerCount] = await Promise.all([
+      takaro.gameserver.gameServerControllerGetOne(gameServerId),
+      countOnlinePlayers(gameServerId),
+    ]);
+    if (playerCount === 0) {
+      console.log('server-messages: no players online, skipping without advancing state');
+      return;
+    }
+
+    await refreshLockHeartbeat();
+
+    const selection = getNextSelection(order, messages, state);
+    if (!selection) {
+      console.log('server-messages: no message selection available, skipping');
+      return;
+    }
+
+    const message = messages[selection.messageIndex];
+    const unknownPlaceholders = findUnknownPlaceholders(message.text);
+    if (unknownPlaceholders.length > 0) {
+      console.warn(
+        `server-messages: messageIndex=${selection.messageIndex} contains unsupported placeholders=${JSON.stringify(unknownPlaceholders)}; they will be left unchanged in the rendered broadcast`,
+      );
+    }
+
+    const serverName = serverResult.data.data.name ?? '';
+    const rendered = renderPlaceholders(message.text, {
+      playerCount,
+      serverName,
+    });
+
+    await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
+      message: rendered,
+    });
+    await refreshLockHeartbeat();
+    await setState(gameServerId, mod.moduleId, selection.nextState);
+
+    if (order === 'random') {
+      console.log(
+        `server-messages: sent order=random messageIndex=${selection.messageIndex} cursor=${selection.cursor} bagSize=${selection.bagSize} rendered=${JSON.stringify(rendered)}`,
+      );
+      return;
+    }
+
+    console.log(
+      `server-messages: sent order=sequential messageIndex=${selection.messageIndex} nextIndex=${selection.nextState.index} rendered=${JSON.stringify(rendered)}`,
+    );
+  } finally {
+    await stopHeartbeat().catch((err) => {
+      console.error(`server-messages: failed to stop execution lock heartbeat: ${err}`);
+    });
+    await releaseExecutionLock(gameServerId, mod.moduleId, lockToken).catch((err) => {
+      console.error(`server-messages: failed to release execution lock: ${err}`);
+    });
+  }
+}
+
+await main();

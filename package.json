@@ -5,7 +5,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "pretest": "npm run build",
-    "test": "node scripts/test-runner.mjs && bash modules/server-messages/test/live-verify.sh",
+    "test": "node scripts/test-runner.mjs",
+    "test:live:server-messages": "bash modules/server-messages/test/live-verify.sh",
     "typecheck": "tsc --noEmit",
     "module:to-json": "node dist/scripts/module-to-json.js",
     "module:from-json": "node dist/scripts/json-to-module.js",

@@ -1,11 +1,30 @@
 import { spawn } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
+import path from 'node:path';
+import fs from 'node:fs';
 
 const moduleConcurrency = Math.max(1, Number(process.env.TEST_MODULE_CONCURRENCY ?? '2'));
 const runStartedAt = process.env.TEST_RUN_STARTED_AT ?? String(Date.now());
+const TEST_DIST_DIR = path.join('.tmp', 'test-dist');
+const TSC_BIN = path.join('node_modules', 'typescript', 'bin', 'tsc');
+
+function compileTests() {
+  fs.rmSync(TEST_DIST_DIR, { recursive: true, force: true });
+  execFileSync(process.execPath, [TSC_BIN, '-p', 'tsconfig.test.json'], { stdio: 'inherit' });
+
+  const modulesDir = 'modules';
+  for (const moduleName of fs.readdirSync(modulesDir)) {
+    const sourceDir = path.join(modulesDir, moduleName, 'src');
+    if (!fs.existsSync(sourceDir)) continue;
+
+    const destDir = path.join(TEST_DIST_DIR, modulesDir, moduleName, 'src');
+    fs.mkdirSync(path.dirname(destDir), { recursive: true });
+    fs.cpSync(sourceDir, destDir, { recursive: true });
+  }
+}
 
 function discoverTestFiles() {
-  const output = execFileSync('find', ['modules', '-path', '*/test/*.test.ts'], { encoding: 'utf8' });
+  const output = execFileSync('find', [path.join(TEST_DIST_DIR, 'modules'), '-path', '*/test/*.test.js'], { encoding: 'utf8' });
   return output
     .split('\n')
     .map((line) => line.trim())
@@ -18,7 +37,8 @@ function groupByModule(files) {
 
   for (const file of files) {
     const parts = file.split('/');
-    const moduleName = parts[1] ?? file;
+    const modulesIndex = parts.lastIndexOf('modules');
+    const moduleName = parts[modulesIndex + 1] ?? file;
     const entry = groups.get(moduleName) ?? [];
     entry.push(file);
     groups.set(moduleName, entry);
@@ -34,7 +54,7 @@ function runModuleGroup({ moduleName, moduleFiles }) {
 
     const child = spawn(
       process.execPath,
-      ['--test-force-exit', '--test-concurrency', '1', '--import=ts-node-maintained/register/esm', '--test', ...moduleFiles],
+      ['--test-concurrency', '1', '--test', ...moduleFiles],
       {
         stdio: 'inherit',
         env: {
@@ -59,6 +79,8 @@ function runModuleGroup({ moduleName, moduleFiles }) {
 }
 
 async function main() {
+  compileTests();
+
   const files = discoverTestFiles();
   if (files.length === 0) {
     console.log('No test files found.');

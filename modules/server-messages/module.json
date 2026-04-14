@@ -97,6 +97,9 @@
   "functions": {
     "server-message-helpers": {
       "function": "src/functions/server-message-helpers.js"
+    },
+    "server-message-utils": {
+      "function": "src/functions/server-message-utils.js"
     }
   }
 }

@@ -4,13 +4,12 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import os from 'os';
 import { Client, ModuleOutputDTO, SettingsControllerGetKeysEnum } from '@takaro/apiclient';
-import { getIntervalStatus, isValidTimeZone } from '../../modules/server-messages/src/functions/server-message-utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /** Absolute path to the repo root */
-const REPO_ROOT = path.resolve(__dirname, '..', '..');
+const REPO_ROOT = process.cwd();
 
 /** Path to the compiled module-to-json script */
 const MODULE_TO_JSON_SCRIPT = path.join(REPO_ROOT, 'dist', 'scripts', 'module-to-json.js');
@@ -69,34 +68,6 @@ function isStaleTestResource(createdAt: string | undefined): boolean {
   if (Number.isNaN(createdAtMs)) return false;
 
   return createdAtMs < TEST_RUN_STARTED_AT_MS - STALE_RESOURCE_SKEW_MS;
-}
-
-function validateServerMessagesLikeConfig(config: InstallModuleConfig | undefined): void {
-  const userConfig = config?.userConfig;
-  if (!userConfig || typeof userConfig !== 'object') return;
-
-  const candidate = userConfig as Record<string, unknown>;
-  const looksLikeServerMessagesConfig = 'messages' in candidate || 'interval' in candidate || 'order' in candidate || 'timeZone' in candidate;
-  if (!looksLikeServerMessagesConfig) return;
-
-  if ('timeZone' in candidate && !isValidTimeZone(String(candidate.timeZone ?? ''))) {
-    const error = new Error(`400 validation error: invalid timeZone ${String(candidate.timeZone)}`) as Error & {
-      response?: { status?: number };
-    };
-    error.response = { status: 400 };
-    throw error;
-  }
-
-  if ('interval' in candidate) {
-    const status = getIntervalStatus(String(candidate.interval ?? ''));
-    if (!status.valid) {
-      const error = new Error(`400 validation error: invalid interval ${String(candidate.interval)}`) as Error & {
-        response?: { status?: number };
-      };
-      error.response = { status: 400 };
-      throw error;
-    }
-  }
 }
 
 async function waitForModuleInstallationState(
@@ -255,7 +226,7 @@ export async function pushModule(
     });
 
     const found = searchResult.data.data.find((m) => m.name === resolvedName);
-    if (!found) throw new Error(`Module '${name}' not found after import`);
+    if (!found) throw new Error(`Module '${resolvedName}' not found after import`);
 
     return found;
   } finally {
@@ -272,8 +243,6 @@ export async function installModule(
   gameServerId: string,
   config?: InstallModuleConfig,
 ): Promise<void> {
-  validateServerMessagesLikeConfig(config);
-
   const version = await client.module.moduleVersionControllerGetModuleVersion(versionId);
   const moduleId = version.data.data.moduleId;
 
