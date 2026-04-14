@@ -20,7 +20,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const MODULE_DIR = path.resolve(__dirname, '..');
 const HELPER_SOURCE_PATH = path.resolve(MODULE_DIR, 'src/functions/server-message-helpers.js');
+const MODULE_JSON_PATH = path.resolve(MODULE_DIR, 'module.json');
 const helperModuleSource = await fs.readFile(HELPER_SOURCE_PATH, 'utf8');
+const moduleJson = JSON.parse(await fs.readFile(MODULE_JSON_PATH, 'utf8')) as {
+  config: { properties: { interval: { pattern: string } } };
+};
+const intervalPattern = new RegExp(moduleJson.config.properties.interval.pattern);
 const helperModuleDataUrl = `data:text/javascript;base64,${Buffer.from(
   helperModuleSource.replace("import { takaro } from '@takaro/helpers';", 'const takaro = {};'),
 ).toString('base64')}`;
@@ -708,6 +713,37 @@ describe('server-message helper unit tests', () => {
     }
   });
 
+  it('keeps runtime interval validation aligned with the config schema pattern', () => {
+    const expressions = [
+      '*/15 * * * *',
+      '0 * * * *',
+      '30 18 * * 1-5',
+      '34 12 13 4 2',
+      '33-35 12 13 4 2',
+      '34,59 12 13 4 2',
+      '34-38/2 12 13 4 2',
+      '34 12 13 4 7',
+      '01 * * * *',
+      '1 01 * * *',
+      '* * * * 01',
+      '*/60 * * * *',
+      '0-59/60 * * * *',
+      '1-1 * * * *',
+      '5-1 * * * *',
+      '61 * * * *',
+      '1,,2 * * * *',
+      'not-a-cron',
+    ];
+
+    for (const expression of expressions) {
+      assert.equal(
+        getIntervalStatus(expression).valid,
+        intervalPattern.test(expression),
+        `Expected runtime validation and module.json pattern to agree for ${expression}`,
+      );
+    }
+  });
+
   it('applies standard cron semantics and rejects descending ranges', () => {
     const now = new Date(Date.UTC(2026, 3, 13, 12, 34, 0));
 
@@ -726,6 +762,21 @@ describe('server-message helper unit tests', () => {
       valid: false,
       matches: false,
       normalized: '5-1 * * * *',
+    });
+    assert.deepEqual(getIntervalStatus('01 * * * *', now), {
+      valid: false,
+      matches: false,
+      normalized: '01 * * * *',
+    });
+    assert.deepEqual(getIntervalStatus('*/60 * * * *', now), {
+      valid: false,
+      matches: false,
+      normalized: '*/60 * * * *',
+    });
+    assert.deepEqual(getIntervalStatus('1-1 * * * *', now), {
+      valid: false,
+      matches: false,
+      normalized: '1-1 * * * *',
     });
   });
 });

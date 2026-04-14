@@ -306,8 +306,8 @@ function parseCronSegmentValues(segment, min, max, options = {}) {
   if (stepParts.length > 2) return null;
 
   const [base, rawStep] = stepParts;
-  const step = rawStep === undefined ? 1 : Number(rawStep);
-  if (!Number.isInteger(step) || step < 1) return null;
+  const step = rawStep === undefined ? 1 : parseCronNumberToken(rawStep);
+  if (!Number.isInteger(step) || step < 1 || step > max) return null;
 
   if (base === '*') {
     return buildCronValueSet(min, max, min, max, step, options);
@@ -318,21 +318,27 @@ function parseCronSegmentValues(segment, min, max, options = {}) {
     if (rangeParts.length !== 2) return null;
 
     const [startRaw, endRaw] = rangeParts;
-    const start = Number(startRaw);
-    const end = Number(endRaw);
+    const start = parseCronNumberToken(startRaw);
+    const end = parseCronNumberToken(endRaw);
     if (!isAllowedCronNumber(start, min, max, options) || !isAllowedCronNumber(end, min, max, options)) {
       return null;
     }
-    if (start > end) return null;
+    if (start >= end) return null;
 
     return buildCronValueSet(start, end, min, max, step, options);
   }
 
   if (rawStep !== undefined) return null;
 
-  const exact = Number(base);
+  const exact = parseCronNumberToken(base);
   if (!isAllowedCronNumber(exact, min, max, options)) return null;
   return new Set([normalizeCronValue(exact, options)]);
+}
+
+function parseCronNumberToken(token) {
+  if (!/^\d+$/.test(token)) return Number.NaN;
+  if (token.length > 1 && token.startsWith('0')) return Number.NaN;
+  return Number(token);
 }
 
 function buildCronValueSet(start, end, min, max, step, options = {}) {

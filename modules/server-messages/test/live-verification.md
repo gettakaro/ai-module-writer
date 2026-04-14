@@ -12,12 +12,14 @@ bash modules/server-messages/test/live-verify.sh
 
 The script:
 - starts `paper`, `bot`, and `redis`
+- waits for Paper startup completion and the bot API before exercising the module
 - builds and authenticates
 - pushes `modules/server-messages`
 - installs it on the selected live Paper game server
+- disables the cronjob's automatic schedule during the run so only the explicit trigger steps are measured
 - creates a real bot with a Minecraft-safe username
-- verifies sequential delivery, placeholder rendering, zero-player skip-without-advance, and weighted random shuffle-bag behavior
-- writes labeled evidence summaries to temp JSON files and prints explicit PASS/FAIL lines
+- verifies sequential delivery, placeholder rendering, zero-player skip-without-advance, and weighted random shuffle-bag behavior using a unique run id embedded in the broadcast text
+- writes labeled evidence summaries to temp JSON files, writes a durable summary to `modules/server-messages/test/live-verification.latest.json`, and prints explicit PASS/FAIL lines
 
 If Takaro has more than one non-test game server, set one of these env vars before running the script so it cannot target the wrong server:
 
@@ -45,4 +47,21 @@ export SERVER_MESSAGES_GAMESERVER_NAME=<exact-name>
 
 ## Suggested evidence capture
 
-Save the printed evidence file paths and, if needed, attach the generated JSON files from the temp evidence directory to your review notes or CI artifacts. That gives a durable record of the mandatory in-game verification step for this module.
+The verifier writes the latest durable summary to:
+
+```text
+modules/server-messages/test/live-verification.latest.json
+```
+
+It also prints temp evidence file paths for the detailed sequential and random event captures. Attach those JSON files to review notes or CI artifacts when needed.
+
+## Latest recorded run
+
+Latest checked-in run on this branch:
+
+- Executed at: `2026-04-14T01:23:44.866Z`
+- Game server: `nca-ai-paper` (`eaf1086a-a81d-41c4-b3f0-afa6a60ddda9`)
+- Run id: `srvmsg-mnxxrlwd`
+- Result: `5/5` live checks passed
+
+See `modules/server-messages/test/live-verification.latest.json` for the full sequential/random event evidence captured from that run.
