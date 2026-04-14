@@ -64,9 +64,9 @@ function cronExpressionForTimeZoneNow(timeZone: string) {
 describe('server-messages integration', () => {
   let client: Client;
   let ctx: MockServerContext;
-  let moduleId: string;
-  let versionId: string;
-  let cronjobId: string;
+  let moduleId: string | undefined;
+  let versionId: string | undefined;
+  let cronjobId: string | undefined;
   const staleContexts: MockServerContext[] = [];
 
   before(async () => {
@@ -87,21 +87,26 @@ describe('server-messages integration', () => {
 
   after(async () => {
     await safeUninstall();
-    try {
-      await deleteModule(client, moduleId);
-    } catch (err) {
-      console.error('Cleanup: failed to delete server-messages test module:', err);
+    if (moduleId) {
+      try {
+        await deleteModule(client, moduleId);
+      } catch (err) {
+        console.error('Cleanup: failed to delete server-messages test module:', err);
+      }
     }
     for (const staleCtx of staleContexts) {
       await stopMockServer(staleCtx.server, client, staleCtx.gameServer.id).catch((err) => {
         console.error('Cleanup: failed to stop stale mock server:', err);
       });
     }
-    await stopMockServer(ctx.server, client, ctx.gameServer.id);
+    if (ctx) {
+      await stopMockServer(ctx.server, client, ctx.gameServer.id);
+    }
   });
 
   async function safeUninstall() {
     try {
+      if (!moduleId || !ctx) return;
       await uninstallModule(client, moduleId, ctx.gameServer.id);
     } catch {
       // ignore when not installed
@@ -109,6 +114,10 @@ describe('server-messages integration', () => {
   }
 
   async function reinstall(userConfig: Record<string, unknown>) {
+    if (!versionId) {
+      throw new Error('server-messages test setup did not finish creating a module version');
+    }
+
     await safeUninstall();
     await waitForLockToClear();
     await clearModuleVariables();
@@ -125,7 +134,7 @@ describe('server-messages integration', () => {
       filters: {
         key: [STATE_KEY, FINGERPRINT_KEY, LOCK_KEY],
         gameServerId: [ctx.gameServer.id],
-        moduleId: [moduleId],
+        moduleId: moduleId ? [moduleId] : undefined,
       },
       limit: 100,
       page: 0,
@@ -175,7 +184,7 @@ describe('server-messages integration', () => {
       filters: {
         key: [key],
         gameServerId: [ctx.gameServer.id],
-        moduleId: [moduleId],
+        moduleId: moduleId ? [moduleId] : undefined,
       },
     });
 
@@ -214,8 +223,8 @@ describe('server-messages integration', () => {
 
     await client.cronjob.cronJobControllerTrigger({
       gameServerId: ctx.gameServer.id,
-      cronjobId,
-      moduleId,
+      cronjobId: cronjobId!,
+      moduleId: moduleId!,
     });
 
     const event = await waitForEvent(client, {
@@ -396,7 +405,7 @@ describe('server-messages integration', () => {
     await safeUninstall();
 
     await assert.rejects(
-      installModule(client, versionId, ctx.gameServer.id, {
+      installModule(client, versionId!, ctx.gameServer.id, {
         userConfig: {
           messages: [{ text: '   ' }],
           order: 'sequential',
@@ -423,7 +432,7 @@ describe('server-messages integration', () => {
 
     for (const interval of ['not-a-cron', '61 * * * *', '*/99 * * * *', '* * 32 * *', '5-1 * * * *']) {
       await assert.rejects(
-        installModule(client, versionId, ctx.gameServer.id, {
+        installModule(client, versionId!, ctx.gameServer.id, {
           userConfig: {
             messages: [{ text: 'Valid message' }],
             order: 'sequential',
@@ -453,7 +462,7 @@ describe('server-messages integration', () => {
     await safeUninstall();
 
     await assert.rejects(
-      installModule(client, versionId, ctx.gameServer.id, {
+      installModule(client, versionId!, ctx.gameServer.id, {
         userConfig: {
           messages: [{ text: 'Timezone aware message' }],
           order: 'sequential',
@@ -476,7 +485,7 @@ describe('server-messages integration', () => {
     assert.equal(first.success, true);
 
     await safeUninstall();
-    await installModule(client, versionId, ctx.gameServer.id, {
+    await installModule(client, versionId!, ctx.gameServer.id, {
       userConfig: {
         messages: [{ text: 'First' }, { text: 'Second' }],
         order: 'sequential',
@@ -505,8 +514,8 @@ describe('server-messages integration', () => {
 
     const startedAt = new Date();
     await Promise.all([
-      client.cronjob.cronJobControllerTrigger({ gameServerId: ctx.gameServer.id, cronjobId, moduleId }),
-      client.cronjob.cronJobControllerTrigger({ gameServerId: ctx.gameServer.id, cronjobId, moduleId }),
+      client.cronjob.cronJobControllerTrigger({ gameServerId: ctx.gameServer.id, cronjobId: cronjobId!, moduleId: moduleId! }),
+      client.cronjob.cronJobControllerTrigger({ gameServerId: ctx.gameServer.id, cronjobId: cronjobId!, moduleId: moduleId! }),
     ]);
 
     const cronEvents = await waitForEvents(EventSearchInputAllowedFiltersEventNameEnum.CronjobExecuted, startedAt, 2, 30000);
@@ -640,7 +649,7 @@ describe('server-messages integration', () => {
     );
 
     await safeUninstall();
-    await installModule(client, versionId, ctx.gameServer.id, {
+    await installModule(client, versionId!, ctx.gameServer.id, {
       userConfig: {
         messages: [
           { text: 'New first' },

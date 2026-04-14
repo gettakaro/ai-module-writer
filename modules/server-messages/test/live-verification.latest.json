@@ -1,30 +1,9 @@
 {
-  "moduleName": "test-server-messages",
+  "moduleName": "server-messages",
   "summary": {
-    "passedChecks": 5,
-    "totalChecks": 5
+    "passedChecks": 0,
+    "totalChecks": 0
   },
-  "results": [
-    {
-      "description": "Sequential trigger 1 delivers Seq A with live placeholders rendered",
-      "status": "PASS"
-    },
-    {
-      "description": "Sequential trigger 2 delivers Seq B",
-      "status": "PASS"
-    },
-    {
-      "description": "Zero-player trigger skips broadcasting without matched chat output",
-      "status": "PASS"
-    },
-    {
-      "description": "Sequential rotation resumes on Seq A after the zero-player skip",
-      "status": "PASS"
-    },
-    {
-      "description": "Random weighted live run consumes one full shuffle bag with 1 Red and 2 Gold broadcasts",
-      "status": "PASS"
-    }
-  ],
-  "note": "Environment-specific identifiers, temp paths, and raw execution logs are written only to the temporary evidence directory printed by the script at runtime."
+  "results": [],
+  "note": "This file is only durable summary output from modules/server-messages/test/live-verify.mjs. It is not evidence for the current branch until that script is rerun successfully against the live Paper + bot stack. npm test now enforces that live verification step."
 }

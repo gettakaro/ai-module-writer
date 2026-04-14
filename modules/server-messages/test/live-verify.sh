@@ -50,7 +50,7 @@ echo "[3/5] Authenticate with Takaro"
 bash scripts/takaro-auth.sh
 
 echo "[4/5] Push module"
-bash scripts/module-push.sh "$MODULE_DIR"
+TAKARO_IMPORT_MODULE_NAME="${TAKARO_IMPORT_MODULE_NAME:-test-server-messages}" bash scripts/module-push.sh "$MODULE_DIR"
 
 echo "[5/5] Run live Paper verification"
 node modules/server-messages/test/live-verify.mjs

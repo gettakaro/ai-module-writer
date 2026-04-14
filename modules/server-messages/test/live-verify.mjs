@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 
 const ROOT_DIR = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..');
 const BOT_PORT = Number(process.env.BOT_PORT || 3101);
-const MODULE_NAME = 'test-server-messages';
+const MODULE_NAME = process.env.TAKARO_IMPORT_MODULE_NAME || 'test-server-messages';
 const BOT_NAME = `srvmsg${Math.random().toString(36).slice(2, 8)}`;
 const RUN_ID = `srvmsg-${Date.now().toString(36)}`;
 const evidenceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'server-messages-live-'));

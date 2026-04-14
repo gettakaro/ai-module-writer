@@ -147,22 +147,11 @@ export async function main() {
       serverName,
     });
 
-    const rollbackState = state ?? getInitialState(order, messages);
-    await setState(gameServerId, mod.moduleId, selection.nextState);
+    await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
+      message: rendered,
+    });
     await refreshLockHeartbeat();
-
-    try {
-      await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-        message: rendered,
-      });
-    } catch (err) {
-      try {
-        await setState(gameServerId, mod.moduleId, rollbackState);
-      } catch (rollbackErr) {
-        console.error(`server-messages: failed to roll back rotation state after send failure: ${rollbackErr}`);
-      }
-      throw err;
-    }
+    await setState(gameServerId, mod.moduleId, selection.nextState);
 
     if (order === 'random') {
       console.log(

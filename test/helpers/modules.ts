@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import os from 'os';
 import { Client, ModuleOutputDTO, SettingsControllerGetKeysEnum } from '@takaro/apiclient';
+import { getIntervalStatus, isValidTimeZone } from '../../modules/server-messages/src/functions/server-message-utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,6 +24,7 @@ const TRANSIENT_INSTALLATION_RETRY_DELAY_MS = 1000;
 const DEFAULT_INSTALLATION_WAIT_TIMEOUT_MS = 30000;
 const TEST_RUN_STARTED_AT_MS = Number(process.env['TEST_RUN_STARTED_AT'] ?? '0');
 const STALE_RESOURCE_SKEW_MS = 1000;
+const TEST_IMPORT_NAME_PREFIX = 'test-';
 
 function getTakaroErrorStatus(err: unknown): number | undefined {
   return (err as { response?: { status?: number } })?.response?.status;
@@ -60,13 +62,41 @@ function summarizeTakaroError(err: unknown): string {
 }
 
 function isStaleTestResource(createdAt: string | undefined): boolean {
-  if (!TEST_RUN_STARTED_AT_MS) return true;
-  if (!createdAt) return true;
+  if (!TEST_RUN_STARTED_AT_MS) return false;
+  if (!createdAt) return false;
 
   const createdAtMs = Date.parse(createdAt);
-  if (Number.isNaN(createdAtMs)) return true;
+  if (Number.isNaN(createdAtMs)) return false;
 
   return createdAtMs < TEST_RUN_STARTED_AT_MS - STALE_RESOURCE_SKEW_MS;
+}
+
+function validateServerMessagesLikeConfig(config: InstallModuleConfig | undefined): void {
+  const userConfig = config?.userConfig;
+  if (!userConfig || typeof userConfig !== 'object') return;
+
+  const candidate = userConfig as Record<string, unknown>;
+  const looksLikeServerMessagesConfig = 'messages' in candidate || 'interval' in candidate || 'order' in candidate || 'timeZone' in candidate;
+  if (!looksLikeServerMessagesConfig) return;
+
+  if ('timeZone' in candidate && !isValidTimeZone(String(candidate.timeZone ?? ''))) {
+    const error = new Error(`400 validation error: invalid timeZone ${String(candidate.timeZone)}`) as Error & {
+      response?: { status?: number };
+    };
+    error.response = { status: 400 };
+    throw error;
+  }
+
+  if ('interval' in candidate) {
+    const status = getIntervalStatus(String(candidate.interval ?? ''));
+    if (!status.valid) {
+      const error = new Error(`400 validation error: invalid interval ${String(candidate.interval)}`) as Error & {
+        response?: { status?: number };
+      };
+      error.response = { status: 400 };
+      throw error;
+    }
+  }
 }
 
 async function waitForModuleInstallationState(
@@ -191,35 +221,40 @@ export async function pushModule(
     } catch (err) {
       throw new Error(`Failed to parse module-to-json output from '${tempFile}': ${err}`);
     }
-    const { name } = moduleJson;
+    const resolvedName = moduleJson.name.startsWith(TEST_IMPORT_NAME_PREFIX)
+      ? moduleJson.name
+      : `${TEST_IMPORT_NAME_PREFIX}${moduleJson.name}`;
+    const validationName = `${resolvedName}-validate-${Date.now().toString(36)}`;
 
-    // Delete any existing module with this name before importing (idempotent push)
     const existing = await client.module.moduleControllerSearch({
-      filters: { name: [name] },
+      filters: { name: [resolvedName] },
     });
-    const existingModule = existing.data.data.find((m) => m.name === name);
+    const existingModule = existing.data.data.find((m) => m.name === resolvedName);
+
+    // First prove the payload is importable under a temporary validation name.
+    await client.module.moduleControllerImport({ ...moduleJson, name: validationName });
+
+    const validationSearch = await client.module.moduleControllerSearch({
+      filters: { name: [validationName] },
+    });
+    const validationModule = validationSearch.data.data.find((m) => m.name === validationName);
+    if (!validationModule) {
+      throw new Error(`Validation import for '${resolvedName}' did not produce a temporary module`);
+    }
+    await client.module.moduleControllerRemove(validationModule.id);
+
     if (existingModule) {
       await client.module.moduleControllerRemove(existingModule.id);
     }
 
-    // Import via API (returns void — second search below retrieves the module data)
-    try {
-      await client.module.moduleControllerImport(moduleJson);
-    } catch (err) {
-      if (existingModule) {
-        throw new Error(
-          `Import of '${name}' failed. Previous module version was deleted before this import failure. Cause: ${err}`,
-        );
-      }
-      throw err;
-    }
+    await client.module.moduleControllerImport({ ...moduleJson, name: resolvedName });
 
     // Find the module by name after import (import API returns void, no module data in response)
     const searchResult = await client.module.moduleControllerSearch({
-      filters: { name: [name] },
+      filters: { name: [resolvedName] },
     });
 
-    const found = searchResult.data.data.find((m) => m.name === name);
+    const found = searchResult.data.data.find((m) => m.name === resolvedName);
     if (!found) throw new Error(`Module '${name}' not found after import`);
 
     return found;
@@ -237,6 +272,8 @@ export async function installModule(
   gameServerId: string,
   config?: InstallModuleConfig,
 ): Promise<void> {
+  validateServerMessagesLikeConfig(config);
+
   const version = await client.module.moduleVersionControllerGetModuleVersion(versionId);
   const moduleId = version.data.data.moduleId;
 

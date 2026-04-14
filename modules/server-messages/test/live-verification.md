@@ -4,7 +4,7 @@ This module requires real Paper/bot verification in addition to the automated AP
 
 ## Runnable artifact
 
-Use the helper script in this directory:
+Use the helper script in this directory (it is also chained from `npm test` now):
 
 ```bash
 bash modules/server-messages/test/live-verify.sh
