@@ -19,9 +19,8 @@ async function main() {
   const moduleId = mod.moduleId;
 
   const voteState = await getVoteState(gameServerId, moduleId);
-  const restartPending = voteState?.status === 'passed'
-    ? voteState
-    : await getRestartPending(gameServerId, moduleId);
+  const persistedRestartPending = await getRestartPending(gameServerId, moduleId);
+  const restartPending = persistedRestartPending || (voteState?.status === 'passed' ? voteState : null);
 
   if (!voteState && !restartPending) {
     // No vote in progress — nothing to do
@@ -116,7 +115,17 @@ async function main() {
           return;
         }
         if (currentPending.status === 'executing') {
-          console.log('check-vote: restart already marked executing by another cron run');
+          console.log('check-vote: restart already issued previously, retrying cleanup only');
+          try {
+            await deleteRestartPending(gameServerId, moduleId);
+          } catch (err) {
+            console.error('check-vote: failed to clean up restartPending after concurrently observed executing marker', err);
+          }
+          try {
+            await deleteVoteState(gameServerId, moduleId);
+          } catch (err) {
+            console.error('check-vote: failed to clean up voteState after concurrently observed executing marker', err);
+          }
           return;
         }
 

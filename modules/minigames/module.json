@@ -120,7 +120,14 @@
         { "name": "response2", "type": "string", "helpText": "Optional second word for multi-word answers", "position": 1, "defaultValue": "__MINIGAMES_NONE__" },
         { "name": "response3", "type": "string", "helpText": "Optional third word for multi-word answers", "position": 2, "defaultValue": "__MINIGAMES_NONE__" },
         { "name": "response4", "type": "string", "helpText": "Optional fourth word for multi-word answers", "position": 3, "defaultValue": "__MINIGAMES_NONE__" },
-        { "name": "response5", "type": "string", "helpText": "Optional fifth word for multi-word answers", "position": 4, "defaultValue": "__MINIGAMES_NONE__" }
+        { "name": "response5", "type": "string", "helpText": "Optional fifth word for multi-word answers", "position": 4, "defaultValue": "__MINIGAMES_NONE__" },
+        { "name": "response6", "type": "string", "helpText": "Optional sixth word for multi-word answers", "position": 5, "defaultValue": "__MINIGAMES_NONE__" },
+        { "name": "response7", "type": "string", "helpText": "Optional seventh word for multi-word answers", "position": 6, "defaultValue": "__MINIGAMES_NONE__" },
+        { "name": "response8", "type": "string", "helpText": "Optional eighth word for multi-word answers", "position": 7, "defaultValue": "__MINIGAMES_NONE__" },
+        { "name": "response9", "type": "string", "helpText": "Optional ninth word for multi-word answers", "position": 8, "defaultValue": "__MINIGAMES_NONE__" },
+        { "name": "response10", "type": "string", "helpText": "Optional tenth word for multi-word answers", "position": 9, "defaultValue": "__MINIGAMES_NONE__" },
+        { "name": "response11", "type": "string", "helpText": "Optional eleventh word for multi-word answers", "position": 10, "defaultValue": "__MINIGAMES_NONE__" },
+        { "name": "response12", "type": "string", "helpText": "Optional twelfth word for multi-word answers", "position": 11, "defaultValue": "__MINIGAMES_NONE__" }
       ]
     },
     "minigamestats": {
@@ -134,8 +141,8 @@
     },
     "minigamestop": {
       "trigger": "minigamestop",
-      "description": "Deprecated legacy alias for /minigamesleaderboard. Does not stop mini-games.",
-      "helpText": "Deprecated: use /minigamesleaderboard <points|wordle|hangman|streak>",
+      "description": "Deprecated legacy command. Use /minigamesskiproundnow to stop a live round or /minigamesleaderboard for rankings.",
+      "helpText": "Deprecated: /minigamestop does not stop rounds. Use /minigamesskiproundnow or /minigamesleaderboard <points|wordle|hangman|streak>",
       "function": "src/commands/minigamestop/index.js",
       "arguments": [
         { "name": "category", "type": "string", "helpText": "points, wordle, hangman, or streak", "position": 0, "defaultValue": "__MINIGAMES_NONE__" }

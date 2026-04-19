@@ -448,18 +448,34 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
     await ctx.server.executeConsoleCommand('connectAll');
     const disconnectSettleMs = Number(process.env['TEST_DISCONNECT_SETTLE_MS'] ?? 2000);
     await new Promise((resolve) => setTimeout(resolve, disconnectSettleMs));
-    const before = new Date();
+    const after = new Date();
     await ctx.server.executeConsoleCommand('disconnectAll');
-    const event = await waitForEvent(client, {
-      eventName: EventSearchInputAllowedFiltersEventNameEnum.HookExecuted,
-      gameserverId: ctx.gameServer.id,
-      after: before,
-      timeout: 30000,
-    });
-    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+
+    let matchingEvent: { meta?: { result?: { success?: boolean; logs?: Array<{ msg: string }> } } } | null = null;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const events = await client.event.eventControllerSearch({
+        filters: {
+          eventName: [EventSearchInputAllowedFiltersEventNameEnum.HookExecuted],
+          gameserverId: [ctx.gameServer.id],
+        },
+        greaterThan: { createdAt: after.toISOString() },
+        sortDirection: 'desc',
+        sortBy: 'createdAt',
+        limit: 20,
+      });
+      matchingEvent = events.data.data.find((entry) => {
+        const meta = entry.meta as { result?: { logs?: Array<{ msg: string }> } } | undefined;
+        return (meta?.result?.logs ?? []).some((log) => log.msg.includes('disconnect hook handled player-disconnected'));
+      }) as typeof matchingEvent;
+      if (matchingEvent) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+
+    assert.ok(matchingEvent, 'expected a hook-executed event for the disconnect hook');
+    const meta = matchingEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
     const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
     assert.equal(meta?.result?.success, true, 'disconnect hook should succeed');
-    assert.ok(logs.some((msg) => msg.includes('player disconnected')), `expected disconnect log, got ${JSON.stringify(logs)}`);
+    assert.ok(logs.some((msg) => msg.includes('disconnect hook handled player-disconnected')), `expected disconnect log, got ${JSON.stringify(logs)}`);
     await ctx.server.executeConsoleCommand('connectAll');
   });
 
@@ -732,6 +748,9 @@ describe('minigames: trivia sources and live-round gating branches', () => {
     await installModule(client, versionId, ctx.gameServer.id, {
       userConfig: {
         triviaQuestionSource: 'api',
+        triviaApiCategory: ['mathematics'],
+        triviaApiDifficulty: 'medium',
+        triviaApiType: 'multiple',
         liveRoundIntervalMinutes: 5,
         minPlayersForLiveRound: 1,
         games: {
@@ -790,6 +809,10 @@ describe('minigames: trivia sources and live-round gating branches', () => {
     const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
     const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
     assert.equal(meta?.result?.success, true, `forced trivia round should fire, logs=${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((msg) => msg.includes('trivia api request url=https://opentdb.com/api.php?amount=1&category=19&difficulty=medium&type=multiple')),
+      `expected trivia api log with mapped filter query params, got ${JSON.stringify(logs)}`,
+    );
 
     const round = await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE);
     assert.equal(round.game, 'trivia');

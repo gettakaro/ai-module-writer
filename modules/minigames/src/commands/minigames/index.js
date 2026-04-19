@@ -35,7 +35,8 @@ async function main() {
     '🎮 miniGames',
     `Daily puzzles: ${enabledDaily.length > 0 ? `${enabledDaily.join(', ')}, /puzzle` : '/puzzle (all daily puzzle games are disabled)'}`,
     `Live rounds: ${liveSummary.length > 0 ? liveSummary.join('; ') : 'all live round games are disabled'}`,
-    'Stats: /minigamestats [player], /minigamesleaderboard <points|wordle|hangman|streak> (legacy: /minigamestop)',
+    'Stats: /minigamestats [player], /minigamesleaderboard <points|wordle|hangman|streak>',
+    `Admin live-round control: /minigamesskiproundnow stops the active round.`,
     `Live round cadence: every ~${config.liveRoundIntervalMinutes} min when enough players are online.`,
   ].join('\n');
   await pog.pm(message);

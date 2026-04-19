@@ -497,18 +497,20 @@ export async function emitBigScoreEvent({ gameServerId, moduleId, playerId, play
   };
 
   const attempts = [
-    async () => takaro.axios?.post?.('/hook/trigger', {
-      gameServerId,
-      playerId,
+    async () => takaro.event?.eventControllerCreate?.({
+      eventName: BIG_SCORE_EVENT_NAME,
+      gameserverId: gameServerId,
       moduleId,
-      eventType: BIG_SCORE_EVENT_NAME,
-      eventMeta: meta,
+      playerId,
+      actingModuleId: moduleId,
+      meta,
     }),
     async () => takaro.axios?.post?.('/event', {
       eventName: BIG_SCORE_EVENT_NAME,
       gameserverId: gameServerId,
       moduleId,
       playerId,
+      actingModuleId: moduleId,
       meta,
     }),
   ];
@@ -792,11 +794,16 @@ export async function playWordle({ gameServerId, moduleId, player, pog, config, 
     const rendered = session.guesses.length > 0
       ? session.guesses.map((entry) => `${entry.toUpperCase()} ${renderWordleFeedback(entry, puzzle.wordle)}`).join(' | ')
       : 'No guesses yet.';
-    const line = session.solved
-      ? `🟩 Solved today in ${session.guesses.length}/6 for ${session.lastPoints} points.`
-      : `🟩 ${session.guesses.length}/6 guesses used. ${rendered}`;
+    let line;
+    if (session.solved) {
+      line = `🟩 Solved today in ${session.guesses.length}/6 for ${session.lastPoints} points.`;
+    } else if (session.completedAt) {
+      line = `🟩 You already finished today's Wordle and did not solve it. Used ${session.guesses.length}/6 guesses. Answer: ${puzzle.wordle.toUpperCase()}.`;
+    } else {
+      line = `🟩 ${session.guesses.length}/6 guesses used. ${rendered}`;
+    }
     await pog.pm(line);
-    console.log(`wordle: status player=${player.name} guesses=${session.guesses.length} solved=${session.solved}`);
+    console.log(`wordle: status player=${player.name} guesses=${session.guesses.length} solved=${session.solved} completed=${Boolean(session.completedAt)}`);
     return;
   }
 
@@ -904,8 +911,14 @@ export async function playHangman({ gameServerId, moduleId, player, pog, config,
 
   if (!letterOrWord) {
     const session = await getHangmanSession(gameServerId, moduleId, player.id);
-    await pog.pm(`🎪 ${maskHangman(puzzle.hangman, session.lettersTried)} (wrong ${session.wrongCount}/6, tried: ${session.lettersTried.join(', ').toUpperCase() || 'none'})`);
-    console.log(`hangman: status player=${player.name} wrong=${session.wrongCount}`);
+    const tried = session.lettersTried.join(', ').toUpperCase() || 'none';
+    const message = session.solved
+      ? `🎪 You already solved today's Hangman: ${maskHangman(puzzle.hangman, session.lettersTried)}. +${session.lastPoints} points.`
+      : session.completedAt
+        ? `🎪 You already finished today's Hangman and did not solve it. The word was ${puzzle.hangman.toUpperCase()}. Tried: ${tried}.`
+        : `🎪 ${maskHangman(puzzle.hangman, session.lettersTried)} (wrong ${session.wrongCount}/6, tried: ${tried})`;
+    await pog.pm(message);
+    console.log(`hangman: status player=${player.name} wrong=${session.wrongCount} solved=${session.solved} completed=${Boolean(session.completedAt)}`);
     return;
   }
 
@@ -1006,8 +1019,13 @@ export async function playHotCold({ gameServerId, moduleId, player, pog, config,
   if (number === undefined || number === null || number === '') {
     const session = await getHotColdSession(gameServerId, moduleId, player.id);
     const trail = session.guesses.length > 0 ? session.guesses.join(', ') : 'No guesses yet.';
-    await pog.pm(`🌡️ ${trail} (${8 - session.guesses.length}/8 left)`);
-    console.log(`hotcold: status player=${player.name} guesses=${session.guesses.length}`);
+    const message = session.solved
+      ? `🌡️ You already solved today's Hot/Cold in ${session.guesses.length} guesses. +${session.lastPoints} points.`
+      : session.completedAt
+        ? `🌡️ You already finished today's Hot/Cold and did not solve it. The number was ${puzzle.hotcold}. Guesses: ${trail}.`
+        : `🌡️ ${trail} (${8 - session.guesses.length}/8 left)`;
+    await pog.pm(message);
+    console.log(`hotcold: status player=${player.name} guesses=${session.guesses.length} solved=${session.solved} completed=${Boolean(session.completedAt)}`);
     return;
   }
 
@@ -1166,6 +1184,8 @@ export async function fetchTriviaQuestion(config) {
   if (config.triviaApiType && config.triviaApiType !== 'any') {
     url += `&type=${config.triviaApiType}`;
   }
+
+  console.log(`minigames: trivia api request url=${url} pickedCategory=${pickedCategory} difficulty=${config.triviaApiDifficulty || 'any'} type=${config.triviaApiType || 'any'}`);
 
   try {
     let response;

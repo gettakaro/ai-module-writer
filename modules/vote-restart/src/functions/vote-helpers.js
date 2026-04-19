@@ -5,6 +5,8 @@ export const COOLDOWN_KEY = 'vr_cooldown_until';
 export const RESTART_PENDING_KEY = 'vr_restart_pending';
 export const RESTART_EXECUTION_LOCK_KEY = 'vr_restart_execution_lock';
 
+const RESTART_EXECUTION_LOCK_TTL_MS = 2 * 60 * 1000;
+
 // ── Generic variable CRUD ─────────────────────────────────────────────────────
 
 export async function findVariable(gameServerId, moduleId, key) {
@@ -40,20 +42,49 @@ export async function removeVariable(gameServerId, moduleId, key) {
   }
 }
 
-export async function acquireExecutionLock(gameServerId, moduleId, owner = 'restart') {
+function isExpiredExecutionLock(lockValue, ttlMs = RESTART_EXECUTION_LOCK_TTL_MS) {
+  const createdAt = new Date(lockValue?.createdAt || 0).getTime();
+  if (!createdAt) return true;
+  return createdAt + ttlMs <= Date.now();
+}
+
+export async function acquireExecutionLock(gameServerId, moduleId, owner = 'restart', retries = 2) {
   const token = `${owner}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  try {
-    await takaro.variable.variableControllerCreate({
-      key: RESTART_EXECUTION_LOCK_KEY,
-      value: JSON.stringify({ token, owner, createdAt: new Date().toISOString() }),
-      gameServerId,
-      moduleId,
-    });
-    return token;
-  } catch (err) {
-    console.log(`vote-helpers: restart execution lock busy owner=${owner}: ${err}`);
-    return null;
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      await takaro.variable.variableControllerCreate({
+        key: RESTART_EXECUTION_LOCK_KEY,
+        value: JSON.stringify({ token, owner, createdAt: new Date().toISOString() }),
+        gameServerId,
+        moduleId,
+      });
+      return token;
+    } catch (err) {
+      const existing = await findVariable(gameServerId, moduleId, RESTART_EXECUTION_LOCK_KEY);
+      if (!existing) {
+        continue;
+      }
+
+      try {
+        const parsed = JSON.parse(existing.value);
+        if (isExpiredExecutionLock(parsed)) {
+          await takaro.variable.variableControllerDelete(existing.id);
+          console.log(`vote-helpers: reaped stale restart execution lock owner=${parsed?.owner || 'unknown'}`);
+          continue;
+        }
+      } catch (parseErr) {
+        console.error(`vote-helpers: failed to parse restart execution lock, deleting corrupt value: ${parseErr}`);
+        await takaro.variable.variableControllerDelete(existing.id);
+        continue;
+      }
+
+      console.log(`vote-helpers: restart execution lock busy owner=${owner}: ${err}`);
+      return null;
+    }
   }
+
+  return null;
 }
 
 export async function releaseExecutionLock(gameServerId, moduleId, token) {
