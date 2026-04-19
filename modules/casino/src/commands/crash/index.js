@@ -1,10 +1,19 @@
 import { data, TakaroUserError } from '@takaro/helpers';
 import { getDefaultConfig, placeBet, settle, roundCurrency, formatCurrency, makeCrashPoint } from './casino-helpers.js';
 
+function parseCashoutAt(args, chatMessage) {
+  const rawMessage = String(chatMessage?.msg ?? chatMessage ?? '').trim();
+  const rawToken = rawMessage.split(/\s+/).filter(Boolean)[2];
+  const parsedFromChat = rawToken ? Number(rawToken) : NaN;
+  const parsedFromArgs = Number(args.cashoutAt);
+  const cashoutAt = Number.isFinite(parsedFromChat) ? parsedFromChat : parsedFromArgs;
+  return cashoutAt;
+}
+
 async function main() {
-  const { gameServerId, pog, player, arguments: args, module: mod } = data;
+  const { gameServerId, pog, player, arguments: args, module: mod, chatMessage } = data;
   const config = getDefaultConfig(mod.userConfig);
-  const cashoutAt = Number(args.cashoutAt);
+  const cashoutAt = parseCashoutAt(args, chatMessage);
   if (!Number.isFinite(cashoutAt) || cashoutAt < 1.01 || cashoutAt > 1000) {
     throw new TakaroUserError('Cashout target must be between 1.01 and 1000.');
   }

@@ -7,12 +7,12 @@ async function main() {
   const map = {
     wager: ['topWager', 'wagered', 'Highest total wagered'],
     won: ['topWon', 'won', 'Highest total won'],
-    winrate: ['topRoi', 'roi', 'Best payout ratio (won ÷ wagered)'],
+    winrate: ['topWinrate', 'winrate', 'Best win rate (winning rounds ÷ games played)'],
     roi: ['topRoi', 'roi', 'Best payout ratio (won ÷ wagered)'],
     biggest: ['topBiggest', 'biggest', 'Biggest single payout'],
   };
   if (!map[category]) {
-    throw new TakaroUserError('Choose wager, won, roi, winrate, or biggest.');
+    throw new TakaroUserError('Choose wager, won, winrate, roi, or biggest.');
   }
 
   let cache = await getLeaderboardCache(gameServerId, mod.moduleId);
@@ -24,7 +24,7 @@ async function main() {
   }
 
   const [key, field, title] = map[category];
-  const rows = cache[key] ?? (key === 'topRoi' ? cache.topWinrate ?? [] : []);
+  const rows = cache[key] ?? [];
   if (rows.length === 0) {
     await pog.pm('No casino leaderboard data yet.');
     return;
@@ -32,8 +32,8 @@ async function main() {
 
   const lines = [`🏆 ${title}`];
   rows.forEach((row, index) => {
-    const raw = row[field] ?? (field === 'roi' ? row.winrate : undefined);
-    const value = field === 'roi' ? `${raw}%` : formatCurrency(raw);
+    const raw = row[field];
+    const value = field === 'roi' || field === 'winrate' ? `${raw}%` : formatCurrency(raw);
     lines.push(`#${index + 1} ${row.name} — ${value}`);
   });
   await pog.pm(lines.join('\n'));

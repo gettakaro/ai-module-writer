@@ -230,6 +230,35 @@ describe('casino module', () => {
     assert.equal(duelVar, null, 'expected duel state to be cleared after resolution');
   });
 
+  it('supports duel decline and tie refunds', async () => {
+    const challenger = ctx.players[0]!;
+    const target = ctx.players[1]!;
+    const challengerName = (await client.player.playerControllerGetOne(challenger.playerId)).data.data.name;
+    const targetName = (await client.player.playerControllerGetOne(target.playerId)).data.data.name;
+
+    const beforeDecline = await getPlayerCurrency(challenger.playerId);
+    const challenge = await triggerCommand(challenger.playerId, `${prefix}duel ${targetName} 15`);
+    assert.equal(challenge.success, true, `expected duel challenge success, logs=${JSON.stringify(challenge.logs)}`);
+    const declined = await triggerCommand(target.playerId, `${prefix}duel decline`);
+    assert.equal(declined.success, true, `expected duel decline success, logs=${JSON.stringify(declined.logs)}`);
+    assert.equal(await getPlayerCurrency(challenger.playerId), beforeDecline, 'expected challenger refund after duel decline');
+
+    const beforeTie1 = await getPlayerCurrency(challenger.playerId);
+    const beforeTie2 = await getPlayerCurrency(target.playerId);
+    const challenge2 = await triggerCommand(challenger.playerId, `${prefix}duel ${targetName} 15`);
+    assert.equal(challenge2.success, true, `expected second duel challenge success, logs=${JSON.stringify(challenge2.logs)}`);
+    const accept = await triggerCommand(target.playerId, `${prefix}duel accept`);
+    assert.equal(accept.success, true, `expected duel accept success, logs=${JSON.stringify(accept.logs)}`);
+    const rock1 = await triggerCommand(challenger.playerId, `${prefix}duel rock`);
+    assert.equal(rock1.success, true, `expected challenger pick success, logs=${JSON.stringify(rock1.logs)}`);
+    const rock2 = await triggerCommand(target.playerId, `${prefix}duel rock`);
+    assert.equal(rock2.success, true, `expected opponent pick success, logs=${JSON.stringify(rock2.logs)}`);
+    assert.equal(await getPlayerCurrency(challenger.playerId), beforeTie1, 'expected challenger refund after duel tie');
+    assert.equal(await getPlayerCurrency(target.playerId), beforeTie2, 'expected opponent refund after duel tie');
+    assert.equal(await getVariable('casino_duel', challenger.playerId), null, 'expected duel cleanup after tie');
+    assert.ok(challengerName && targetName);
+  });
+
   it('uses readable race timing text and resolves the race draw cronjob', async () => {
     const p1 = ctx.players[0]!;
     const p2 = ctx.players[1]!;
@@ -255,6 +284,38 @@ describe('casino module', () => {
     assert.deepEqual(parsed, { participants: [], drawAt: null, status: 'open' });
   });
 
+  it('covers hilo win, cashout, and loss branches', async () => {
+    const player = ctx.players[0]!;
+    const before = await getPlayerCurrency(player.playerId);
+
+    const start = await triggerCommand(player.playerId, `${prefix}hilo 20`);
+    assert.equal(start.success, true, `expected hilo start success, logs=${JSON.stringify(start.logs)}`);
+    await updateVariable('casino_session_hilo', player.playerId, (session) => ({
+      ...session,
+      multiplier: 1.5,
+      currentCard: { rank: 5, suit: '♠' },
+      deck: [{ rank: 9, suit: '♥' }],
+    }));
+    const higher = await triggerCommand(player.playerId, `${prefix}hilo higher`);
+    assert.equal(higher.success, true, `expected hilo higher success, logs=${JSON.stringify(higher.logs)}`);
+    const cashout = await triggerCommand(player.playerId, `${prefix}hilo cashout`);
+    assert.equal(cashout.success, true, `expected hilo cashout success, logs=${JSON.stringify(cashout.logs)}`);
+    assert.ok(cashout.logs.some((msg) => /Cashed out/i.test(msg)), `expected cashout message, logs=${JSON.stringify(cashout.logs)}`);
+
+    const startLoss = await triggerCommand(player.playerId, `${prefix}hilo 10`);
+    assert.equal(startLoss.success, true, `expected second hilo start success, logs=${JSON.stringify(startLoss.logs)}`);
+    await updateVariable('casino_session_hilo', player.playerId, (session) => ({
+      ...session,
+      currentCard: { rank: 10, suit: '♣' },
+      deck: [{ rank: 3, suit: '♦' }],
+    }));
+    const loss = await triggerCommand(player.playerId, `${prefix}hilo higher`);
+    assert.equal(loss.success, true, `expected hilo loss resolution success, logs=${JSON.stringify(loss.logs)}`);
+    assert.ok(loss.logs.some((msg) => /Wrong|lost/i.test(msg)), `expected hilo loss message, logs=${JSON.stringify(loss.logs)}`);
+    assert.equal(await getVariable('casino_session_hilo', player.playerId), null, 'expected hilo session cleanup after loss');
+    assert.ok(await getPlayerCurrency(player.playerId) !== before - 30);
+  });
+
   it('expires abandoned hilo sessions through the cleanup cronjob and refunds the stake', async () => {
     const player = ctx.players[0]!;
     const beforeBalance = await getPlayerCurrency(player.playerId);
@@ -276,6 +337,38 @@ describe('casino module', () => {
     const afterCleanupBalance = await getPlayerCurrency(player.playerId);
     assert.equal(afterCleanupBalance, beforeBalance, 'expected abandoned hilo stake to be refunded');
     assert.equal(await getVariable('casino_session_hilo', player.playerId), null, 'expected hilo session deletion');
+  });
+
+  it('covers blackjack hit, stand, and double branches', async () => {
+    const player = ctx.players[0]!;
+
+    const start = await triggerCommand(player.playerId, `${prefix}bj 20`);
+    assert.equal(start.success, true, `expected blackjack start success, logs=${JSON.stringify(start.logs)}`);
+    await updateVariable('casino_session_blackjack', player.playerId, (session) => ({
+      ...session,
+      stake: 20,
+      playerHand: [{ rank: 8, suit: '♠' }, { rank: 3, suit: '♥' }],
+      dealerHand: [{ rank: 6, suit: '♦' }, { rank: 10, suit: '♣' }],
+      deck: [{ rank: 9, suit: '♣' }, { rank: 10, suit: '♦' }],
+    }));
+    const hit = await triggerCommand(player.playerId, `${prefix}bj hit`);
+    assert.equal(hit.success, true, `expected blackjack hit success, logs=${JSON.stringify(hit.logs)}`);
+    const stand = await triggerCommand(player.playerId, `${prefix}bj stand`);
+    assert.equal(stand.success, true, `expected blackjack stand success, logs=${JSON.stringify(stand.logs)}`);
+    assert.ok(stand.logs.some((msg) => /Dealer:/i.test(msg)), `expected dealer reveal, logs=${JSON.stringify(stand.logs)}`);
+
+    const startDouble = await triggerCommand(player.playerId, `${prefix}bj 20`);
+    assert.equal(startDouble.success, true, `expected blackjack double setup success, logs=${JSON.stringify(startDouble.logs)}`);
+    await updateVariable('casino_session_blackjack', player.playerId, (session) => ({
+      ...session,
+      stake: 20,
+      playerHand: [{ rank: 5, suit: '♠' }, { rank: 6, suit: '♥' }],
+      dealerHand: [{ rank: 6, suit: '♦' }, { rank: 10, suit: '♣' }],
+      deck: [{ rank: 10, suit: '♠' }, { rank: 10, suit: '♥' }],
+    }));
+    const doubled = await triggerCommand(player.playerId, `${prefix}bj double`);
+    assert.equal(doubled.success, true, `expected blackjack double success, logs=${JSON.stringify(doubled.logs)}`);
+    assert.equal(await getVariable('casino_session_blackjack', player.playerId), null, 'expected blackjack session cleanup after double resolution');
   });
 
   it('refunds blackjack sessions when the player disconnects', async () => {
@@ -322,6 +415,26 @@ describe('casino module', () => {
     const meta = event!.meta as unknown as Record<string, unknown>;
     assert.equal(meta.type, 'casino-big-win');
     assert.equal(event!.eventName, 'chat-message');
+  });
+
+  it('cancels active hilo sessions when the player becomes banned', async () => {
+    const admin = ctx.players[1]!;
+    const player = ctx.players[0]!;
+    const playerName = (await client.player.playerControllerGetOne(player.playerId)).data.data.name;
+    const before = await getPlayerCurrency(player.playerId);
+
+    const start = await triggerCommand(player.playerId, `${prefix}hilo 25`);
+    assert.equal(start.success, true, `expected hilo start success, logs=${JSON.stringify(start.logs)}`);
+    const ban = await triggerCommand(admin.playerId, `${prefix}casinoban ${playerName} 1`);
+    assert.equal(ban.success, true, `expected ban success, logs=${JSON.stringify(ban.logs)}`);
+    const followup = await triggerCommand(player.playerId, `${prefix}hilo cashout`);
+    assert.equal(followup.success, false, 'expected banned hilo follow-up to be cancelled');
+    assert.ok(followup.logs.some((msg) => /cancelled/i.test(msg)), `expected cancelled-session message, logs=${JSON.stringify(followup.logs)}`);
+    assert.equal(await getPlayerCurrency(player.playerId), before, 'expected active hilo stake refund after ban');
+    assert.equal(await getVariable('casino_session_hilo', player.playerId), null, 'expected hilo session cleanup after ban');
+
+    const unban = await triggerCommand(admin.playerId, `${prefix}casinounban ${playerName}`);
+    assert.equal(unban.success, true, `expected unban success, logs=${JSON.stringify(unban.logs)}`);
   });
 
   it('bans and unbans players via admin commands', async () => {

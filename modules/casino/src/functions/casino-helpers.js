@@ -18,6 +18,7 @@ export const DEFAULT_STATS = {
   won: 0,
   net: 0,
   gamesPlayed: 0,
+  wins: 0,
   biggestWin: {
     amount: 0,
     game: null,
@@ -323,12 +324,42 @@ export async function setPlayerStats(gameServerId, moduleId, playerId, stats) {
 
 export async function getWindowData(gameServerId, moduleId, playerId, config) {
   const windowKey = getCurrentWindowKey(config.capWindow);
-  const data = await readJsonVariable(gameServerId, moduleId, getWindowKey(windowKey), playerId, { wagered: 0, lost: 0, windowKey });
-  return { wagered: Number(data?.wagered ?? 0), lost: Number(data?.lost ?? 0), windowKey };
+  const data = await readJsonVariable(gameServerId, moduleId, getWindowKey(windowKey), playerId, {
+    wagered: 0,
+    lost: 0,
+    windowKey,
+    capConfig: null,
+  });
+  const currentCapConfig = {
+    capWindow: config.capWindow,
+    wagerCap: Number(config.wagerCap ?? 0),
+    lossCap: Number(config.lossCap ?? 0),
+  };
+  const previousCapConfig = data?.capConfig ?? null;
+  const capConfigChanged = !previousCapConfig
+    || previousCapConfig.capWindow !== currentCapConfig.capWindow
+    || Number(previousCapConfig.wagerCap ?? 0) !== currentCapConfig.wagerCap
+    || Number(previousCapConfig.lossCap ?? 0) !== currentCapConfig.lossCap;
+
+  if (capConfigChanged) {
+    return { wagered: 0, lost: 0, windowKey, capConfig: currentCapConfig };
+  }
+
+  return {
+    wagered: Number(data?.wagered ?? 0),
+    lost: Number(data?.lost ?? 0),
+    windowKey,
+    capConfig: currentCapConfig,
+  };
 }
 
 export async function setWindowData(gameServerId, moduleId, playerId, windowKey, data) {
-  await writeVariable(gameServerId, moduleId, getWindowKey(windowKey), { wagered: Number(data.wagered ?? 0), lost: Number(data.lost ?? 0), windowKey }, playerId);
+  await writeVariable(gameServerId, moduleId, getWindowKey(windowKey), {
+    wagered: Number(data.wagered ?? 0),
+    lost: Number(data.lost ?? 0),
+    windowKey,
+    capConfig: data.capConfig ?? null,
+  }, playerId);
 }
 
 export async function getJackpot(gameServerId, moduleId) {
@@ -445,17 +476,29 @@ export async function getPlayerName(playerId) {
   }
 }
 
-export async function resolvePlayerByName(name, gameServerId) {
-  const playerSearch = await takaro.player.playerControllerSearch({ search: { name: [name] } });
-  const exact = playerSearch.data.data.find((p) => p.name.toLowerCase() === String(name).toLowerCase());
-  if (!exact) return null;
+export async function getPlayerOnGameserver(gameServerId, playerId) {
   const pogSearch = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
     filters: {
-      playerId: [exact.id],
+      playerId: [playerId],
       gameServerId: [gameServerId],
     },
+    limit: 1,
   });
   return pogSearch.data.data[0] ?? null;
+}
+
+export async function resolvePlayerByName(name, gameServerId) {
+  const normalized = String(name).trim().toLowerCase();
+  const playerSearch = await takaro.player.playerControllerSearch({ search: { name: [name] }, limit: 100 });
+  const exact = playerSearch.data.data.find((p) => p.name.toLowerCase() === normalized);
+  if (!exact) return null;
+  const pog = await getPlayerOnGameserver(gameServerId, exact.id);
+  return {
+    playerId: exact.id,
+    player: exact,
+    pog,
+    gameServerId,
+  };
 }
 
 export async function getPlayerBalance(gameServerId, playerId) {
@@ -542,6 +585,7 @@ export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, pl
       eventName: 'chat-message',
       gameserverId: gameServerId,
       moduleId,
+      actingModuleId: moduleId,
       playerId,
       meta,
     });
@@ -626,15 +670,18 @@ export async function settle({ gameServerId, moduleId, player, config, game, bet
 
     const net = safePayout - safeBet;
     const stats = await getPlayerStats(gameServerId, moduleId, player.id);
-    const currentGame = stats.perGame[game] ?? { wagered: 0, won: 0, plays: 0 };
+    const isWinningRound = safePayout > safeBet;
+    const currentGame = stats.perGame[game] ?? { wagered: 0, won: 0, plays: 0, wins: 0 };
     currentGame.wagered += safeBet;
     currentGame.won += safePayout;
     currentGame.plays += 1;
+    currentGame.wins = Number(currentGame.wins ?? 0) + (isWinningRound ? 1 : 0);
     stats.perGame[game] = currentGame;
     stats.wagered += safeBet;
     stats.won += safePayout;
     stats.net += net;
     stats.gamesPlayed += 1;
+    stats.wins = Number(stats.wins ?? 0) + (isWinningRound ? 1 : 0);
     if (safePayout > Number(stats.biggestWin?.amount ?? 0)) {
       stats.biggestWin = { amount: safePayout, game, at: nowIso() };
     }
@@ -732,14 +779,16 @@ export async function refreshLeaderboardCache(gameServerId, moduleId) {
     won: Number(entry.stats.won ?? 0),
     biggest: Number(entry.stats.biggestWin?.amount ?? 0),
     gamesPlayed: Number(entry.stats.gamesPlayed ?? 0),
+    wins: Number(entry.stats.wins ?? 0),
     roi: entry.stats.wagered > 0 ? Number(((entry.stats.won / entry.stats.wagered) * 100).toFixed(2)) : 0,
+    winrate: Number(entry.stats.gamesPlayed ?? 0) > 0 ? Number((((Number(entry.stats.wins ?? 0)) / Number(entry.stats.gamesPlayed ?? 0)) * 100).toFixed(2)) : 0,
   })));
 
   const cache = {
     topWager: [...enriched].sort((a, b) => b.wagered - a.wagered).slice(0, 10),
     topWon: [...enriched].sort((a, b) => b.won - a.won).slice(0, 10),
     topRoi: [...enriched].filter((e) => e.gamesPlayed >= 3).sort((a, b) => b.roi - a.roi).slice(0, 10),
-    topWinrate: [...enriched].filter((e) => e.gamesPlayed >= 3).sort((a, b) => b.roi - a.roi).slice(0, 10),
+    topWinrate: [...enriched].filter((e) => e.gamesPlayed >= 3).sort((a, b) => b.winrate - a.winrate).slice(0, 10),
     topBiggest: [...enriched].sort((a, b) => b.biggest - a.biggest).slice(0, 10),
     refreshedAt: nowIso(),
   };
@@ -859,6 +908,14 @@ export function parsePositiveNumberLike(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return null;
   return numeric;
+}
+
+export async function ensureInteractivePlayAllowed(gameServerId, moduleId, pog, player, config, game) {
+  requirePlayPermission(pog);
+  await ensurePlayerNotBanned(gameServerId, moduleId, player.id);
+  if (!getGameEnabled(config, game)) {
+    throw new TakaroUserError(`The ${game} game is disabled on this server.`);
+  }
 }
 
 export async function sweepExpiredBans(gameServerId, moduleId) {

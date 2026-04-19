@@ -28,7 +28,7 @@ async function main() {
 
     if (remainingDelay <= 0) {
       console.log('vote-status: passed, restart already initiated');
-      await pog.pm('[Vote Restart] Server restart is imminent or has already been initiated. If the server hasn\'t restarted, please contact an admin.');
+      await pog.pm('[Vote Restart] Vote passed. Server restart is imminent or has already been initiated. If the server hasn\'t restarted, please contact an admin.');
     } else {
       console.log(`vote-status: passed, restarting in ${remainingDelay}s`);
       await pog.pm(`[Vote Restart] Vote passed! Server restarting in ${remainingDelay}s. Required votes were locked when the vote started.`);

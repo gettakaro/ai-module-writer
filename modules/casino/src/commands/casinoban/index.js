@@ -7,7 +7,7 @@ async function main() {
   const targetName = String(args.player ?? '').trim();
   if (!targetName) throw new TakaroUserError('Usage: /casinoban <player> [hours]');
   const target = await resolvePlayerByName(targetName, gameServerId);
-  if (!target) throw new TakaroUserError(`Player \"${targetName}\" not found on this game server.`);
+  if (!target) throw new TakaroUserError(`Player \"${targetName}\" not found.`);
   const hours = Number(args.hours ?? 0);
   const expiresAt = hours > 0 ? new Date(Date.now() + (hours * 60 * 60 * 1000)).toISOString() : null;
   await setBan(gameServerId, mod.moduleId, target.playerId, { expiresAt });

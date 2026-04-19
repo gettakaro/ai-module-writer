@@ -13,6 +13,7 @@ import {
   setPlayerSession,
   deletePlayerSession,
   parsePositiveNumberLike,
+  ensureInteractivePlayAllowed,
 } from './casino-helpers.js';
 
 async function main() {
@@ -42,6 +43,14 @@ async function main() {
 
   if (!existing) {
     throw new TakaroUserError('You have no active hilo streak. Start with /hilo <amount>.');
+  }
+
+  try {
+    await ensureInteractivePlayAllowed(gameServerId, mod.moduleId, pog, player, config, 'hilo');
+  } catch (err) {
+    await refund({ gameServerId, moduleId: mod.moduleId, playerId: player.id, amount: existing.stake, config });
+    await deletePlayerSession(gameServerId, mod.moduleId, KEY_HILO_SESSION, player.id);
+    throw new TakaroUserError(`Your hilo streak was cancelled and ${formatCurrency(existing.stake)} coin was refunded because you can no longer play casino games.`);
   }
 
   if (action === 'cashout') {

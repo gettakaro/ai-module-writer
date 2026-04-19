@@ -6,12 +6,14 @@ async function main() {
   const config = getDefaultConfig(mod.userConfig);
   let targetId = player.id;
   let targetName = player.name;
+  let targetPog = pog;
   const raw = String(args.player ?? '?');
   if (raw !== '?' && raw.trim()) {
-    const targetPog = await resolvePlayerByName(raw.trim(), gameServerId);
-    if (!targetPog) throw new TakaroUserError(`Player \"${raw}\" not found on this game server.`);
-    targetId = targetPog.playerId;
-    targetName = targetPog.player?.name ?? await getPlayerName(targetId);
+    const target = await resolvePlayerByName(raw.trim(), gameServerId);
+    if (!target) throw new TakaroUserError(`Player \"${raw}\" not found.`);
+    targetId = target.playerId;
+    targetName = target.player?.name ?? await getPlayerName(targetId);
+    targetPog = target.pog ?? null;
   }
 
   const [stats, windowData] = await Promise.all([
@@ -19,7 +21,7 @@ async function main() {
     getWindowData(gameServerId, mod.moduleId, targetId, config),
   ]);
 
-  const vipTier = targetId === player.id ? getVipTier(pog) : 0;
+  const vipTier = targetPog ? getVipTier(targetPog) : 0;
   const vipMultiplier = getVipMultiplier(vipTier);
   const wagerCap = config.wagerCap > 0 ? Math.floor(config.wagerCap * vipMultiplier) : 0;
   const lossCap = config.lossCap > 0 ? Math.floor(config.lossCap * vipMultiplier) : 0;

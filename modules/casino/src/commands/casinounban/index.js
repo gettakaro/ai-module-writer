@@ -7,7 +7,7 @@ async function main() {
   const targetName = String(args.player ?? '').trim();
   if (!targetName) throw new TakaroUserError('Usage: /casinounban <player>');
   const target = await resolvePlayerByName(targetName, gameServerId);
-  if (!target) throw new TakaroUserError(`Player \"${targetName}\" not found on this game server.`);
+  if (!target) throw new TakaroUserError(`Player \"${targetName}\" not found.`);
   await clearBan(gameServerId, mod.moduleId, target.playerId);
   await pog.pm(`✅ ${target.player?.name ?? targetName} can use the casino again.`);
 }

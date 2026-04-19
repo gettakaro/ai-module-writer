@@ -1,4 +1,4 @@
-import { data } from '@takaro/helpers';
+import { data, TakaroUserError } from '@takaro/helpers';
 import { getDefaultConfig } from './casino-helpers.js';
 
 async function main() {
@@ -25,6 +25,10 @@ async function main() {
     return;
   }
 
+  if (game !== '?') {
+    throw new TakaroUserError(`Unknown casino game "${args.game}". Try flip, dice, hilo, roulette, bet, slots, blackjack, bj, crash, duel, or race.`);
+  }
+
   const enabled = [];
   if (config.games.flip) enabled.push('flip');
   if (config.games.dice) enabled.push('dice');
@@ -39,7 +43,7 @@ async function main() {
   await pog.pm([
     '🎰 Casino games: ' + enabled.join(', '),
     `Min bet: ${config.minBet} | Base max bet: ${config.maxBet} | Window: ${config.capWindow}`,
-    'Commands: /casinostats, /casinotop <wager|won|roi|biggest>, /jackpot',
+    'Commands: /casinostats, /casinotop <wager|won|winrate|roi|biggest>, /jackpot',
     'Tip: /casino <game> shows focused help for one game.',
   ].join('\n'));
 }

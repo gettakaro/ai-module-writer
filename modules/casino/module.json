@@ -156,7 +156,7 @@
       "function": "src/commands/crash/index.js",
       "arguments": [
         { "name": "amount", "type": "number", "helpText": "Bet amount", "position": 0 },
-        { "name": "cashoutAt", "type": "number", "helpText": "Target multiplier", "position": 1 }
+        { "name": "cashoutAt", "type": "string", "helpText": "Target multiplier (supports decimals like 1.5)", "position": 1 }
       ]
     },
     "duel": {
@@ -190,10 +190,10 @@
     "casinotop": {
       "trigger": "casinotop",
       "description": "Show cached casino leaderboards",
-      "helpText": "Usage: /casinotop <wager|won|winrate|biggest>",
+      "helpText": "Usage: /casinotop <wager|won|winrate|roi|biggest>",
       "function": "src/commands/casinotop/index.js",
       "arguments": [
-        { "name": "category", "type": "string", "helpText": "Leaderboard category: wager, won, roi, or biggest", "position": 0, "defaultValue": "wager" }
+        { "name": "category", "type": "string", "helpText": "Leaderboard category: wager, won, winrate, roi, or biggest", "position": 0, "defaultValue": "wager" }
       ]
     },
     "jackpot": {
