@@ -1,0 +1,64 @@
+{
+  "name": "test-server-messages",
+  "description": "Broadcasts scheduled server announcements using sequential or weighted shuffle-bag rotation.",
+  "version": "latest",
+  "supportedGames": [
+    "all"
+  ],
+  "config": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "messages": {
+        "type": "array",
+        "description": "Messages to broadcast. Weight only affects random order.",
+        "default": [],
+        "items": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The message text to broadcast"
+            },
+            "weight": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "description": "Relative frequency in random weighted shuffle-bag mode"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "order": {
+        "type": "string",
+        "enum": [
+          "sequential",
+          "random"
+        ],
+        "default": "sequential",
+        "description": "Broadcast order. Random uses a weighted shuffle bag."
+      }
+    },
+    "required": [
+      "messages"
+    ],
+    "additionalProperties": false
+  },
+  "cronJobs": {
+    "broadcast": {
+      "temporalValue": "*/15 * * * *",
+      "description": "Broadcast the next configured server message",
+      "function": "src/cronjobs/broadcast/index.js"
+    }
+  },
+  "functions": {
+    "server-message-helpers": {
+      "function": "src/functions/server-message-helpers.js"
+    }
+  }
+}
