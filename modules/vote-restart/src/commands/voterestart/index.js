@@ -7,6 +7,7 @@ import {
   deleteCooldown,
   getOnlineNonImmunePlayers,
   computeThreshold,
+  withVoteLock,
 } from './vote-helpers.js';
 
 async function main() {
@@ -19,65 +20,63 @@ async function main() {
     throw new TakaroUserError('You do not have permission to start a restart vote.');
   }
 
-  // 2. Check if vote already active or passed
-  const existingState = await getVoteState(gameServerId, moduleId);
-  const restartState = await getRestartState(gameServerId, moduleId);
-  if (existingState || restartState) {
-    if (existingState?.status === 'passed' || restartState) {
-      throw new TakaroUserError('A restart vote has already passed. Server restarting shortly.');
-    }
-    const elapsed = (Date.now() - new Date(existingState.startedAt).getTime()) / 1000;
-    const remaining = Math.max(0, Math.ceil(config.voteDuration - elapsed));
-    throw new TakaroUserError(
-      `A restart vote is already in progress (started by ${existingState.initiatorName}). ${remaining}s remaining.`,
-    );
-  }
-
-  // 3. Check cooldown
-  const cooldownUntil = await getCooldownUntil(gameServerId, moduleId);
-  if (cooldownUntil) {
-    const cooldownMs = new Date(cooldownUntil).getTime() - Date.now();
-    if (cooldownMs > 0) {
-      const remainingSecs = Math.ceil(cooldownMs / 1000);
+  const { threshold, currentVotes, initiatorIsImmune, eligibleCount } = await withVoteLock(gameServerId, moduleId, async () => {
+    const existingState = await getVoteState(gameServerId, moduleId);
+    const restartState = await getRestartState(gameServerId, moduleId);
+    if (existingState || restartState) {
+      if (existingState?.status === 'passed' || restartState) {
+        throw new TakaroUserError('A restart vote has already passed. Server restarting shortly.');
+      }
+      const elapsed = (Date.now() - new Date(existingState.startedAt).getTime()) / 1000;
+      const remaining = Math.max(0, Math.ceil(config.voteDuration - elapsed));
       throw new TakaroUserError(
-        `A restart vote recently failed. Please wait ${remainingSecs}s before starting a new vote.`,
+        `A restart vote is already in progress (started by ${existingState.initiatorName}). ${remaining}s remaining.`,
       );
     }
-    // Cooldown expired — clean it up
-    await deleteCooldown(gameServerId, moduleId);
-  }
 
-  // 4. Check minimum players
-  const eligiblePlayers = await getOnlineNonImmunePlayers(gameServerId);
-  if (eligiblePlayers.length < config.minimumPlayers) {
-    throw new TakaroUserError(
-      `Not enough players to start a vote. Need at least ${config.minimumPlayers} non-immune players online (currently ${eligiblePlayers.length}).`,
-    );
-  }
+    const cooldownUntil = await getCooldownUntil(gameServerId, moduleId);
+    if (cooldownUntil) {
+      const cooldownMs = new Date(cooldownUntil).getTime() - Date.now();
+      if (cooldownMs > 0) {
+        const remainingSecs = Math.ceil(cooldownMs / 1000);
+        throw new TakaroUserError(
+          `A restart vote recently failed. Please wait ${remainingSecs}s before starting a new vote.`,
+        );
+      }
+      await deleteCooldown(gameServerId, moduleId);
+    }
 
-  // 5. Create vote state — initiator auto-voted if not immune
-  const initiatorIsImmune = checkPermission(pog, 'VOTE_RESTART_IMMUNE');
-  const initialVoters = initiatorIsImmune ? [] : [pog.playerId];
+    const eligiblePlayers = await getOnlineNonImmunePlayers(gameServerId);
+    if (eligiblePlayers.length < config.minimumPlayers) {
+      throw new TakaroUserError(
+        `Not enough players to start a vote. Need at least ${config.minimumPlayers} non-immune players online (currently ${eligiblePlayers.length}).`,
+      );
+    }
 
-  const voteState = {
-    startedAt: new Date().toISOString(),
-    initiatorName: player.name,
-    voters: initialVoters,
-    status: 'active',
-  };
+    const initiatorIsImmune = checkPermission(pog, 'VOTE_RESTART_IMMUNE');
+    const initialVoters = initiatorIsImmune ? [] : [pog.playerId];
+    const threshold = computeThreshold(eligiblePlayers.length, config.passThreshold);
+    const voteState = {
+      startedAt: new Date().toISOString(),
+      initiatorName: player.name,
+      voters: initialVoters,
+      status: 'active',
+      requiredVotes: threshold,
+      eligiblePlayerIds: eligiblePlayers.map((p) => p.playerId),
+      eligibleCountAtStart: eligiblePlayers.length,
+    };
 
-  await setVoteState(gameServerId, moduleId, voteState);
-
-  const threshold = computeThreshold(eligiblePlayers.length, config.passThreshold);
-  const currentVotes = initialVoters.length;
+    await setVoteState(gameServerId, moduleId, voteState);
+    return { threshold, currentVotes: initialVoters.length, initiatorIsImmune, eligibleCount: eligiblePlayers.length };
+  });
 
   console.log(
-    `vote-restart: vote started by ${player.name}, eligible=${eligiblePlayers.length}, threshold=${threshold}, initiatorImmune=${initiatorIsImmune}`,
+    `vote-restart: vote started by ${player.name}, eligible=${eligibleCount}, threshold=${threshold}, initiatorImmune=${initiatorIsImmune}`,
   );
 
   // 6. Broadcast
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-    message: `[Vote Restart] ${player.name} started a restart vote! /voteyes to agree. (${currentVotes}/${threshold}, ${config.voteDuration}s remaining)`,
+    message: `[Vote Restart] ${player.name} started a restart vote! /voteyes to agree. (${currentVotes}/${threshold}, ${config.voteDuration}s remaining, threshold locked at start)`,
     opts: {},
   });
 }

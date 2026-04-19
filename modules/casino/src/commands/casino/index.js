@@ -39,7 +39,7 @@ async function main() {
   await pog.pm([
     '🎰 Casino games: ' + enabled.join(', '),
     `Min bet: ${config.minBet} | Base max bet: ${config.maxBet} | Window: ${config.capWindow}`,
-    'Commands: /casinostats, /casinotop <wager|won|winrate|biggest>, /jackpot',
+    'Commands: /casinostats, /casinotop <wager|won|roi|biggest>, /jackpot',
     'Tip: /casino <game> shows focused help for one game.',
   ].join('\n'));
 }

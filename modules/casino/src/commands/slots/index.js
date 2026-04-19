@@ -1,5 +1,5 @@
 import { data } from '@takaro/helpers';
-import { getDefaultConfig, placeBet, settle, roundCurrency, formatCurrency, pickSlotSymbol, claimJackpot } from './casino-helpers.js';
+import { getDefaultConfig, placeBet, settle, settleJackpotWin, roundCurrency, formatCurrency, pickSlotSymbol } from './casino-helpers.js';
 
 async function main() {
   const { gameServerId, pog, player, arguments: args, module: mod } = data;
@@ -15,8 +15,6 @@ async function main() {
   let jackpotWin = false;
 
   if (allSame && reels[0].emoji === '7️⃣') {
-    const jackpot = await claimJackpot(gameServerId, mod.moduleId, player.name, 'slots');
-    payout = roundCurrency(jackpot.payout);
     jackpotWin = true;
   } else if (allSame) {
     payout = roundCurrency(placed.amount * reels[0].triple * (1 - placed.edgeFraction));
@@ -24,7 +22,12 @@ async function main() {
     payout = roundCurrency(placed.amount * 1.5 * (1 - placed.edgeFraction));
   }
 
-  const result = await settle({ gameServerId, moduleId: mod.moduleId, player, config, game: 'slots', betAmount: placed.amount, payout, jackpotWin });
+  const result = jackpotWin
+    ? await settleJackpotWin({ gameServerId, moduleId: mod.moduleId, player, config, game: 'slots', betAmount: placed.amount })
+    : await settle({ gameServerId, moduleId: mod.moduleId, player, config, game: 'slots', betAmount: placed.amount, payout, jackpotWin });
+  if (jackpotWin) {
+    payout = roundCurrency(result.payout ?? payout);
+  }
   if (jackpotWin) {
     await pog.pm(`🎰 ${icons} — JACKPOT! Won ${formatCurrency(payout)} coin! (Balance: ${formatCurrency(result.balance)})`);
   } else if (allSame) {

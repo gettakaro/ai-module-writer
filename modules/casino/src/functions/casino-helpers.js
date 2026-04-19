@@ -10,6 +10,7 @@ export const KEY_DUEL = 'casino_duel';
 export const KEY_HILO_SESSION = 'casino_session_hilo';
 export const KEY_BLACKJACK_SESSION = 'casino_session_blackjack';
 export const KEY_WINDOW_PREFIX = 'casino_window';
+export const KEY_REPORT_DAY_PREFIX = 'casino_report_day';
 export const KEY_LOCK_PREFIX = 'casino_lock';
 
 export const DEFAULT_STATS = {
@@ -349,23 +350,11 @@ export async function setJackpot(gameServerId, moduleId, jackpot) {
   });
 }
 
-export async function claimJackpot(gameServerId, moduleId, playerName, game) {
-  return await withCasinoLocks(gameServerId, moduleId, ['jackpot'], async () => {
-    const jackpot = await getJackpot(gameServerId, moduleId);
-    const payout = roundCurrency(jackpot.amount);
-    jackpot.amount = 0;
-    jackpot.lastWinner = playerName;
-    jackpot.lastWinAt = nowIso();
-    jackpot.lastWinGame = game;
-    await setJackpot(gameServerId, moduleId, jackpot);
-    return { payout, jackpot };
-  });
-}
-
 export async function getLeaderboardCache(gameServerId, moduleId) {
   return await readJsonVariable(gameServerId, moduleId, KEY_LEADERBOARD, undefined, {
     topWager: [],
     topWon: [],
+    topRoi: [],
     topWinrate: [],
     topBiggest: [],
     refreshedAt: null,
@@ -380,6 +369,7 @@ export async function getRacePool(gameServerId, moduleId) {
   return await readJsonVariable(gameServerId, moduleId, KEY_RACE_POOL, undefined, {
     participants: [],
     drawAt: null,
+    status: 'open',
   });
 }
 
@@ -473,6 +463,54 @@ export async function getPlayerBalance(gameServerId, playerId) {
   return Number(pog.currency ?? 0);
 }
 
+export async function assertNoLegacyCasinoModules(gameServerId, moduleId) {
+  const legacyNames = new Set(['blackjack', 'roulette', 'slotmachines', 'hangman', 'horseracing', 'pvpbet']);
+  const res = await takaro.module.moduleInstallationsControllerGetInstalledModules({
+    filters: { gameserverId: [gameServerId] },
+    limit: 100,
+  });
+  const conflicts = (res.data.data ?? []).filter((row) => {
+    if (row.moduleId === moduleId) return false;
+    const normalized = String(row.module?.name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    return legacyNames.has(normalized);
+  });
+  if (conflicts.length > 0) {
+    const names = conflicts.map((row) => row.module?.name).filter(Boolean).join(', ');
+    throw new TakaroUserError(`Casino cannot run while old gambling modules are still installed: ${names}. Uninstall them before using /casino.`);
+  }
+}
+
+export async function recordReportDay(gameServerId, moduleId, { playerId, playerName, game, betAmount, payout, occurredAt = nowIso() }) {
+  const dayKey = `${KEY_REPORT_DAY_PREFIX}:${String(occurredAt).slice(0, 10)}`;
+  const current = await readJsonVariable(gameServerId, moduleId, dayKey, undefined, {
+    day: String(occurredAt).slice(0, 10),
+    totalWagered: 0,
+    totalWon: 0,
+    houseProfit: 0,
+    perGame: {},
+    players: {},
+  });
+
+  current.totalWagered = Number(current.totalWagered ?? 0) + roundCurrency(betAmount);
+  current.totalWon = Number(current.totalWon ?? 0) + roundCurrency(payout);
+  current.houseProfit = Number(current.houseProfit ?? 0) + roundCurrency(betAmount) - roundCurrency(payout);
+
+  const gameRow = current.perGame?.[game] ?? { wagered: 0, won: 0, plays: 0 };
+  gameRow.wagered += roundCurrency(betAmount);
+  gameRow.won += roundCurrency(payout);
+  gameRow.plays += 1;
+  current.perGame = { ...(current.perGame ?? {}), [game]: gameRow };
+
+  const playerRow = current.players?.[playerId] ?? { name: playerName, wagered: 0, won: 0, net: 0 };
+  playerRow.name = playerName;
+  playerRow.wagered += roundCurrency(betAmount);
+  playerRow.won += roundCurrency(payout);
+  playerRow.net += roundCurrency(payout) - roundCurrency(betAmount);
+  current.players = { ...(current.players ?? {}), [playerId]: playerRow };
+
+  await writeVariable(gameServerId, moduleId, dayKey, current);
+}
+
 export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, playerName, game, net, config, jackpotWin = false, payout = 0, betAmount = 0 }) {
   if (!(jackpotWin || net >= config.bigWinThreshold)) return;
 
@@ -487,11 +525,12 @@ export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, pl
     betAmount: roundCurrency(betAmount),
     threshold: roundCurrency(config.bigWinThreshold),
     occurredAt: nowIso(),
+    message: `${prefix} ${playerName} won ${formatCurrency(net)} on ${game}!`,
   };
 
   try {
     await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-      message: `${prefix} ${playerName} won ${formatCurrency(net)} on ${game}!`,
+      message: meta.message,
       opts: {},
     });
   } catch (err) {
@@ -500,20 +539,21 @@ export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, pl
 
   try {
     await takaro.event.eventControllerCreate({
-      eventName: 'casino-big-win',
+      eventName: 'chat-message',
       gameserverId: gameServerId,
       moduleId,
       playerId,
       meta,
     });
   } catch (err) {
-    console.error(`casino-helpers: failed to emit casino-big-win for ${playerName}: ${err}`);
+    console.error(`casino-helpers: failed to emit casino big-win chat-message event for ${playerName}: ${err}`);
   }
 }
 
 export async function placeBet({ gameServerId, moduleId, pog, player, config, game, amount, skipLock = false }) {
   const run = async () => {
     requirePlayPermission(pog);
+    await assertNoLegacyCasinoModules(gameServerId, moduleId);
     await ensurePlayerNotBanned(gameServerId, moduleId, player.id);
     if (!getGameEnabled(config, game)) {
       throw new TakaroUserError(`The ${game} game is disabled on this server.`);
@@ -573,7 +613,7 @@ export async function placeBet({ gameServerId, moduleId, pog, player, config, ga
   return await withCasinoLocks(gameServerId, moduleId, [`player:${player.id}`], run);
 }
 
-export async function settle({ gameServerId, moduleId, player, config, game, betAmount, payout, jackpotWin = false, skipLock = false }) {
+export async function settle({ gameServerId, moduleId, player, config, game, betAmount, payout, jackpotWin = false, skipLock = false, announceBigWin = true }) {
   const run = async () => {
     const safeBet = roundCurrency(betAmount);
     const safePayout = roundCurrency(payout);
@@ -619,7 +659,18 @@ export async function settle({ gameServerId, moduleId, player, config, game, bet
       await setJackpot(gameServerId, moduleId, jackpot);
     }
 
-    await maybeAnnounceBigWin({ gameServerId, moduleId, playerId: player.id, playerName: player.name, game, net, config, jackpotWin, payout: safePayout, betAmount: safeBet });
+    await recordReportDay(gameServerId, moduleId, {
+      playerId: player.id,
+      playerName: player.name,
+      game,
+      betAmount: safeBet,
+      payout: safePayout,
+      occurredAt: nowIso(),
+    });
+
+    if (announceBigWin) {
+      await maybeAnnounceBigWin({ gameServerId, moduleId, playerId: player.id, playerName: player.name, game, net, config, jackpotWin, payout: safePayout, betAmount: safeBet });
+    }
 
     const balance = await getPlayerBalance(gameServerId, player.id);
     return { net, balance, jackpotContribution, jackpot };
@@ -681,13 +732,14 @@ export async function refreshLeaderboardCache(gameServerId, moduleId) {
     won: Number(entry.stats.won ?? 0),
     biggest: Number(entry.stats.biggestWin?.amount ?? 0),
     gamesPlayed: Number(entry.stats.gamesPlayed ?? 0),
-    winrate: entry.stats.wagered > 0 ? Number(((entry.stats.won / entry.stats.wagered) * 100).toFixed(2)) : 0,
+    roi: entry.stats.wagered > 0 ? Number(((entry.stats.won / entry.stats.wagered) * 100).toFixed(2)) : 0,
   })));
 
   const cache = {
     topWager: [...enriched].sort((a, b) => b.wagered - a.wagered).slice(0, 10),
     topWon: [...enriched].sort((a, b) => b.won - a.won).slice(0, 10),
-    topWinrate: [...enriched].filter((e) => e.gamesPlayed >= 3).sort((a, b) => b.winrate - a.winrate).slice(0, 10),
+    topRoi: [...enriched].filter((e) => e.gamesPlayed >= 3).sort((a, b) => b.roi - a.roi).slice(0, 10),
+    topWinrate: [...enriched].filter((e) => e.gamesPlayed >= 3).sort((a, b) => b.roi - a.roi).slice(0, 10),
     topBiggest: [...enriched].sort((a, b) => b.biggest - a.biggest).slice(0, 10),
     refreshedAt: nowIso(),
   };
@@ -984,9 +1036,56 @@ export async function handleDisconnect(gameServerId, moduleId, playerId, config)
   return refunds;
 }
 
-export async function generateReport(gameServerId, moduleId) {
-  const all = await listAllStats(gameServerId, moduleId);
+export function getNextWindowResetAt(capWindow) {
+  const now = new Date();
+  if (capWindow === 'weekly') {
+    const day = now.getUTCDay() || 7;
+    const diff = 8 - day;
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + diff, 0, 0, 0));
+  }
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
+}
+
+export async function settleJackpotWin({ gameServerId, moduleId, player, config, game, betAmount }) {
+  return await withCasinoLocks(gameServerId, moduleId, ['jackpot', `player:${player.id}`], async () => {
+    const jackpot = await getJackpot(gameServerId, moduleId);
+    const payout = roundCurrency(jackpot.amount);
+    const result = await settle({
+      gameServerId,
+      moduleId,
+      player,
+      config,
+      game,
+      betAmount,
+      payout,
+      skipLock: true,
+      announceBigWin: false,
+    });
+    jackpot.amount = 0;
+    jackpot.lastWinner = player.name;
+    jackpot.lastWinAt = nowIso();
+    jackpot.lastWinGame = game;
+    await setJackpot(gameServerId, moduleId, jackpot);
+    await maybeAnnounceBigWin({
+      gameServerId,
+      moduleId,
+      playerId: player.id,
+      playerName: player.name,
+      game,
+      net: payout - roundCurrency(betAmount),
+      config,
+      jackpotWin: true,
+      payout,
+      betAmount,
+    });
+    return { ...result, payout, jackpot };
+  });
+}
+
+export async function generateReport(gameServerId, moduleId, days = 7) {
+  const safeDays = Math.max(1, Math.min(365, Math.floor(Number(days) || 7)));
   const report = {
+    days: safeDays,
     totalWagered: 0,
     totalWon: 0,
     houseProfit: 0,
@@ -994,25 +1093,33 @@ export async function generateReport(gameServerId, moduleId) {
     perGame: {},
   };
 
-  for (const entry of all) {
-    report.totalWagered += Number(entry.stats.wagered ?? 0);
-    report.totalWon += Number(entry.stats.won ?? 0);
-    for (const [game, stats] of Object.entries(entry.stats.perGame ?? {})) {
-      const row = report.perGame[game] ?? { wagered: 0, won: 0, plays: 0 };
-      row.wagered += Number(stats.wagered ?? 0);
-      row.won += Number(stats.won ?? 0);
-      row.plays += Number(stats.plays ?? 0);
-      report.perGame[game] = row;
+  const players = {};
+  for (let i = 0; i < safeDays; i += 1) {
+    const date = new Date();
+    date.setUTCDate(date.getUTCDate() - i);
+    const dayKey = `${KEY_REPORT_DAY_PREFIX}:${date.toISOString().slice(0, 10)}`;
+    const row = await readJsonVariable(gameServerId, moduleId, dayKey, undefined, null);
+    if (!row) continue;
+    report.totalWagered += Number(row.totalWagered ?? 0);
+    report.totalWon += Number(row.totalWon ?? 0);
+    report.houseProfit += Number(row.houseProfit ?? 0);
+    for (const [game, gameRow] of Object.entries(row.perGame ?? {})) {
+      const current = report.perGame[game] ?? { wagered: 0, won: 0, plays: 0 };
+      current.wagered += Number(gameRow.wagered ?? 0);
+      current.won += Number(gameRow.won ?? 0);
+      current.plays += Number(gameRow.plays ?? 0);
+      report.perGame[game] = current;
+    }
+    for (const [playerId, playerRow] of Object.entries(row.players ?? {})) {
+      const current = players[playerId] ?? { name: playerRow.name ?? await getPlayerName(playerId), wagered: 0, won: 0, net: 0 };
+      current.name = playerRow.name ?? current.name;
+      current.wagered += Number(playerRow.wagered ?? 0);
+      current.won += Number(playerRow.won ?? 0);
+      current.net += Number(playerRow.net ?? 0);
+      players[playerId] = current;
     }
   }
 
-  report.houseProfit = report.totalWagered - report.totalWon;
-  report.top5 = (await Promise.all(all.map(async (entry) => ({
-    name: await getPlayerName(entry.playerId),
-    wagered: Number(entry.stats.wagered ?? 0),
-    won: Number(entry.stats.won ?? 0),
-    net: Number(entry.stats.net ?? 0),
-  })))).sort((a, b) => b.wagered - a.wagered).slice(0, 5);
-
+  report.top5 = Object.values(players).sort((a, b) => b.wagered - a.wagered).slice(0, 5);
   return report;
 }

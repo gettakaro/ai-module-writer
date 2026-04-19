@@ -32,7 +32,10 @@ describe('casino module', () => {
   let manageRoleId: string | undefined;
   let refreshCronjobId: string;
   let expireSessionsCronjobId: string;
+  let expireWindowsCronjobId: string;
+  let expireBansCronjobId: string;
   let drawRaceCronjobId: string;
+  let vipRoleId: string | undefined;
 
   async function triggerCommand(playerId: string, msg: string) {
     const after = new Date();
@@ -94,15 +97,16 @@ describe('casino module', () => {
     await client.variable.variableControllerUpdate(row!.id, { value: JSON.stringify(next) });
   }
 
-  async function findCustomEvent(eventName: string, after: Date) {
+  async function findBigWinEvent(after: Date) {
     const result = await client.event.eventControllerSearch({
       filters: {
         gameserverId: [ctx.gameServer.id],
-        eventName: [eventName as any],
+        eventName: ['chat-message' as any],
       },
       greaterThan: { createdAt: after.toISOString() },
+      limit: 20,
     } as any);
-    return result.data.data[0] ?? null;
+    return result.data.data.find((event: any) => event.meta?.type === 'casino-big-win') ?? null;
   }
 
   before(async () => {
@@ -120,6 +124,8 @@ describe('casino module', () => {
     versionId = mod.latestVersion.id;
     refreshCronjobId = mod.latestVersion.cronJobs.find((c) => c.name === 'refresh-leaderboards')!.id;
     expireSessionsCronjobId = mod.latestVersion.cronJobs.find((c) => c.name === 'expire-sessions')!.id;
+    expireWindowsCronjobId = mod.latestVersion.cronJobs.find((c) => c.name === 'expire-windows')!.id;
+    expireBansCronjobId = mod.latestVersion.cronJobs.find((c) => c.name === 'expire-bans')!.id;
     drawRaceCronjobId = mod.latestVersion.cronJobs.find((c) => c.name === 'draw-race')!.id;
 
     await installModule(client, versionId, ctx.gameServer.id, {
@@ -138,6 +144,7 @@ describe('casino module', () => {
     playRoleId1 = await assignPermissions(client, ctx.players[0].playerId, ctx.gameServer.id, ['CASINO_PLAY']);
     manageRoleId = await assignPermissions(client, ctx.players[1].playerId, ctx.gameServer.id, ['CASINO_PLAY', 'CASINO_MANAGE']);
     playRoleId2 = await assignPermissions(client, ctx.players[2].playerId, ctx.gameServer.id, ['CASINO_PLAY']);
+    vipRoleId = await assignPermissions(client, ctx.players[0].playerId, ctx.gameServer.id, [{ code: 'CASINO_VIP', count: 2 }]);
 
     await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(ctx.gameServer.id, ctx.players[0].playerId, { currency: 5000 });
     await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(ctx.gameServer.id, ctx.players[1].playerId, { currency: 5000 });
@@ -148,6 +155,7 @@ describe('casino module', () => {
     await cleanupRole(client, playRoleId1);
     await cleanupRole(client, playRoleId2);
     await cleanupRole(client, manageRoleId);
+    await cleanupRole(client, vipRoleId);
     try {
       await uninstallModule(client, moduleId, ctx.gameServer.id);
     } catch (err) {
@@ -244,7 +252,7 @@ describe('casino module', () => {
 
     const pool = await getVariable('casino_race_pool');
     const parsed = JSON.parse(pool!.value);
-    assert.deepEqual(parsed, { participants: [], drawAt: null });
+    assert.deepEqual(parsed, { participants: [], drawAt: null, status: 'open' });
   });
 
   it('expires abandoned hilo sessions through the cleanup cronjob and refunds the stake', async () => {
@@ -299,20 +307,21 @@ describe('casino module', () => {
     await new Promise((resolve) => setTimeout(resolve, 1500));
   });
 
-  it('emits a casino-big-win event for qualifying wins', async () => {
+  it('emits a compatible big-win chat-message event for qualifying wins', async () => {
     const player = ctx.players[0]!;
     const after = new Date();
-    let event = await findCustomEvent('casino-big-win', after);
+    let event = await findBigWinEvent(after);
 
     for (let i = 0; i < 12 && !event; i += 1) {
       const attempt = await triggerCommand(player.playerId, `${prefix}flip 10 heads`);
       assert.equal(attempt.success, true, `expected flip attempt to execute, logs=${JSON.stringify(attempt.logs)}`);
-      event = await findCustomEvent('casino-big-win', after);
+      event = await findBigWinEvent(after);
     }
 
-    assert.ok(event, 'expected a casino-big-win event after repeated winning attempts');
+    assert.ok(event, 'expected a compatible big-win event after repeated winning attempts');
     const meta = event!.meta as unknown as Record<string, unknown>;
     assert.equal(meta.type, 'casino-big-win');
+    assert.equal(event!.eventName, 'chat-message');
   });
 
   it('bans and unbans players via admin commands', async () => {
@@ -345,6 +354,7 @@ describe('casino module', () => {
 
     const report = await triggerCommand(admin.playerId, `${prefix}casinoreport 7`);
     assert.equal(report.success, true, `expected /casinoreport success, logs=${JSON.stringify(report.logs)}`);
+    assert.ok(report.logs.some((msg) => /Casino report \(7 days\)/.test(msg)), `expected bounded report window, logs=${JSON.stringify(report.logs)}`);
   });
 
   it('refreshes leaderboard cache and exposes it through /casinotop', async () => {
@@ -356,5 +366,76 @@ describe('casino module', () => {
 
     const top = await triggerCommand(ctx.players[0]!.playerId, `${prefix}casinotop wager`);
     assert.equal(top.success, true, `expected /casinotop success, logs=${JSON.stringify(top.logs)}`);
+
+    const roi = await triggerCommand(ctx.players[0]!.playerId, `${prefix}casinotop roi`);
+    assert.equal(roi.success, true, `expected /casinotop roi success, logs=${JSON.stringify(roi.logs)}`);
+    assert.ok(roi.logs.some((msg) => /payout ratio/i.test(msg)), `expected payout-ratio wording, logs=${JSON.stringify(roi.logs)}`);
+  });
+
+  it('covers roulette, dice, crash, stats, and stat reset commands', async () => {
+    const player = ctx.players[0]!;
+    const admin = ctx.players[1]!;
+    const playerName = (await client.player.playerControllerGetOne(player.playerId)).data.data.name;
+
+    for (const msg of [`${prefix}bet 10 red`, `${prefix}dice 10 over 60`, `${prefix}crash 10 1.5`, `${prefix}casinostats`]) {
+      const result = await triggerCommand(player.playerId, msg);
+      assert.equal(result.success, true, `expected success for ${msg}, logs=${JSON.stringify(result.logs)}`);
+    }
+
+    const reset = await triggerCommand(admin.playerId, `${prefix}casinoresetstats ${playerName}`);
+    assert.equal(reset.success, true, `expected casinoresetstats success, logs=${JSON.stringify(reset.logs)}`);
+    const statsRow = await getVariable('casino_stats', player.playerId);
+    assert.equal(statsRow, null, 'expected casino stats row to be deleted after reset');
+  });
+
+  it('enforces disabled games, vip max-bet scaling, and self-service cap feedback', async () => {
+    const install = (await client.module.moduleInstallationsControllerGetModuleInstallation(moduleId, ctx.gameServer.id)).data.data;
+    await client.module.moduleInstallationsControllerUninstallModule(moduleId, ctx.gameServer.id);
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        ...(install.userConfig as any),
+        cooldownSeconds: 0,
+        maxBet: 100,
+        wagerCap: 120,
+        lossCap: 80,
+        games: { ...(install.userConfig as any)?.games, dice: false },
+      },
+    });
+
+    const disabled = await triggerCommand(ctx.players[0]!.playerId, `${prefix}dice 10 over 55`);
+    assert.equal(disabled.success, false, 'expected disabled game rejection');
+    assert.ok(disabled.logs.some((msg) => /disabled/i.test(msg)), `expected disabled-game message, logs=${JSON.stringify(disabled.logs)}`);
+
+    const vipBet = await triggerCommand(ctx.players[0]!.playerId, `${prefix}flip 150 heads`);
+    assert.equal(vipBet.success, true, `expected VIP-scaled max bet to succeed, logs=${JSON.stringify(vipBet.logs)}`);
+
+    const stats = await triggerCommand(ctx.players[0]!.playerId, `${prefix}casinostats`);
+    assert.equal(stats.success, true, `expected casinostats success, logs=${JSON.stringify(stats.logs)}`);
+    assert.ok(stats.logs.some((msg) => /remaining/i.test(msg)), `expected actionable cap feedback, logs=${JSON.stringify(stats.logs)}`);
+  });
+
+  it('expires temporary bans and old windows via cronjobs', async () => {
+    const admin = ctx.players[1]!;
+    const player = ctx.players[0]!;
+    const playerName = (await client.player.playerControllerGetOne(player.playerId)).data.data.name;
+
+    const ban = await triggerCommand(admin.playerId, `${prefix}casinoban ${playerName} 1`);
+    assert.equal(ban.success, true, `expected temp ban success, logs=${JSON.stringify(ban.logs)}`);
+    await updateVariable('casino_ban', player.playerId, (value) => ({ ...value, expiresAt: new Date(Date.now() - 60_000).toISOString() }));
+
+    const expireBan = await triggerCronjob(expireBansCronjobId);
+    assert.equal(expireBan.success, true, `expected expire-bans success, logs=${JSON.stringify(expireBan.logs)}`);
+    assert.equal(await getVariable('casino_ban', player.playerId), null, 'expected expired ban deletion');
+
+    await client.variable.variableControllerCreate({
+      key: 'casino_window:2000-01-01',
+      value: JSON.stringify({ wagered: 10, lost: 5, windowKey: '2000-01-01' }),
+      gameServerId: ctx.gameServer.id,
+      moduleId,
+      playerId: player.playerId,
+    });
+    const expireWindow = await triggerCronjob(expireWindowsCronjobId);
+    assert.equal(expireWindow.success, true, `expected expire-windows success, logs=${JSON.stringify(expireWindow.logs)}`);
+    assert.equal(await getVariable('casino_window:2000-01-01', player.playerId), null, 'expected old window deletion');
   });
 });

@@ -3,6 +3,11 @@ import { takaro, checkPermission } from '@takaro/helpers';
 export const VOTE_STATE_KEY = 'vr_vote_state';
 export const RESTART_STATE_KEY = 'vr_restart_state';
 export const COOLDOWN_KEY = 'vr_cooldown_until';
+export const LOCK_KEY = 'vr_state_lock';
+
+export function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // ── Generic variable CRUD ─────────────────────────────────────────────────────
 
@@ -36,6 +41,60 @@ export async function removeVariable(gameServerId, moduleId, key) {
   const existing = await findVariable(gameServerId, moduleId, key);
   if (existing) {
     await takaro.variable.variableControllerDelete(existing.id);
+  }
+}
+
+export async function acquireVoteLock(gameServerId, moduleId, { ttlMs = 15000, timeoutMs = 10000, retryMs = 100 } = {}) {
+  const owner = `${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await takaro.variable.variableControllerCreate({
+        key: LOCK_KEY,
+        value: JSON.stringify({ owner, expiresAt: new Date(Date.now() + ttlMs).toISOString() }),
+        gameServerId,
+        moduleId,
+      });
+      return {
+        async release() {
+          const current = await findVariable(gameServerId, moduleId, LOCK_KEY);
+          if (!current) return;
+          try {
+            const parsed = JSON.parse(current.value);
+            if (parsed?.owner === owner) {
+              await takaro.variable.variableControllerDelete(current.id);
+            }
+          } catch {
+            await takaro.variable.variableControllerDelete(current.id);
+          }
+        },
+      };
+    } catch {
+      const current = await findVariable(gameServerId, moduleId, LOCK_KEY);
+      if (current) {
+        try {
+          const parsed = JSON.parse(current.value);
+          if (parsed?.expiresAt && new Date(parsed.expiresAt).getTime() <= Date.now()) {
+            await takaro.variable.variableControllerDelete(current.id);
+            continue;
+          }
+        } catch {
+          await takaro.variable.variableControllerDelete(current.id);
+          continue;
+        }
+      }
+      await sleep(retryMs);
+    }
+  }
+  throw new Error('Timed out acquiring vote-restart state lock');
+}
+
+export async function withVoteLock(gameServerId, moduleId, fn) {
+  const lock = await acquireVoteLock(gameServerId, moduleId);
+  try {
+    return await fn();
+  } finally {
+    await lock.release();
   }
 }
 
@@ -155,4 +214,18 @@ export async function getOnlineNonImmunePlayers(gameServerId) {
  */
 export function computeThreshold(onlineCount, percent) {
   return Math.max(1, Math.ceil(onlineCount * percent / 100));
+}
+
+export function getRequiredVotes(voteState, fallbackOnlineCount, percent) {
+  return Number(voteState?.requiredVotes ?? computeThreshold(fallbackOnlineCount, percent));
+}
+
+export function getEligiblePool(voteState, eligiblePlayers) {
+  const snapshot = Array.isArray(voteState?.eligiblePlayerIds) ? voteState.eligiblePlayerIds : eligiblePlayers.map((p) => p.playerId);
+  return [...new Set(snapshot)];
+}
+
+export function getEffectiveVotes(voteState, eligiblePlayers) {
+  const eligibleIds = new Set(getEligiblePool(voteState, eligiblePlayers));
+  return (voteState?.voters ?? []).filter((id) => eligibleIds.has(id)).length;
 }

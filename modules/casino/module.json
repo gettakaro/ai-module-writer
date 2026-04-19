@@ -38,6 +38,23 @@
     "additionalProperties": false
   },
   "uiSchema": {},
+  "systemConfig": {
+    "type": "object",
+    "properties": {
+      "cronJobs": {
+        "type": "object",
+        "properties": {
+          "refresh-leaderboards": { "type": "object", "properties": { "temporalValue": { "type": "string", "default": "*/5 * * * *" } }, "additionalProperties": true },
+          "draw-race": { "type": "object", "properties": { "temporalValue": { "type": "string", "default": "*/10 * * * *" } }, "additionalProperties": true },
+          "expire-windows": { "type": "object", "properties": { "temporalValue": { "type": "string", "default": "0 0 * * *" } }, "additionalProperties": true },
+          "expire-sessions": { "type": "object", "properties": { "temporalValue": { "type": "string", "default": "*/5 * * * *" } }, "additionalProperties": true },
+          "expire-bans": { "type": "object", "properties": { "temporalValue": { "type": "string", "default": "0 * * * *" } }, "additionalProperties": true }
+        },
+        "additionalProperties": true
+      }
+    },
+    "additionalProperties": true
+  },
   "permissions": [
     {
       "permission": "CASINO_PLAY",
@@ -176,7 +193,7 @@
       "helpText": "Usage: /casinotop <wager|won|winrate|biggest>",
       "function": "src/commands/casinotop/index.js",
       "arguments": [
-        { "name": "category", "type": "string", "helpText": "Leaderboard category", "position": 0, "defaultValue": "wager" }
+        { "name": "category", "type": "string", "helpText": "Leaderboard category: wager, won, roi, or biggest", "position": 0, "defaultValue": "wager" }
       ]
     },
     "jackpot": {
@@ -229,7 +246,7 @@
       "helpText": "Usage: /casinoreport [days]",
       "function": "src/commands/casinoreport/index.js",
       "arguments": [
-        { "name": "days", "type": "number", "helpText": "Currently informational only; defaults to 7", "position": 0, "defaultValue": "7" }
+        { "name": "days", "type": "number", "helpText": "Number of trailing UTC days to include; defaults to 7", "position": 0, "defaultValue": "7" }
       ]
     }
   },

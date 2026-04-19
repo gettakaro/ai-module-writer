@@ -8,7 +8,9 @@ import {
   deleteRestartState,
   setCooldownUntil,
   getOnlineNonImmunePlayers,
-  computeThreshold,
+  getRequiredVotes,
+  getEffectiveVotes,
+  withVoteLock,
 } from './vote-helpers.js';
 
 async function main() {
@@ -16,69 +18,85 @@ async function main() {
   const config = mod.userConfig;
   const moduleId = mod.moduleId;
 
-  const voteState = await getVoteState(gameServerId, moduleId);
-  const restartState = await getRestartState(gameServerId, moduleId);
-  if (!voteState && !restartState) {
-    return;
-  }
-
-  console.log(`check-vote: evaluating vote status=${voteState?.status ?? restartState?.status ?? 'none'}`);
-
-  if (voteState?.status === 'active') {
-    const elapsed = (Date.now() - new Date(voteState.startedAt).getTime()) / 1000;
-
-    if (elapsed >= config.voteDuration) {
-      console.log(`check-vote: vote expired after ${Math.floor(elapsed)}s`);
-      const cooldownUntil = new Date(Date.now() + config.cooldownDuration * 1000).toISOString();
-      await setCooldownUntil(gameServerId, moduleId, cooldownUntil);
-      await deleteVoteState(gameServerId, moduleId);
-      await deleteRestartState(gameServerId, moduleId);
-
-      await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-        message: `[Vote Restart] The restart vote started by ${voteState.initiatorName} has expired. A new vote can be started in ${config.cooldownDuration}s.`,
-        opts: {},
-      });
-      return;
+  const outcome = await withVoteLock(gameServerId, moduleId, async () => {
+    const voteState = await getVoteState(gameServerId, moduleId);
+    const restartState = await getRestartState(gameServerId, moduleId);
+    if (!voteState && !restartState) {
+      return { type: 'none' };
     }
 
-    const eligiblePlayers = await getOnlineNonImmunePlayers(gameServerId);
-    const onlineVoters = voteState.voters.filter((id) => eligiblePlayers.some((p) => p.playerId === id));
-    const threshold = computeThreshold(eligiblePlayers.length, config.passThreshold);
-    const effectiveVotes = onlineVoters.length;
+    console.log(`check-vote: evaluating vote status=${voteState?.status ?? restartState?.status ?? 'none'}`);
 
-    if (effectiveVotes >= threshold) {
-      voteState.status = 'passed';
-      voteState.passedAt = new Date().toISOString();
-      await setVoteState(gameServerId, moduleId, voteState);
-      await setRestartState(gameServerId, moduleId, {
-        status: 'passed',
-        initiatorName: voteState.initiatorName,
-        voters: [...voteState.voters],
-        passedAt: voteState.passedAt,
-        restartAt: new Date(new Date(voteState.passedAt).getTime() + (config.restartDelay * 1000)).toISOString(),
-      });
+    if (voteState?.status === 'active') {
+      const elapsed = (Date.now() - new Date(voteState.startedAt).getTime()) / 1000;
 
-      console.log(`check-vote: Vote passed! effectiveVotes=${effectiveVotes}, threshold=${threshold}, status changed to passed`);
+      if (elapsed >= config.voteDuration) {
+        console.log(`check-vote: vote expired after ${Math.floor(elapsed)}s`);
+        const cooldownUntil = new Date(Date.now() + config.cooldownDuration * 1000).toISOString();
+        await setCooldownUntil(gameServerId, moduleId, cooldownUntil);
+        await deleteVoteState(gameServerId, moduleId);
+        await deleteRestartState(gameServerId, moduleId);
+        return { type: 'expired', initiatorName: voteState.initiatorName };
+      }
 
-      await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-        message: `[Vote Restart] Vote passed! (${effectiveVotes}/${threshold}) Server will restart in ${config.restartDelay}s.`,
-        opts: {},
-      });
+      const eligiblePlayers = await getOnlineNonImmunePlayers(gameServerId);
+      const threshold = getRequiredVotes(voteState, eligiblePlayers.length, config.passThreshold);
+      const effectiveVotes = getEffectiveVotes(voteState, eligiblePlayers);
+
+      if (effectiveVotes >= threshold) {
+        voteState.status = 'passed';
+        voteState.passedAt = new Date().toISOString();
+        await setVoteState(gameServerId, moduleId, voteState);
+        await setRestartState(gameServerId, moduleId, {
+          status: 'passed',
+          initiatorName: voteState.initiatorName,
+          voters: [...voteState.voters],
+          passedAt: voteState.passedAt,
+          restartAt: new Date(new Date(voteState.passedAt).getTime() + (config.restartDelay * 1000)).toISOString(),
+          requiredVotes: threshold,
+          eligiblePlayerIds: voteState.eligiblePlayerIds ?? eligiblePlayers.map((p) => p.playerId),
+          eligibleCountAtStart: voteState.eligibleCountAtStart ?? eligiblePlayers.length,
+        });
+        console.log(`check-vote: Vote passed! effectiveVotes=${effectiveVotes}, threshold=${threshold}, status changed to passed`);
+        return { type: 'passed', effectiveVotes, threshold };
+      }
+      return { type: 'active' };
     }
+
+    const passedState = restartState ?? voteState;
+    if (!passedState?.passedAt) {
+      return { type: 'none' };
+    }
+
+    const elapsedSincePassed = (Date.now() - new Date(passedState.passedAt).getTime()) / 1000;
+    if (elapsedSincePassed < config.restartDelay) {
+      return { type: 'waiting' };
+    }
+
+    return { type: 'restart-now' };
+  });
+
+  if (outcome.type === 'none' || outcome.type === 'active' || outcome.type === 'waiting') {
     return;
   }
 
-  const passedState = restartState ?? voteState;
-  if (!passedState?.passedAt) {
+  if (outcome.type === 'expired') {
+    await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
+      message: `[Vote Restart] The restart vote started by ${outcome.initiatorName} has expired. A new vote can be started in ${config.cooldownDuration}s.`,
+      opts: {},
+    });
     return;
   }
 
-  const elapsedSincePassed = (Date.now() - new Date(passedState.passedAt).getTime()) / 1000;
-  if (elapsedSincePassed < config.restartDelay) {
+  if (outcome.type === 'passed') {
+    await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
+      message: `[Vote Restart] Vote passed! (${outcome.effectiveVotes}/${outcome.threshold}) Server will restart in ${config.restartDelay}s. Required votes were locked when the vote started.`,
+      opts: {},
+    });
     return;
   }
 
-  console.log(`check-vote: restart delay elapsed (${Math.floor(elapsedSincePassed)}s), executing restart`);
+  console.log('check-vote: restart delay elapsed, executing restart');
 
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
     message: '[Vote Restart] Restarting now!',
@@ -90,23 +108,18 @@ async function main() {
       command: config.restartCommand,
     });
     console.log('check-vote: restart command executed successfully');
-    await deleteVoteState(gameServerId, moduleId);
-    await deleteRestartState(gameServerId, moduleId);
-  } catch (cmdErr) {
-    console.error(`check-vote: failed to execute restart command "${config.restartCommand}": ${cmdErr}`);
-
-    const cooldownUntil = new Date(Date.now() + config.cooldownDuration * 1000).toISOString();
-    try {
-      await setCooldownUntil(gameServerId, moduleId, cooldownUntil);
-    } catch (e) {
-      console.error('Failed to set cooldown', e);
-    }
-    try {
+    await withVoteLock(gameServerId, moduleId, async () => {
       await deleteVoteState(gameServerId, moduleId);
       await deleteRestartState(gameServerId, moduleId);
-    } catch (e) {
-      console.error('Failed to delete vote state', e);
-    }
+    });
+  } catch (cmdErr) {
+    console.error(`check-vote: failed to execute restart command "${config.restartCommand}": ${cmdErr}`);
+    const cooldownUntil = new Date(Date.now() + config.cooldownDuration * 1000).toISOString();
+    await withVoteLock(gameServerId, moduleId, async () => {
+      await setCooldownUntil(gameServerId, moduleId, cooldownUntil);
+      await deleteVoteState(gameServerId, moduleId);
+      await deleteRestartState(gameServerId, moduleId);
+    });
 
     await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
       message: '[Vote Restart] Failed to execute restart command. Please try again later.',

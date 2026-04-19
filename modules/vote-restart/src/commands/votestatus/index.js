@@ -3,7 +3,8 @@ import {
   getVoteState,
   getRestartState,
   getOnlineNonImmunePlayers,
-  computeThreshold,
+  getRequiredVotes,
+  getEffectiveVotes,
 } from './vote-helpers.js';
 
 async function main() {
@@ -30,25 +31,21 @@ async function main() {
       await pog.pm('[Vote Restart] Server restart is imminent or has already been initiated. If the server hasn\'t restarted, please contact an admin.');
     } else {
       console.log(`vote-status: passed, restarting in ${remainingDelay}s`);
-      await pog.pm(`[Vote Restart] Vote passed! Server restarting in ${remainingDelay}s.`);
+      await pog.pm(`[Vote Restart] Vote passed! Server restarting in ${remainingDelay}s. Required votes were locked when the vote started.`);
     }
     return;
   }
 
-  // Active vote
   const elapsed = (Date.now() - new Date(voteState.startedAt).getTime()) / 1000;
   const remaining = Math.max(0, Math.ceil(config.voteDuration - elapsed));
 
   const eligiblePlayers = await getOnlineNonImmunePlayers(gameServerId);
-  const onlineVoters = voteState.voters.filter((id) =>
-    eligiblePlayers.some((p) => p.playerId === id),
-  );
-  const threshold = computeThreshold(eligiblePlayers.length, config.passThreshold);
-  const effectiveVotes = onlineVoters.length;
+  const threshold = getRequiredVotes(voteState, eligiblePlayers.length, config.passThreshold);
+  const effectiveVotes = getEffectiveVotes(voteState, eligiblePlayers);
 
   console.log(`vote-status: active, effectiveVotes=${effectiveVotes}/${threshold}, ${remaining}s remaining`);
 
-  await pog.pm(`[Vote Restart] Restart vote in progress: ${effectiveVotes}/${threshold} votes. ${remaining}s remaining.`);
+  await pog.pm(`[Vote Restart] Restart vote in progress: ${effectiveVotes}/${threshold} votes. ${remaining}s remaining. Snapshot at start: ${voteState.eligibleCountAtStart ?? eligiblePlayers.length} eligible players.`);
 }
 
 await main();

@@ -543,18 +543,12 @@ describe('vote-restart edge cases', () => {
   });
 });
 
-// ── Dynamic threshold recalculation test ──────────────────────────────────────
-// Tests the scenario where a voter's disconnect reduces the denominator such
-// that the remaining online votes now meet the (recalculated) threshold.
-// We simulate this by injecting a vote state with 1 voter and using passThreshold=49
-// so that with 2 online eligible players, threshold=ceil(2*49/100)=1.
-// This validates the cronjob's dynamic threshold recalculation logic.
-
-describe('vote-restart dynamic threshold recalculation', () => {
+describe('vote-restart recovery paths and locked thresholds', () => {
   let client3: Client;
   let ctx3: MockServerContext;
   let moduleId3: string;
   let versionId3: string;
+  let prefix3: string;
   let cronjobId3: string;
   let initiateRoleId3: string | undefined;
   let immuneRoleId3: string | undefined;
@@ -566,16 +560,15 @@ describe('vote-restart dynamic threshold recalculation', () => {
     const mod = await pushModule(client3, MODULE_DIR);
     moduleId3 = mod.id;
     versionId3 = mod.latestVersion.id;
+    prefix3 = await getCommandPrefix(client3, ctx3.gameServer.id);
 
-    // passThreshold=49: with 2 eligible players, threshold=ceil(2*49/100)=1
-    // This means 1 vote from 1 online voter is enough to pass
     await installModule(client3, versionId3, ctx3.gameServer.id, {
       userConfig: {
         voteDuration: 120,
         cooldownDuration: 60,
-        restartDelay: 0,
+        restartDelay: 30,
         restartCommand: 'say restart-test',
-        passThreshold: 49,
+        passThreshold: 51,
         minimumPlayers: 2,
       },
     });
@@ -584,21 +577,8 @@ describe('vote-restart dynamic threshold recalculation', () => {
     if (!cronjob) throw new Error('Expected at least one cronjob in vote-restart module');
     cronjobId3 = cronjob.id;
 
-    // players[0] gets VOTE_RESTART_INITIATE
-    initiateRoleId3 = await assignPermissions(
-      client3,
-      ctx3.players[0].playerId,
-      ctx3.gameServer.id,
-      ['VOTE_RESTART_INITIATE'],
-    );
-
-    // players[2] gets VOTE_RESTART_IMMUNE
-    immuneRoleId3 = await assignPermissions(
-      client3,
-      ctx3.players[2].playerId,
-      ctx3.gameServer.id,
-      ['VOTE_RESTART_IMMUNE'],
-    );
+    initiateRoleId3 = await assignPermissions(client3, ctx3.players[0].playerId, ctx3.gameServer.id, ['VOTE_RESTART_INITIATE']);
+    immuneRoleId3 = await assignPermissions(client3, ctx3.players[2].playerId, ctx3.gameServer.id, ['VOTE_RESTART_IMMUNE']);
   });
 
   after(async () => {
@@ -607,16 +587,21 @@ describe('vote-restart dynamic threshold recalculation', () => {
     try {
       await uninstallModule(client3, moduleId3, ctx3.gameServer.id);
     } catch (err) {
-      console.error('Cleanup: failed to uninstall dynamic-threshold module:', err);
+      console.error('Cleanup: failed to uninstall recovery module:', err);
     }
     try {
       await deleteModule(client3, moduleId3);
     } catch (err) {
-      console.error('Cleanup: failed to delete dynamic-threshold module:', err);
+      console.error('Cleanup: failed to delete recovery module:', err);
     }
     await stopMockServer(ctx3.server, client3, ctx3.gameServer.id);
   });
 
+  const { triggerCommand: triggerCommand3, getResult: getResult3 } = makeCommandHelpers(
+    () => client3,
+    () => ctx3.gameServer.id,
+    () => prefix3,
+  );
   const triggerCronjob3 = makeCronjobHelper(
     () => client3,
     () => ctx3.gameServer.id,
@@ -624,53 +609,65 @@ describe('vote-restart dynamic threshold recalculation', () => {
     () => moduleId3,
   );
 
-  // Scenario: players[0] voted yes (1 vote). players[1] disconnects (non-voter).
-  // After disconnect, eligible online = [players[0]], threshold = ceil(1*49/100) = 1.
-  // Cronjob should detect 1 effective vote >= threshold of 1 → vote passes.
-  //
-  // We simulate the disconnect by injecting an "active" vote state with only
-  // players[0] as a voter, while both non-immune players are online (threshold=1
-  // with passThreshold=49). This tests that the cronjob dynamically recalculates
-  // the threshold from current online non-immune players rather than using a
-  // fixed or cached value.
-
-  it('should detect vote pass when dynamic threshold recalculates to match effective votes', async () => {
-    // Inject active vote state with players[0] as sole voter
-    const voteState = {
-      startedAt: new Date().toISOString(),
-      initiatorName: 'TestPlayer',
-      voters: [ctx3.players[0].playerId],
-      status: 'active',
-    };
+  it('keeps a passed restart blocked when only vr_restart_state remains', async () => {
     await client3.variable.variableControllerCreate({
-      key: 'vr_vote_state',
-      value: JSON.stringify(voteState),
+      key: 'vr_restart_state',
+      value: JSON.stringify({
+        status: 'passed',
+        initiatorName: 'TestPlayer',
+        voters: [ctx3.players[0].playerId, ctx3.players[1].playerId],
+        passedAt: new Date().toISOString(),
+        restartAt: new Date(Date.now() + 30_000).toISOString(),
+        requiredVotes: 2,
+      }),
       gameServerId: ctx3.gameServer.id,
       moduleId: moduleId3,
     });
 
     try {
-      // With 2 eligible online players and passThreshold=49, threshold=ceil(2*49/100)=1
-      // players[0] voted → effectiveVotes=1 >= threshold=1 → should pass
-      const { success, logs } = await triggerCronjob3();
+      const status = await triggerCommand3(ctx3.players[0].playerId, 'votestatus');
+      const statusResult = getResult3(status);
+      assert.equal(statusResult.success, true, `Expected votestatus success, logs=${JSON.stringify(statusResult.logs)}`);
+      assert.ok(statusResult.logs.some((l) => l.includes('Vote passed')), `Expected passed status, logs=${JSON.stringify(statusResult.logs)}`);
 
-      assert.equal(success, true, `Expected cronjob to succeed, logs: ${JSON.stringify(logs)}`);
-      assert.ok(
-        logs.some((l) => l.includes('Vote passed')),
-        `Expected "Vote passed" in cronjob logs (dynamic threshold recalculation), got: ${JSON.stringify(logs)}`,
-      );
+      const yes = await triggerCommand3(ctx3.players[1].playerId, 'voteyes');
+      const yesResult = getResult3(yes);
+      assert.equal(yesResult.success, false, `Expected voteyes rejection, logs=${JSON.stringify(yesResult.logs)}`);
+      assert.ok(yesResult.logs.some((l) => l.includes('already passed') || l.includes('Waiting for restart')));
+
+      const start = await triggerCommand3(ctx3.players[0].playerId, 'voterestart');
+      const startResult = getResult3(start);
+      assert.equal(startResult.success, false, `Expected voterestart rejection, logs=${JSON.stringify(startResult.logs)}`);
+      assert.ok(startResult.logs.some((l) => l.includes('already passed') || l.includes('restarting shortly')));
     } finally {
-      // Clean up any remaining vote state
-      const varSearch = await client3.variable.variableControllerSearch({
-        filters: {
-          key: ['vr_vote_state'],
-          gameServerId: [ctx3.gameServer.id],
-          moduleId: [moduleId3],
-        },
-      });
-      for (const v of varSearch.data.data) {
-        await client3.variable.variableControllerDelete(v.id);
-      }
+      const vars = await client3.variable.variableControllerSearch({ filters: { key: ['vr_restart_state'], gameServerId: [ctx3.gameServer.id], moduleId: [moduleId3] } });
+      for (const row of vars.data.data) await client3.variable.variableControllerDelete(row.id);
+    }
+  });
+
+  it('does not pass an active vote early when requiredVotes was locked at start', async () => {
+    await client3.variable.variableControllerCreate({
+      key: 'vr_vote_state',
+      value: JSON.stringify({
+        startedAt: new Date().toISOString(),
+        initiatorName: 'TestPlayer',
+        voters: [ctx3.players[0].playerId],
+        status: 'active',
+        requiredVotes: 2,
+        eligiblePlayerIds: [ctx3.players[0].playerId, ctx3.players[1].playerId],
+        eligibleCountAtStart: 2,
+      }),
+      gameServerId: ctx3.gameServer.id,
+      moduleId: moduleId3,
+    });
+
+    try {
+      const cron = await triggerCronjob3();
+      assert.equal(cron.success, true, `Expected cronjob success, logs=${JSON.stringify(cron.logs)}`);
+      assert.ok(cron.logs.every((l) => !l.includes('Vote passed')), `Expected locked threshold to prevent pass, logs=${JSON.stringify(cron.logs)}`);
+    } finally {
+      const vars = await client3.variable.variableControllerSearch({ filters: { key: ['vr_vote_state', 'vr_restart_state'], gameServerId: [ctx3.gameServer.id], moduleId: [moduleId3] } as any });
+      for (const row of vars.data.data) await client3.variable.variableControllerDelete(row.id);
     }
   });
 });
