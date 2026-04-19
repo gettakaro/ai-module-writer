@@ -3,7 +3,9 @@ import {
   acquireExecutionLock,
   buildConfigFingerprint,
   buildWeightedBag,
+  clearDeliveryReceipt,
   createInitialState,
+  getDeliveryReceipt,
   getOnlinePlayerCount,
   getServerName,
   getState,
@@ -11,6 +13,7 @@ import {
   normalizeOrder,
   releaseExecutionLock,
   renderMessage,
+  setDeliveryReceipt,
   setState,
   shuffleBag,
   startExecutionLockHeartbeat,
@@ -33,6 +36,21 @@ async function main() {
 
     let state = await getState(gameServerId, mod.moduleId);
     let shouldPersistState = false;
+    const deliveryReceipt = await getDeliveryReceipt(gameServerId, mod.moduleId);
+
+    if (deliveryReceipt?.value?.fingerprint === fingerprint && deliveryReceipt.value?.nextState) {
+      await heartbeat.beat('recover-delivery-receipt');
+      await setState(gameServerId, mod.moduleId, deliveryReceipt.value.nextState);
+      await clearDeliveryReceipt(gameServerId, mod.moduleId);
+      console.log('server-messages: recovered rotation state from prior successful broadcast without rebroadcasting');
+      return;
+    }
+
+    if (deliveryReceipt) {
+      await heartbeat.beat('clear-stale-delivery-receipt');
+      await clearDeliveryReceipt(gameServerId, mod.moduleId);
+      console.log('server-messages: discarded stale delivery receipt due to config change or malformed state');
+    }
 
     if (state.fingerprint !== fingerprint) {
       state = createInitialState(fingerprint);
@@ -112,7 +130,27 @@ async function main() {
     });
 
     await heartbeat.beat('before-state-persist');
-    await setState(gameServerId, mod.moduleId, nextState);
+    try {
+      await setState(gameServerId, mod.moduleId, nextState);
+      await clearDeliveryReceipt(gameServerId, mod.moduleId);
+    } catch (persistErr) {
+      try {
+        await heartbeat.beat('persist-delivery-receipt');
+        await setDeliveryReceipt(gameServerId, mod.moduleId, {
+          fingerprint,
+          nextState,
+          messageIndex,
+          renderedMessage,
+          sentAt: new Date().toISOString(),
+        });
+      } catch (receiptErr) {
+        throw new Error(
+          `server-messages: state persistence failed after broadcast and delivery receipt fallback also failed. State error: ${persistErr}. Receipt error: ${receiptErr}`,
+        );
+      }
+
+      throw new Error(`server-messages: state persistence failed after broadcast; stored a recovery receipt to avoid duplicate rebroadcasts. Cause: ${persistErr}`);
+    }
     console.log(
       `server-messages: broadcasted order=${order} index=${messageIndex} playerCount=${onlinePlayerCount} message=${renderedMessage}`,
     );

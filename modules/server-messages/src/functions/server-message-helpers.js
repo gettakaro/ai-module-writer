@@ -2,6 +2,7 @@ import { takaro } from '@takaro/helpers';
 
 export const SERVER_MESSAGES_STATE_KEY = 'server_messages_state';
 export const SERVER_MESSAGES_LOCK_KEY = 'server_messages_lock';
+export const SERVER_MESSAGES_DELIVERY_RECEIPT_KEY = 'server_messages_delivery_receipt';
 export const MAX_MESSAGE_WEIGHT = 100;
 export const MAX_MESSAGE_COUNT = 100;
 const LOCK_TTL_MS = 30000;
@@ -107,6 +108,32 @@ export async function setState(gameServerId, moduleId, state) {
   await writeVariable(gameServerId, moduleId, SERVER_MESSAGES_STATE_KEY, state);
 }
 
+export async function getDeliveryReceipt(gameServerId, moduleId) {
+  const existing = await findVariable(gameServerId, moduleId, SERVER_MESSAGES_DELIVERY_RECEIPT_KEY);
+  if (!existing) return null;
+
+  try {
+    return {
+      variableId: existing.id,
+      value: JSON.parse(existing.value),
+    };
+  } catch (err) {
+    console.error(`server-message-helpers: failed to parse stored delivery receipt, discarding. Error: ${err}`);
+    await deleteVariable(existing.id);
+    return null;
+  }
+}
+
+export async function setDeliveryReceipt(gameServerId, moduleId, receipt) {
+  await writeVariable(gameServerId, moduleId, SERVER_MESSAGES_DELIVERY_RECEIPT_KEY, receipt);
+}
+
+export async function clearDeliveryReceipt(gameServerId, moduleId) {
+  const existing = await findVariable(gameServerId, moduleId, SERVER_MESSAGES_DELIVERY_RECEIPT_KEY);
+  if (!existing) return;
+  await deleteVariable(existing.id);
+}
+
 export async function findVariable(gameServerId, moduleId, key) {
   const res = await takaro.variable.variableControllerSearch({
     filters: {
@@ -164,6 +191,10 @@ function isLockStale(lockVariable, ttlMs, now = Date.now()) {
   const expiryMs = parseLockExpiryMs(lockVariable, ttlMs);
   if (expiryMs === null) return true;
   return expiryMs <= now;
+}
+
+async function deleteVariable(variableId) {
+  await takaro.variable.variableControllerDelete(variableId);
 }
 
 async function tryDeleteVariable(variableId) {
@@ -287,6 +318,7 @@ export async function acquireExecutionLock(gameServerId, moduleId, options = {})
   const retryDelayMs = Number.isFinite(options.retryDelayMs) ? options.retryDelayMs : LOCK_RETRY_DELAY_MS;
   const deadline = Date.now() + timeoutMs;
   let observedExpiredLockWhileWaiting = false;
+  let waitedForHealthyLockExpiry = false;
 
   while (Date.now() < deadline) {
     const token = createLockToken();
@@ -301,7 +333,7 @@ export async function acquireExecutionLock(gameServerId, moduleId, options = {})
         moduleId,
       });
 
-      if (observedExpiredLockWhileWaiting) {
+      if (observedExpiredLockWhileWaiting || waitedForHealthyLockExpiry) {
         console.warn('server-message-helpers: cleared stale execution lock after waiting for expiry');
       }
 
@@ -328,6 +360,7 @@ export async function acquireExecutionLock(gameServerId, moduleId, options = {})
 
         const expiryMs = parseLockExpiryMs(existingLock, ttlMs);
         const remainingMs = expiryMs === null ? retryDelayMs : Math.max(0, expiryMs - nowMs);
+        waitedForHealthyLockExpiry = true;
         if (remainingMs <= retryDelayMs) {
           observedExpiredLockWhileWaiting = true;
         }

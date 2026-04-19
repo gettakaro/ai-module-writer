@@ -13,6 +13,7 @@ import { MockServerContext, startMockServer, stopMockServer } from '../../../tes
 import {
   createTakaroClient,
   getTakaroAuthConfig,
+  importModuleExport,
   REPO_ROOT,
   withOptionalLoginRetry,
 } from '../../../src/scripts/module-import.js';
@@ -25,6 +26,8 @@ const MODULE_TO_JSON_SCRIPT = path.join(REPO_ROOT, 'dist', 'scripts', 'module-to
 const MODULE_IMPORT_SCRIPT = path.join(REPO_ROOT, 'dist', 'scripts', 'module-import.js');
 const MODULE_PUSH_SCRIPT = path.join(REPO_ROOT, 'scripts', 'module-push.sh');
 const MODULE_NAME = 'test-hello-world';
+const RICH_MODULE_SOURCE_DIR = path.join(REPO_ROOT, 'modules', 'server-messages');
+const RICH_MODULE_NAME = 'test-server-messages-shell';
 
 describe('module-import CLI', () => {
   let client: Client;
@@ -42,10 +45,11 @@ describe('module-import CLI', () => {
       await stopMockServer(mockCtx.server, client, mockCtx.gameServer.id);
     }
 
-    const result = await client.module.moduleControllerSearch({ filters: { name: [MODULE_NAME] } });
-    const existing = result.data.data.find((mod) => mod.name === MODULE_NAME);
-    if (existing) {
-      await deleteModule(client, existing.id);
+    for (const moduleName of [MODULE_NAME, RICH_MODULE_NAME]) {
+      const existing = await searchExactModuleByName(moduleName);
+      if (existing) {
+        await deleteModule(client, existing.id);
+      }
     }
   });
 
@@ -58,14 +62,34 @@ describe('module-import CLI', () => {
     return tempFile;
   }
 
+  async function searchExactModuleByName(moduleName: string): Promise<{ id: string; name: string } | null> {
+    const result = await client.module.moduleControllerSearch({ filters: { name: [moduleName] } });
+    return (result.data.data.find((mod) => mod.name === moduleName) as { id: string; name: string } | undefined) ?? null;
+  }
+
   async function searchExactModule(): Promise<{ id: string; name: string } | null> {
-    const result = await client.module.moduleControllerSearch({ filters: { name: [MODULE_NAME] } });
-    return (result.data.data.find((mod) => mod.name === MODULE_NAME) as { id: string; name: string } | undefined) ?? null;
+    return searchExactModuleByName(MODULE_NAME);
   }
 
   async function getExportedName(moduleId: string): Promise<string | undefined> {
     const exported = await client.module.moduleControllerExport(moduleId);
     return (exported.data.data as { name?: string }).name;
+  }
+
+  async function createRenamedModuleCopy(sourceDir: string, moduleName: string): Promise<string> {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'takaro-module-copy-'));
+    await fs.cp(sourceDir, tempDir, { recursive: true });
+
+    const moduleJsonPath = path.join(tempDir, 'module.json');
+    const moduleJson = JSON.parse(await fs.readFile(moduleJsonPath, 'utf8')) as {
+      name: string;
+      description?: string;
+    };
+    moduleJson.name = moduleName;
+    moduleJson.description = `${moduleJson.description ?? ''} (shell push coverage)`;
+    await fs.writeFile(moduleJsonPath, JSON.stringify(moduleJson, null, 2));
+
+    return tempDir;
   }
 
   it('loads repo .env from outside the repo and accepts token-only auth', async () => {
@@ -161,6 +185,172 @@ describe('module-import CLI', () => {
     const imported = await searchExactModule();
     assert.ok(imported, 'Expected module-push.sh to import the module');
     moduleId = imported.id;
+  });
+
+  it('retries individual replacement requests without restarting the full destructive flow', async () => {
+    let loginCalls = 0;
+    let removedModuleIds: string[] = [];
+    let exportCalls = 0;
+    let importCalls = 0;
+    let reinstallCalls = 0;
+    let searchCalls = 0;
+    let domainSetTo: string | undefined;
+
+    const fakeClient = {
+      login: async () => {
+        loginCalls += 1;
+      },
+      setDomain: (domainId: string) => {
+        domainSetTo = domainId;
+      },
+      module: {
+        moduleControllerSearch: async () => {
+          searchCalls += 1;
+          if (searchCalls === 1) {
+            return { data: { data: [{ id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } }] } };
+          }
+          return { data: { data: [{ id: 'new-module', name: MODULE_NAME, latestVersion: { id: 'new-version' } }] } };
+        },
+        moduleInstallationsControllerGetInstalledModules: async () => ({
+          data: {
+            data: [{ gameserverId: 'gs-1', userConfig: { foo: 'bar' }, systemConfig: { cron: true } }],
+            meta: { total: 1 },
+          },
+        }),
+        moduleControllerExport: async () => {
+          exportCalls += 1;
+          return { data: { data: { name: MODULE_NAME, versions: [] } } };
+        },
+        moduleControllerRemove: async (moduleId: string) => {
+          removedModuleIds.push(moduleId);
+        },
+        moduleControllerImport: async () => {
+          importCalls += 1;
+          if (importCalls === 1) {
+            throw { response: { status: 401 } };
+          }
+        },
+        moduleInstallationsControllerInstallModule: async () => {
+          reinstallCalls += 1;
+        },
+      },
+    } as unknown as Client;
+
+    const imported = await importModuleExport(
+      fakeClient,
+      { name: MODULE_NAME, versions: [] } as any,
+      { request: (operation) => withOptionalLoginRetry(fakeClient, true, 'domain-123', operation) },
+    );
+
+    assert.equal(imported.id, 'new-module');
+    assert.equal(loginCalls, 1, 'Expected one credential refresh for the mid-replacement 401');
+    assert.equal(domainSetTo, 'domain-123');
+    assert.equal(exportCalls, 1, 'Expected the original module to be backed up once');
+    assert.deepEqual(removedModuleIds, ['old-module'], 'Expected the original module to be removed only once');
+    assert.equal(importCalls, 2, 'Expected the failed import request to be retried once');
+    assert.equal(reinstallCalls, 1, 'Expected installations to be restored after the retried import succeeds');
+  });
+
+  it('reinstalls every paginated module installation during replacement', async () => {
+    const installationCalls: Array<{ page?: number; limit?: number }> = [];
+    const reinstalledGameServers: string[] = [];
+    let searchCalls = 0;
+
+    const fakeClient = {
+      module: {
+        moduleControllerSearch: async () => {
+          searchCalls += 1;
+          if (searchCalls === 1) {
+            return { data: { data: [{ id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } }] } };
+          }
+          return { data: { data: [{ id: 'new-module', name: MODULE_NAME, latestVersion: { id: 'new-version' } }] } };
+        },
+        moduleInstallationsControllerGetInstalledModules: async ({ page = 0, limit }: { page?: number; limit?: number }) => {
+          installationCalls.push({ page, limit });
+          if (page === 0) {
+            return {
+              data: {
+                data: Array.from({ length: 100 }, (_, index) => ({
+                  gameserverId: `gs-${index + 1}`,
+                  userConfig: { slot: index + 1 },
+                  systemConfig: { nested: true },
+                })),
+                meta: { total: 125 },
+              },
+            };
+          }
+
+          return {
+            data: {
+              data: Array.from({ length: 25 }, (_, index) => ({
+                gameserverId: `gs-${index + 101}`,
+                userConfig: { slot: index + 101 },
+                systemConfig: { nested: true },
+              })),
+              meta: { total: 125 },
+            },
+          };
+        },
+        moduleControllerExport: async () => ({ data: { data: { name: MODULE_NAME, versions: [] } } }),
+        moduleControllerRemove: async () => {},
+        moduleControllerImport: async () => {},
+        moduleInstallationsControllerInstallModule: async ({ gameServerId }: { gameServerId: string }) => {
+          reinstalledGameServers.push(gameServerId);
+        },
+      },
+    } as unknown as Client;
+
+    await importModuleExport(fakeClient, { name: MODULE_NAME, versions: [] } as any);
+
+    assert.deepEqual(
+      installationCalls,
+      [{ page: 0, limit: 100 }, { page: 1, limit: 100 }],
+      'Expected replacement flow to paginate through all module installations',
+    );
+    assert.equal(reinstalledGameServers.length, 125, 'Expected every paginated installation to be restored');
+    assert.equal(reinstalledGameServers[0], 'gs-1');
+    assert.equal(reinstalledGameServers.at(-1), 'gs-125');
+  });
+
+  it('push script preserves nested cronjobs, functions, and config schema for richer modules', async () => {
+    const auth = getTakaroAuthConfig();
+    const tokenOnlyEnv = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      TAKARO_TOKEN: client.token ?? '',
+      TAKARO_HOST: auth.url,
+      TAKARO_DOMAIN_ID: auth.domainId,
+      TAKARO_USERNAME: '',
+      TAKARO_PASSWORD: '',
+    };
+    const richModuleDir = await createRenamedModuleCopy(RICH_MODULE_SOURCE_DIR, RICH_MODULE_NAME);
+
+    try {
+      const { stdout } = await execFileAsync('bash', [MODULE_PUSH_SCRIPT, richModuleDir], { env: tokenOnlyEnv });
+      const parsed = JSON.parse(stdout) as { data?: { id?: string; name?: string } };
+      assert.equal(parsed.data?.name, RICH_MODULE_NAME);
+
+      const imported = await searchExactModuleByName(RICH_MODULE_NAME);
+      assert.ok(imported, 'Expected module-push.sh to import the richer module fixture');
+
+      const exported = await client.module.moduleControllerExport(imported.id);
+      const richExport = exported.data.data as {
+        name?: string;
+        versions?: Array<{
+          configSchema?: unknown;
+          cronJobs?: unknown[];
+          functions?: unknown[];
+        }>;
+      };
+      const latestVersion = richExport.versions?.[0];
+
+      assert.equal(richExport.name, RICH_MODULE_NAME);
+      assert.ok(latestVersion?.configSchema, 'Expected exported module to keep its config schema');
+      assert.ok((latestVersion?.cronJobs as unknown[] | undefined)?.length, 'Expected exported module to keep cronjobs');
+      assert.ok((latestVersion?.functions as unknown[] | undefined)?.length, 'Expected exported module to keep functions');
+    } finally {
+      await fs.rm(richModuleDir, { recursive: true, force: true });
+    }
   });
 
   it('imports end-to-end through the username/password auth path', async () => {

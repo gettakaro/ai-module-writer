@@ -15,6 +15,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 export const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const DEFAULT_TOKEN_CACHE_PATH = '/tmp/takaro-token';
+const INSTALLATION_PAGE_SIZE = 100;
 
 export function loadRepoEnv(): void {
   config({ path: path.join(REPO_ROOT, '.env') });
@@ -43,6 +44,9 @@ export interface TakaroAuthConfig {
 
 interface SearchResponse<T> {
   data: T[];
+  meta?: {
+    total?: number;
+  };
 }
 
 interface ExportResponse<T> {
@@ -53,6 +57,10 @@ interface InstallationSnapshot {
   gameServerId: string;
   userConfig: unknown;
   systemConfig: unknown;
+}
+
+interface ImportModuleExportOptions {
+  request?: <T>(operation: () => Promise<T>) => Promise<T>;
 }
 
 class TakaroApiError extends Error {
@@ -127,6 +135,14 @@ export async function withOptionalLoginRetry<T>(
   }
 }
 
+function createClientRequestRunner(
+  client: Client,
+  canLogin: boolean,
+  domainId: string,
+): <T>(operation: () => Promise<T>) => Promise<T> {
+  return async <T>(operation: () => Promise<T>) => withOptionalLoginRetry(client, canLogin, domainId, operation);
+}
+
 export function readModuleExport(jsonFile: string): TakaroModuleExport {
   let moduleExport: TakaroModuleExport;
   try {
@@ -142,69 +158,94 @@ export function readModuleExport(jsonFile: string): TakaroModuleExport {
   return moduleExport;
 }
 
-async function findExactModuleByName(client: Client, name: string): Promise<ModuleOutputDTO | null> {
-  const existing = await client.module.moduleControllerSearch({
+async function findExactModuleByName(
+  client: Client,
+  name: string,
+  request: <T>(operation: () => Promise<T>) => Promise<T> = async <T>(operation: () => Promise<T>) => operation(),
+): Promise<ModuleOutputDTO | null> {
+  const existing = await request(() => client.module.moduleControllerSearch({
     filters: { name: [name] },
-  });
+  }));
 
   return existing.data.data.find((mod) => mod.name === name) ?? null;
 }
 
-async function getInstallationsForModule(client: Client, moduleId: string): Promise<InstallationSnapshot[]> {
-  const installations = await client.module.moduleInstallationsControllerGetInstalledModules({
-    filters: { moduleId: [moduleId] },
-    limit: 100,
-  });
+async function getInstallationsForModule(
+  client: Client,
+  moduleId: string,
+  request: <T>(operation: () => Promise<T>) => Promise<T> = async <T>(operation: () => Promise<T>) => operation(),
+): Promise<InstallationSnapshot[]> {
+  const snapshots: InstallationSnapshot[] = [];
 
-  return installations.data.data.map((installation) => ({
-    gameServerId: installation.gameserverId,
-    userConfig: installation.userConfig,
-    systemConfig: installation.systemConfig,
-  }));
+  for (let page = 0; ; page++) {
+    const installations = await request(() => client.module.moduleInstallationsControllerGetInstalledModules({
+      filters: { moduleId: [moduleId] },
+      limit: INSTALLATION_PAGE_SIZE,
+      page,
+    }));
+
+    snapshots.push(
+      ...installations.data.data.map((installation) => ({
+        gameServerId: installation.gameserverId,
+        userConfig: installation.userConfig,
+        systemConfig: installation.systemConfig,
+      })),
+    );
+
+    const fetched = installations.data.data.length;
+    const total = installations.data.meta?.total;
+    if (fetched < INSTALLATION_PAGE_SIZE) break;
+    if (typeof total === 'number' && snapshots.length >= total) break;
+  }
+
+  return snapshots;
 }
 
 async function reinstallSnapshotsOnModule(
   client: Client,
   module: ModuleOutputDTO,
   installations: InstallationSnapshot[],
+  request: <T>(operation: () => Promise<T>) => Promise<T> = async <T>(operation: () => Promise<T>) => operation(),
 ): Promise<void> {
   if (installations.length === 0) return;
 
   for (const installation of installations) {
-    await client.module.moduleInstallationsControllerInstallModule({
+    await request(() => client.module.moduleInstallationsControllerInstallModule({
       versionId: module.latestVersion.id,
       gameServerId: installation.gameServerId,
       userConfig: installation.userConfig === undefined ? undefined : JSON.stringify(installation.userConfig),
       systemConfig: installation.systemConfig === undefined ? undefined : JSON.stringify(installation.systemConfig),
-    });
+    }));
   }
 }
 
 export async function importModuleExport(
   client: Client,
   moduleExport: TakaroModuleExport,
+  options: ImportModuleExportOptions = {},
 ): Promise<ModuleOutputDTO> {
-  const existingModule = await findExactModuleByName(client, moduleExport.name);
+  const request = options.request ?? (async <T>(operation: () => Promise<T>) => operation());
+  const existingModule = await findExactModuleByName(client, moduleExport.name, request);
   let backupModuleExport: TakaroModuleExport | null = null;
   let installationSnapshots: InstallationSnapshot[] = [];
 
   if (existingModule) {
     console.error(`Module '${moduleExport.name}' already exists (id: ${existingModule.id}), exporting backup before replacement...`);
-    installationSnapshots = await getInstallationsForModule(client, existingModule.id);
-    const exported = await client.module.moduleControllerExport(existingModule.id);
+    installationSnapshots = await getInstallationsForModule(client, existingModule.id, request);
+    const exported = await request(() => client.module.moduleControllerExport(existingModule.id));
     backupModuleExport = exported.data.data as TakaroModuleExport;
-    await client.module.moduleControllerRemove(existingModule.id);
+    await request(() => client.module.moduleControllerRemove(existingModule.id));
     console.error(`Removed existing module ${existingModule.id}`);
   }
 
   try {
-    await client.module.moduleControllerImport(moduleExport);
-    const found = await findExactModuleByName(client, moduleExport.name);
+    await request(() => client.module.moduleControllerImport(moduleExport));
+    const found = await findExactModuleByName(client, moduleExport.name, request);
     if (!found) {
       throw new Error(`Module '${moduleExport.name}' not found after import`);
     }
 
-    await reinstallSnapshotsOnModule(client, found, installationSnapshots);
+    await reinstallSnapshotsOnModule(client, found, installationSnapshots, request);
     console.error(`Successfully imported module '${found.name}' (id: ${found.id})`);
     return found;
   } catch (err) {
@@ -213,16 +254,16 @@ export async function importModuleExport(
     }
 
     try {
-      const importedReplacement = await findExactModuleByName(client, moduleExport.name);
+      const importedReplacement = await findExactModuleByName(client, moduleExport.name, request);
       if (importedReplacement) {
-        await client.module.moduleControllerRemove(importedReplacement.id);
+        await request(() => client.module.moduleControllerRemove(importedReplacement.id));
       }
-      await client.module.moduleControllerImport(backupModuleExport);
-      const restored = await findExactModuleByName(client, moduleExport.name);
+      await request(() => client.module.moduleControllerImport(backupModuleExport));
+      const restored = await findExactModuleByName(client, moduleExport.name, request);
       if (!restored) {
         throw new Error(`Module '${moduleExport.name}' not found after restore`);
       }
-      await reinstallSnapshotsOnModule(client, restored, installationSnapshots);
+      await reinstallSnapshotsOnModule(client, restored, installationSnapshots, request);
       console.error(`Restored previous module '${moduleExport.name}' from backup after import failure`);
     } catch (restoreErr) {
       throw new Error(
@@ -274,19 +315,30 @@ async function getInstallationsForModuleWithToken(
   auth: Required<Pick<TakaroAuthConfig, 'url' | 'domainId' | 'token'>>,
   moduleId: string,
 ): Promise<InstallationSnapshot[]> {
-  const result = await takaroTokenRequest<SearchResponse<{ gameserverId: string; userConfig: unknown; systemConfig: unknown }>>(
-    auth,
-    '/module/installation/search',
-    {
-      body: { filters: { moduleId: [moduleId] }, limit: 100 },
-    },
-  );
+  const snapshots: InstallationSnapshot[] = [];
 
-  return result.data.map((installation) => ({
-    gameServerId: installation.gameserverId,
-    userConfig: installation.userConfig,
-    systemConfig: installation.systemConfig,
-  }));
+  for (let page = 0; ; page++) {
+    const result = await takaroTokenRequest<
+      SearchResponse<{ gameserverId: string; userConfig: unknown; systemConfig: unknown }>
+    >(auth, '/module/installation/search', {
+      body: { filters: { moduleId: [moduleId] }, limit: INSTALLATION_PAGE_SIZE, page },
+    });
+
+    snapshots.push(
+      ...result.data.map((installation) => ({
+        gameServerId: installation.gameserverId,
+        userConfig: installation.userConfig,
+        systemConfig: installation.systemConfig,
+      })),
+    );
+
+    const fetched = result.data.length;
+    const total = result.meta?.total;
+    if (fetched < INSTALLATION_PAGE_SIZE) break;
+    if (typeof total === 'number' && snapshots.length >= total) break;
+  }
+
+  return snapshots;
 }
 
 async function reinstallSnapshotsOnModuleWithToken(
@@ -382,7 +434,8 @@ export async function importModuleExportFile(jsonFile: string): Promise<ModuleOu
   }
 
   const { client, canLogin } = createTakaroClient(auth);
-  return await withOptionalLoginRetry(client, canLogin, auth.domainId, async () => importModuleExport(client, moduleExport));
+  const request = createClientRequestRunner(client, canLogin, auth.domainId);
+  return await importModuleExport(client, moduleExport, { request });
 }
 
 async function main() {
