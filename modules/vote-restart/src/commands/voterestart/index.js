@@ -80,7 +80,7 @@ async function main() {
     : '';
 
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-    message: `[Vote Restart] ${player.name} wants a restart. Type /voteyes to agree. ${currentVotes}/${threshold} yes votes so far, ${config.voteDuration}s left. Only players online when the vote began can vote.${snapshotNote}`,
+    message: `[Vote Restart] ${player.name} wants a restart. Type /voteyes to agree. ${currentVotes}/${threshold} yes votes so far, ${config.voteDuration}s left. Only the non-immune players who were online when the vote began can vote.${snapshotNote}`,
     opts: {},
   });
 }

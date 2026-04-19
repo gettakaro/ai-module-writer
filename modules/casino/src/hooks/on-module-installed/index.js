@@ -1,13 +1,13 @@
 import { data, takaro } from '@takaro/helpers';
 import { assertNoLegacyCasinoModules } from './casino-helpers.js';
 
-async function uninstallInstalledCasinoCopies(gameServerId) {
+async function uninstallInstalledCasinoCopies(gameServerId, currentModuleId) {
   const installed = await takaro.module.moduleInstallationsControllerGetInstalledModules({
     filters: { gameserverId: [gameServerId] },
     limit: 100,
   });
 
-  const casinoRows = (installed.data.data ?? []).filter((row) => String(row.module?.name ?? '').toLowerCase() === 'casino');
+  const casinoRows = (installed.data.data ?? []).filter((row) => row.moduleId === currentModuleId);
   for (const row of casinoRows) {
     try {
       await takaro.module.moduleInstallationsControllerUninstallModule(row.moduleId, gameServerId);
@@ -38,7 +38,7 @@ async function main() {
     } catch (notifyErr) {
       console.error(`casino.onModuleInstalled: failed to notify server chat: ${notifyErr}`);
     }
-    await uninstallInstalledCasinoCopies(gameServerId);
+    await uninstallInstalledCasinoCopies(gameServerId, mod.moduleId);
   }
 }
 

@@ -1,5 +1,5 @@
 import { data, TakaroUserError, takaro } from '@takaro/helpers';
-import { requireManagePermission, resolvePlayerByName, deleteVariable } from './casino-helpers.js';
+import { requireManagePermission, resolvePlayerByName, deleteVariable, removePlayerFromReportDays } from './casino-helpers.js';
 
 async function main() {
   const { pog, gameServerId, arguments: args, module: mod } = data;
@@ -32,7 +32,8 @@ async function main() {
     page += 1;
   }
 
-  await pog.pm(`🧹 Reset casino stats for ${target.player?.name ?? targetName} and cleared ${clearedWindows} active cap window${clearedWindows === 1 ? '' : 's'}.`);
+  const clearedReportDays = await removePlayerFromReportDays(gameServerId, mod.moduleId, target.playerId);
+  await pog.pm(`🧹 Reset casino stats for ${target.player?.name ?? targetName}, cleared ${clearedWindows} active cap window${clearedWindows === 1 ? '' : 's'}, and removed them from ${clearedReportDays} report day${clearedReportDays === 1 ? '' : 's'}.`);
 }
 
 await main();

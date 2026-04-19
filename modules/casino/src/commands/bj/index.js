@@ -61,7 +61,9 @@ async function main() {
         const payout = dealerTotal === 21 ? session.stake : Math.round(session.stake * 2.5 * (1 - (config.houseEdgePct / 100)));
         const result = await settle({ gameServerId, moduleId: mod.moduleId, player, config, game: 'blackjack', betAmount: session.stake, payout, skipLock: true });
         await deletePlayerSession(gameServerId, mod.moduleId, KEY_BLACKJACK_SESSION, player.id);
-        await pog.pm(`🃏 Blackjack! You: ${session.playerHand.map(cardLabel).join(' ')} | Dealer: ${session.dealerHand[0] ? cardLabel(session.dealerHand[0]) : '?'} ?\n${payout === session.stake ? 'Push.' : `Won ${formatCurrency(payout)} coin.`} (Balance: ${formatCurrency(result.balance)})`);
+        const playerHandText = `${session.playerHand.map(cardLabel).join(' ')} (${playerTotal})`;
+        const dealerHandText = `${session.dealerHand.map(cardLabel).join(' ')} (${dealerTotal})`;
+        await pog.pm(`🃏 Blackjack! You: ${playerHandText}\nDealer: ${dealerHandText}\n${payout === session.stake ? 'Push.' : `Won ${formatCurrency(payout)} coin.`} (Balance: ${formatCurrency(result.balance)})`);
         return;
       }
 

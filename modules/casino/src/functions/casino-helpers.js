@@ -503,11 +503,10 @@ export async function resolvePlayerByName(name, gameServerId) {
   const exact = playerSearch.data.data.find((p) => p.name.toLowerCase() === normalized);
   if (!exact) return null;
   const pog = await getPlayerOnGameserver(gameServerId, exact.id);
-  if (!pog) return null;
   return {
     playerId: exact.id,
     player: exact,
-    pog,
+    pog: pog ?? null,
     gameServerId,
   };
 }
@@ -558,11 +557,16 @@ export async function recordReportDay(gameServerId, moduleId, { playerId, player
     gameRow.plays += 1;
     current.perGame = { ...(current.perGame ?? {}), [game]: gameRow };
 
-    const playerRow = current.players?.[playerId] ?? { name: playerName, wagered: 0, won: 0, net: 0 };
+    const playerRow = current.players?.[playerId] ?? { name: playerName, wagered: 0, won: 0, net: 0, perGame: {} };
     playerRow.name = playerName;
     playerRow.wagered += roundCurrency(betAmount);
     playerRow.won += roundCurrency(payout);
     playerRow.net += roundCurrency(payout) - roundCurrency(betAmount);
+    const playerGameRow = playerRow.perGame?.[game] ?? { wagered: 0, won: 0, plays: 0 };
+    playerGameRow.wagered += roundCurrency(betAmount);
+    playerGameRow.won += roundCurrency(payout);
+    playerGameRow.plays += 1;
+    playerRow.perGame = { ...(playerRow.perGame ?? {}), [game]: playerGameRow };
     current.players = { ...(current.players ?? {}), [playerId]: playerRow };
 
     await writeVariable(gameServerId, moduleId, dayKey, current);
@@ -587,7 +591,7 @@ export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, pl
     message: `${prefix} ${playerName} won ${formatCurrency(net)} on ${game}!`,
   };
   const payload = {
-    eventName: 'chat-message',
+    eventName: 'casino-big-win',
     gameserverId: gameServerId,
     moduleId,
     actingModuleId: moduleId,
@@ -643,13 +647,13 @@ export async function placeBet({ gameServerId, moduleId, pog, player, config, ga
     if (config.wagerCap > 0) {
       const wagerCap = Math.floor(config.wagerCap * vipMultiplier);
       if (windowData.wagered + betAmount > wagerCap) {
-        throw new TakaroUserError(`That bet would exceed your ${config.capWindow} wager cap of ${formatCurrency(wagerCap)}.`);
+        throw new TakaroUserError(`That bet would exceed your ${config.capWindow} wager cap of ${formatCurrency(wagerCap)}. Use /casinostats to check how much room you have left.`);
       }
     }
     if (config.lossCap > 0) {
       const lossCap = Math.floor(config.lossCap * vipMultiplier);
       if (windowData.lost >= lossCap) {
-        throw new TakaroUserError(`You already reached your ${config.capWindow} loss cap of ${formatCurrency(lossCap)}.`);
+        throw new TakaroUserError(`You already reached your ${config.capWindow} loss cap of ${formatCurrency(lossCap)}. Use /casinostats to see when your window resets.`);
       }
     }
 
@@ -1156,6 +1160,10 @@ export async function handleDisconnect(gameServerId, moduleId, playerId, config)
   return refunds;
 }
 
+export async function cancelPlayerCasinoState(gameServerId, moduleId, playerId, config) {
+  return await handleDisconnect(gameServerId, moduleId, playerId, config);
+}
+
 export function getNextWindowResetAt(capWindow) {
   const now = new Date();
   if (capWindow === 'weekly') {
@@ -1242,4 +1250,46 @@ export async function generateReport(gameServerId, moduleId, days = 7) {
 
   report.top5 = Object.values(players).sort((a, b) => b.wagered - a.wagered).slice(0, 5);
   return report;
+}
+
+export async function removePlayerFromReportDays(gameServerId, moduleId, playerId) {
+  let page = 0;
+  let updatedDays = 0;
+  while (page < 100) {
+    const res = await takaro.variable.variableControllerSearch({
+      filters: { gameServerId: [gameServerId], moduleId: [moduleId] },
+      search: { key: [KEY_REPORT_DAY_PREFIX] },
+      page,
+      limit: 100,
+    });
+    const batch = res.data.data.filter((row) => row.key.startsWith(`${KEY_REPORT_DAY_PREFIX}:`));
+    for (const row of batch) {
+      try {
+        const current = JSON.parse(row.value);
+        const playerRow = current?.players?.[playerId];
+        if (!playerRow) continue;
+        current.totalWagered = Math.max(0, Number(current.totalWagered ?? 0) - Number(playerRow.wagered ?? 0));
+        current.totalWon = Math.max(0, Number(current.totalWon ?? 0) - Number(playerRow.won ?? 0));
+        current.houseProfit = Number(current.houseProfit ?? 0) - Number(playerRow.net ?? 0);
+        for (const [game, gameRow] of Object.entries(playerRow.perGame ?? {})) {
+          const existing = current.perGame?.[game];
+          if (!existing) continue;
+          existing.wagered = Math.max(0, Number(existing.wagered ?? 0) - Number(gameRow.wagered ?? 0));
+          existing.won = Math.max(0, Number(existing.won ?? 0) - Number(gameRow.won ?? 0));
+          existing.plays = Math.max(0, Number(existing.plays ?? 0) - Number(gameRow.plays ?? 0));
+          if (existing.wagered === 0 && existing.won === 0 && existing.plays === 0) {
+            delete current.perGame[game];
+          }
+        }
+        delete current.players[playerId];
+        await takaro.variable.variableControllerUpdate(row.id, { value: JSON.stringify(current) });
+        updatedDays += 1;
+      } catch (err) {
+        console.error(`casino-helpers: failed to remove player ${playerId} from report day ${row.id}: ${err}`);
+      }
+    }
+    if (res.data.data.length < 100) break;
+    page += 1;
+  }
+  return updatedDays;
 }

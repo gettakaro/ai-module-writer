@@ -60,11 +60,16 @@ async function main() {
         if (player.id !== current.opponentId) throw new TakaroUserError('Only the challenged player can accept this duel.');
         if (current.state !== 'pending') throw new TakaroUserError('This duel is no longer pending.');
         await ensureInteractivePlayAllowed(gameServerId, mod.moduleId, pog, player, config, 'duel');
-        await placeBet({ gameServerId, moduleId: mod.moduleId, pog, player, config, game: 'duel', amount: current.amount, skipLock: true });
-        current.state = 'accepted';
-        current.acceptedStakePlaced = true;
-        current.startedAt = new Date().toISOString();
-        await setDuel(gameServerId, mod.moduleId, found.challengerId, current);
+        const acceptedStake = await placeBet({ gameServerId, moduleId: mod.moduleId, pog, player, config, game: 'duel', amount: current.amount, skipLock: true });
+        try {
+          current.state = 'accepted';
+          current.acceptedStakePlaced = true;
+          current.startedAt = new Date().toISOString();
+          await setDuel(gameServerId, mod.moduleId, found.challengerId, current);
+        } catch (err) {
+          await refund({ gameServerId, moduleId: mod.moduleId, playerId: current.opponentId, amount: acceptedStake.amount, config, skipLock: true });
+          throw new TakaroUserError('The duel could not be accepted, so your stake was refunded. Please try again.');
+        }
         await announce(
           gameServerId,
           `⚔️ ${current.opponentName} accepted ${current.challengerName}'s duel for ${formatCurrency(current.amount)} coin. Both players: /duel rock, /duel paper, or /duel scissors within 3 minutes or the duel expires and both stakes are refunded.`,
@@ -129,7 +134,8 @@ async function main() {
   const amount = parsePositiveNumberLike(args.arg2);
   if (!targetName || !amount) throw new TakaroUserError('Usage: /duel <player> <amount>');
   const target = await resolvePlayerByName(targetName, gameServerId);
-  if (!target) throw new TakaroUserError(`Player "${targetName}" not found on this game server.`);
+  if (!target) throw new TakaroUserError(`Player "${targetName}" not found.`);
+  if (!target.pog) throw new TakaroUserError(`Player "${targetName}" is not currently online on this game server.`);
   if (target.playerId === player.id) throw new TakaroUserError('You cannot duel yourself.');
 
   await withCasinoLocks(gameServerId, mod.moduleId, ['duel-registry', `player:${player.id}`, `player:${target.playerId}`], async () => {

@@ -99,19 +99,8 @@ function makeCronjobHelper(
 //
 // Eligible non-immune players = [0, 1] → count=2, threshold=ceil(2*51/100)=2
 //
-// Test ordering is carefully chosen to avoid hitting threshold prematurely:
-//   1. Start vote (players[0] auto-voted → 1/2)
-//   2. Reject second voterestart (already active)
-//   3. Reject duplicate /voteyes from players[0] — vote still 1/2, not passed yet
-//   4. Reject /voteyes from immune players[2]
-//   5. Reject /voterestart from players[2] (no INITIATE perm)
-//   6. /votestatus → shows active vote count + threshold
-//   7. players[1] /voteyes → 2/2 → immediate pass
-//   8. /votestatus → shows "restarting in Xs"
-//   9. Cronjob: restartDelay=0 elapsed → executes restart, clears state
-//   10. /voteyes with no active vote → rejected
-//   11. /votestatus with no active vote → "No active restart vote"
-//   12. Start new vote, manipulate state to simulate expiry, trigger cronjob, cooldown enforced
+// The primary lifecycle suite below exercises the full vote flow inside a single test so
+// state transitions stay local to that scenario instead of leaking across test cases.
 
 describe('vote-restart module', () => {
   let client: Client;
@@ -198,177 +187,55 @@ describe('vote-restart module', () => {
     () => moduleId,
   );
 
-  // ── Test 1: Start vote with permission ───────────────────────────────────
-  // State after: vote active, players[0] auto-voted (1/2), vote NOT passed yet
+  it('covers the full vote lifecycle without relying on inter-test ordering', async () => {
+    const start = getResult(await triggerCommand(ctx.players[0].playerId, 'voterestart'));
+    assert.equal(start.success, true, `Expected vote start success, logs: ${JSON.stringify(start.logs)}`);
+    assert.ok(start.logs.some((l) => l.includes('vote started')), `Expected start log, got: ${JSON.stringify(start.logs)}`);
 
-  it('should start a vote when player has VOTE_RESTART_INITIATE', async () => {
-    const event = await triggerCommand(ctx.players[0].playerId, 'voterestart');
-    const { success, logs } = getResult(event);
+    const duplicateStart = getResult(await triggerCommand(ctx.players[0].playerId, 'voterestart'));
+    assert.equal(duplicateStart.success, false, `Expected duplicate start rejection, logs: ${JSON.stringify(duplicateStart.logs)}`);
+    assert.ok(duplicateStart.logs.some((l) => l.includes('already in progress')));
 
-    assert.equal(success, true, `Expected success=true, logs: ${JSON.stringify(logs)}`);
-    assert.ok(
-      logs.some((l) => l.includes('vote started')),
-      `Expected log to mention "vote started", got: ${JSON.stringify(logs)}`,
-    );
-  });
+    const duplicateYes = getResult(await triggerCommand(ctx.players[0].playerId, 'voteyes'));
+    assert.equal(duplicateYes.success, false, `Expected duplicate /voteyes rejection, logs: ${JSON.stringify(duplicateYes.logs)}`);
+    assert.ok(duplicateYes.logs.some((l) => l.includes('already voted')));
 
-  // ── Test 2: Start vote when already active ────────────────────────────────
-  // State after: still 1/2, vote active
+    const immuneYes = getResult(await triggerCommand(ctx.players[2].playerId, 'voteyes'));
+    assert.equal(immuneYes.success, false, `Expected immune /voteyes rejection, logs: ${JSON.stringify(immuneYes.logs)}`);
+    assert.ok(immuneYes.logs.some((l) => l.includes('immune')));
 
-  it('should reject starting a vote when one is already active', async () => {
-    const event = await triggerCommand(ctx.players[0].playerId, 'voterestart');
-    const { success, logs } = getResult(event);
+    const noPermStart = getResult(await triggerCommand(ctx.players[2].playerId, 'voterestart'));
+    assert.equal(noPermStart.success, false, `Expected missing-permission rejection, logs: ${JSON.stringify(noPermStart.logs)}`);
+    assert.ok(noPermStart.logs.some((l) => l.includes('do not have permission')));
 
-    assert.equal(success, false, `Expected success=false, logs: ${JSON.stringify(logs)}`);
-    assert.ok(
-      logs.some((l) => l.includes('already in progress')),
-      `Expected "already in progress" in logs, got: ${JSON.stringify(logs)}`,
-    );
-  });
+    const activeStatus = getResult(await triggerCommand(ctx.players[0].playerId, 'votestatus'));
+    assert.equal(activeStatus.success, true, `Expected active votestatus success, logs: ${JSON.stringify(activeStatus.logs)}`);
+    assert.ok(activeStatus.logs.some((l) => l.includes('1/2') || (l.includes('vote') && l.includes('remaining'))));
 
-  // ── Test 3: Duplicate /voteyes rejected ───────────────────────────────────
-  // players[0] already voted in test 1 auto-vote. Still 1/2 after this rejection.
+    const secondYes = getResult(await triggerCommand(ctx.players[1].playerId, 'voteyes'));
+    assert.equal(secondYes.success, true, `Expected second yes vote success, logs: ${JSON.stringify(secondYes.logs)}`);
+    assert.ok(secondYes.logs.some((l) => l.includes('voted yes')));
+    assert.ok(secondYes.logs.some((l) => l.includes('Vote passed')));
 
-  it('should reject duplicate /voteyes from same player', async () => {
-    const event = await triggerCommand(ctx.players[0].playerId, 'voteyes');
-    const { success, logs } = getResult(event);
+    const passedStatus = getResult(await triggerCommand(ctx.players[0].playerId, 'votestatus'));
+    assert.equal(passedStatus.success, true, `Expected passed votestatus success, logs: ${JSON.stringify(passedStatus.logs)}`);
+    assert.ok(passedStatus.logs.some((l) => l.includes('restart already initiated') || l.includes('restarting in')));
 
-    assert.equal(success, false, `Expected success=false, logs: ${JSON.stringify(logs)}`);
-    assert.ok(
-      logs.some((l) => l.includes('already voted')),
-      `Expected "already voted" in logs, got: ${JSON.stringify(logs)}`,
-    );
-  });
+    const restartCron = await triggerCronjob();
+    assert.equal(restartCron.success, true, `Expected restart cronjob success, logs: ${JSON.stringify(restartCron.logs)}`);
+    assert.ok(restartCron.logs.some((l) => l.includes('restart command executed successfully')));
 
-  // ── Test 4: Immune player /voteyes rejected ───────────────────────────────
-  // players[2] has VOTE_RESTART_IMMUNE. Still 1/2 after rejection.
+    const yesWithoutVote = getResult(await triggerCommand(ctx.players[1].playerId, 'voteyes'));
+    assert.equal(yesWithoutVote.success, false, `Expected /voteyes without vote to fail, logs: ${JSON.stringify(yesWithoutVote.logs)}`);
+    assert.ok(yesWithoutVote.logs.some((l) => l.includes('no active restart vote')));
 
-  it('should reject /voteyes from an immune player', async () => {
-    const event = await triggerCommand(ctx.players[2].playerId, 'voteyes');
-    const { success, logs } = getResult(event);
+    const noVoteStatus = getResult(await triggerCommand(ctx.players[0].playerId, 'votestatus'));
+    assert.equal(noVoteStatus.success, true, `Expected idle votestatus success, logs: ${JSON.stringify(noVoteStatus.logs)}`);
+    assert.ok(noVoteStatus.logs.some((l) => l.includes('No active restart vote') || l.includes('no active restart vote')));
 
-    assert.equal(success, false, `Expected success=false, logs: ${JSON.stringify(logs)}`);
-    assert.ok(
-      logs.some((l) => l.includes('immune')),
-      `Expected "immune" in logs, got: ${JSON.stringify(logs)}`,
-    );
-  });
+    const restartVote = getResult(await triggerCommand(ctx.players[0].playerId, 'voterestart'));
+    assert.equal(restartVote.success, true, `Expected second vote start success, logs: ${JSON.stringify(restartVote.logs)}`);
 
-  // ── Test 5: /voterestart without permission rejected ──────────────────────
-  // players[2] has VOTE_RESTART_IMMUNE but NOT VOTE_RESTART_INITIATE.
-  // Permission check fires before the "already active" check.
-
-  it('should reject /voterestart without VOTE_RESTART_INITIATE permission', async () => {
-    const event = await triggerCommand(ctx.players[2].playerId, 'voterestart');
-    const { success, logs } = getResult(event);
-
-    assert.equal(success, false, `Expected success=false, logs: ${JSON.stringify(logs)}`);
-    assert.ok(
-      logs.some((l) => l.includes('do not have permission')),
-      `Expected "do not have permission" in logs, got: ${JSON.stringify(logs)}`,
-    );
-  });
-
-  // ── Test 6: /votestatus shows active vote ────────────────────────────────
-  // Vote is active with 1/2 votes, ~120s remaining
-
-  it('should show active vote status with count and time remaining', async () => {
-    const event = await triggerCommand(ctx.players[0].playerId, 'votestatus');
-    const { success, logs } = getResult(event);
-
-    assert.equal(success, true, `Expected success=true, logs: ${JSON.stringify(logs)}`);
-    // Should show vote count and remaining time
-    assert.ok(
-      logs.some((l) => l.includes('1/2') || (l.includes('vote') && l.includes('remaining'))),
-      `Expected vote count and time remaining in logs, got: ${JSON.stringify(logs)}`,
-    );
-  });
-
-  // ── Test 7: /voteyes adds vote and vote passes immediately ────────────────
-  // players[1] is the second non-immune voter → 2/2 = threshold → instant pass
-
-  it('should accept /voteyes from a non-immune player and pass the vote', async () => {
-    const event = await triggerCommand(ctx.players[1].playerId, 'voteyes');
-    const { success, logs } = getResult(event);
-
-    assert.equal(success, true, `Expected success=true, logs: ${JSON.stringify(logs)}`);
-    assert.ok(
-      logs.some((l) => l.includes('voted yes')),
-      `Expected "voted yes" in logs, got: ${JSON.stringify(logs)}`,
-    );
-    // The vote should immediately pass since we hit the threshold
-    assert.ok(
-      logs.some((l) => l.includes('Vote passed')),
-      `Expected "Vote passed" log, got: ${JSON.stringify(logs)}`,
-    );
-  });
-
-  // ── Test 8: /votestatus shows passed vote with time remaining ─────────────
-  // Vote just passed with restartDelay=0, should show passed state
-
-  it('should show passed vote status after vote passes', async () => {
-    const event = await triggerCommand(ctx.players[0].playerId, 'votestatus');
-    const { success, logs } = getResult(event);
-
-    assert.equal(success, true, `Expected success=true, logs: ${JSON.stringify(logs)}`);
-    assert.ok(
-      logs.some((l) => l.includes('restart already initiated') || l.includes('restarting in')),
-      `Expected "restart already initiated" or "restarting in" in logs, got: ${JSON.stringify(logs)}`,
-    );
-  });
-
-  // ── Test 9: Restart executes after delay=0 (via cronjob) ──────────────────
-  // Vote is in "passed" state. With restartDelay=0, cronjob should execute restart.
-
-  it('should execute the restart command when restartDelay has elapsed', async () => {
-    const { success, logs } = await triggerCronjob();
-
-    assert.equal(success, true, `Expected cronjob to succeed, logs: ${JSON.stringify(logs)}`);
-    assert.ok(
-      logs.some((l) => l.includes('restart command executed successfully')),
-      `Expected "restart command executed successfully" in cronjob logs, got: ${JSON.stringify(logs)}`,
-    );
-  });
-
-  // ── Test 10: /voteyes with no active vote ─────────────────────────────────
-  // Vote state was cleared by restart in test 9.
-
-  it('should reject /voteyes when no vote is active', async () => {
-    const event = await triggerCommand(ctx.players[1].playerId, 'voteyes');
-    const { success, logs } = getResult(event);
-
-    assert.equal(success, false, `Expected success=false, logs: ${JSON.stringify(logs)}`);
-    assert.ok(
-      logs.some((l) => l.includes('no active restart vote')),
-      `Expected "no active restart vote" in logs, got: ${JSON.stringify(logs)}`,
-    );
-  });
-
-  // ── Test 11: /votestatus with no active vote ──────────────────────────────
-  // Vote state was cleared by restart. Should show "No active restart vote".
-
-  it('should show "No active restart vote" when no vote is in progress', async () => {
-    const event = await triggerCommand(ctx.players[0].playerId, 'votestatus');
-    const { success, logs } = getResult(event);
-
-    assert.equal(success, true, `Expected success=true, logs: ${JSON.stringify(logs)}`);
-    assert.ok(
-      logs.some((l) => l.includes('No active restart vote') || l.includes('no active restart vote')),
-      `Expected "No active restart vote" in logs, got: ${JSON.stringify(logs)}`,
-    );
-  });
-
-  // ── Test 12: Cooldown enforced after expired vote ─────────────────────────
-  // Start a new vote, manipulate startedAt to be in the past (expired),
-  // trigger cronjob to detect expiry+set cooldown, then verify /voterestart blocked.
-
-  it('should enforce cooldown after an expired vote', async () => {
-    // Start a new vote (no cooldown active since prior vote passed, not expired)
-    const startEvent = await triggerCommand(ctx.players[0].playerId, 'voterestart');
-    const startResult = getResult(startEvent);
-    assert.equal(startResult.success, true, `Expected vote to start, logs: ${JSON.stringify(startResult.logs)}`);
-
-    // Manipulate vr_vote_state to set startedAt to 200s ago (beyond voteDuration=120)
     const varSearch = await client.variable.variableControllerSearch({
       filters: {
         key: ['vr_vote_state'],
@@ -376,34 +243,19 @@ describe('vote-restart module', () => {
         moduleId: [moduleId],
       },
     });
-
     assert.ok(varSearch.data.data.length > 0, 'Expected vr_vote_state variable to exist');
     const varRecord = varSearch.data.data[0]!;
-
-    const pastTime = new Date(Date.now() - 200 * 1000).toISOString();
     const currentState = JSON.parse(varRecord.value);
-    currentState.startedAt = pastTime;
-    await client.variable.variableControllerUpdate(varRecord.id, {
-      value: JSON.stringify(currentState),
-    });
+    currentState.startedAt = new Date(Date.now() - 200 * 1000).toISOString();
+    await client.variable.variableControllerUpdate(varRecord.id, { value: JSON.stringify(currentState) });
 
-    // Trigger cronjob — should detect expiry, set cooldown, delete vote state
-    const { success: cjSuccess, logs: cjLogs } = await triggerCronjob();
-    assert.equal(cjSuccess, true, `Expected cronjob to succeed on expiry, logs: ${JSON.stringify(cjLogs)}`);
-    assert.ok(
-      cjLogs.some((l) => l.includes('expired') || l.includes('vote expired')),
-      `Expected "expired" in cronjob logs, got: ${JSON.stringify(cjLogs)}`,
-    );
+    const expiredCron = await triggerCronjob();
+    assert.equal(expiredCron.success, true, `Expected expiry cronjob success, logs: ${JSON.stringify(expiredCron.logs)}`);
+    assert.ok(expiredCron.logs.some((l) => l.includes('expired') || l.includes('vote expired')));
 
-    // Now try to start a vote — should be blocked by cooldown
-    const cooldownEvent = await triggerCommand(ctx.players[0].playerId, 'voterestart');
-    const { success, logs } = getResult(cooldownEvent);
-
-    assert.equal(success, false, `Expected cooldown block, logs: ${JSON.stringify(logs)}`);
-    assert.ok(
-      logs.some((l) => l.includes('recently failed') || l.includes('wait')),
-      `Expected cooldown message in logs, got: ${JSON.stringify(logs)}`,
-    );
+    const cooldownStart = getResult(await triggerCommand(ctx.players[0].playerId, 'voterestart'));
+    assert.equal(cooldownStart.success, false, `Expected cooldown rejection, logs: ${JSON.stringify(cooldownStart.logs)}`);
+    assert.ok(cooldownStart.logs.some((l) => l.includes('recently failed') || l.includes('wait')));
   });
 });
 

@@ -687,10 +687,26 @@ describe('casino module', () => {
     const admin = ctx.players[1]!;
     const playerName = (await client.player.playerControllerGetOne(player.playerId)).data.data.name;
 
-    for (const msg of [`${prefix}bet 10 red`, `${prefix}dice 10 over 60`, `${prefix}crash 10 1.5`, `${prefix}casinostats`]) {
-      const result = await triggerCommand(player.playerId, msg);
-      assert.equal(result.success, true, `expected success for ${msg}, logs=${JSON.stringify(result.logs)}`);
-    }
+    const roulette = await triggerCommand(player.playerId, `${prefix}bet 10 red`);
+    assert.equal(roulette.success, true, `expected roulette success, logs=${JSON.stringify(roulette.logs)}`);
+    assert.ok(roulette.logs.some((msg) => /Spun/i.test(msg)), `expected roulette result wording, logs=${JSON.stringify(roulette.logs)}`);
+
+    const dice = await triggerCommand(player.playerId, `${prefix}dice 10 over 60`);
+    assert.equal(dice.success, true, `expected dice success, logs=${JSON.stringify(dice.logs)}`);
+    assert.ok(dice.logs.some((msg) => /Rolled/i.test(msg)), `expected dice roll wording, logs=${JSON.stringify(dice.logs)}`);
+
+    const crash = await triggerCommand(player.playerId, `${prefix}crash 10 1.5`);
+    assert.equal(crash.success, true, `expected crash success, logs=${JSON.stringify(crash.logs)}`);
+    assert.ok(crash.logs.some((msg) => /Crashed at/i.test(msg)), `expected crash result wording, logs=${JSON.stringify(crash.logs)}`);
+
+    const stats = await triggerCommand(player.playerId, `${prefix}casinostats`);
+    assert.equal(stats.success, true, `expected casinostats success, logs=${JSON.stringify(stats.logs)}`);
+    assert.ok(stats.logs.some((msg) => /Lifetime wagered/i.test(msg)), `expected lifetime stats wording, logs=${JSON.stringify(stats.logs)}`);
+
+    const statsBeforeReset = JSON.parse((await getVariable('casino_stats', player.playerId))!.value);
+    assert.ok((statsBeforeReset.perGame.roulette?.plays ?? 0) >= 1, `expected roulette stats to record plays, stats=${JSON.stringify(statsBeforeReset.perGame)}`);
+    assert.ok((statsBeforeReset.perGame.dice?.plays ?? 0) >= 1, `expected dice stats to record plays, stats=${JSON.stringify(statsBeforeReset.perGame)}`);
+    assert.ok((statsBeforeReset.perGame.crash?.plays ?? 0) >= 1, `expected crash stats to record plays, stats=${JSON.stringify(statsBeforeReset.perGame)}`);
 
     const reset = await triggerCommand(admin.playerId, `${prefix}casinoresetstats ${playerName}`);
     assert.equal(reset.success, true, `expected casinoresetstats success, logs=${JSON.stringify(reset.logs)}`);
@@ -699,6 +715,10 @@ describe('casino module', () => {
     const currentWindowKey = new Date().toISOString().slice(0, 10);
     const currentWindowRow = await getVariable(`casino_window:${currentWindowKey}`, player.playerId);
     assert.equal(currentWindowRow, null, 'expected active cap window rows to be cleared after reset');
+
+    const reportAfterReset = await triggerCommand(admin.playerId, `${prefix}casinoreport 7`);
+    assert.equal(reportAfterReset.success, true, `expected casinoreport after reset success, logs=${JSON.stringify(reportAfterReset.logs)}`);
+    assert.ok(reportAfterReset.logs.every((msg) => !msg.includes(playerName)), `expected reset player to disappear from report output, logs=${JSON.stringify(reportAfterReset.logs)}`);
   });
 
   it('enforces disabled games, vip max-bet scaling, and self-service cap feedback', async () => {
