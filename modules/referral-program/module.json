@@ -50,8 +50,7 @@
           },
           "required": [
             "item",
-            "amount",
-            "quality"
+            "amount"
           ],
           "additionalProperties": false
         }
@@ -131,7 +130,8 @@
           "name": "code",
           "type": "string",
           "helpText": "Referral code from the player who invited you",
-          "position": 0
+          "position": 0,
+          "defaultValue": ""
         }
       ]
     },

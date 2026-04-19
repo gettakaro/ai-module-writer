@@ -28,8 +28,11 @@ async function main() {
     throw new TakaroUserError(`Player "${referee.name}" does not have a referral link.`);
   }
 
-  await adjustReferrerStatsForLink(gameServerId, moduleId, link.referrerId, link, -1);
+  if (link.status === 'paid' || link.status === 'paying') {
+    throw new TakaroUserError('Paid referrals cannot be unlinked automatically because issued rewards cannot be clawed back safely.');
+  }
 
+  await adjustReferrerStatsForLink(gameServerId, moduleId, link.referrerId, link, -1);
   await removePendingReferee(gameServerId, moduleId, referee.id);
   await deleteReferralLink(gameServerId, moduleId, referee.id);
 

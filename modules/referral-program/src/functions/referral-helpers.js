@@ -6,6 +6,7 @@ export const REFERRAL_LINK_PREFIX = 'referral_link:';
 export const REFERRAL_STATS_PREFIX = 'referral_stats:';
 export const REFERRAL_PENDING_INDEX_KEY = 'referral_pending_index';
 export const REFERRAL_STATS_INDEX_KEY = 'referral_stats_index';
+export const REFERRAL_PAYOUT_LOCK_PREFIX = 'referral_payout_lock:';
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -23,6 +24,10 @@ export function getReferralLinkKey(playerId) {
 
 export function getReferralStatsKey(playerId) {
   return `${REFERRAL_STATS_PREFIX}${playerId}`;
+}
+
+export function getReferralPayoutLockKey(playerId) {
+  return `${REFERRAL_PAYOUT_LOCK_PREFIX}${playerId}`;
 }
 
 export function defaultReferralStats() {
@@ -65,6 +70,17 @@ export async function writeVariable(gameServerId, moduleId, key, value, playerId
   }
 }
 
+export async function createVariable(gameServerId, moduleId, key, value, playerId) {
+  const payload = {
+    key,
+    value: JSON.stringify(value),
+    gameServerId,
+    moduleId,
+  };
+  if (playerId) payload.playerId = playerId;
+  await takaro.variable.variableControllerCreate(payload);
+}
+
 export async function deleteVariable(gameServerId, moduleId, key, playerId) {
   const existing = await findVariable(gameServerId, moduleId, key, playerId);
   if (existing) {
@@ -79,6 +95,58 @@ function safeJsonParse(raw, fallback, label) {
     console.error(`referral-helpers: failed to parse ${label}: ${err}`);
     return fallback;
   }
+}
+
+function getErrorMessage(err) {
+  if (err instanceof Error && err.message) return err.message;
+  return String(err);
+}
+
+function looksLikeDuplicateVariableError(err) {
+  const message = getErrorMessage(err);
+  return /duplicate|already exists|unique/i.test(message);
+}
+
+export async function tryAcquirePayoutLock(gameServerId, moduleId, refereeId, ownerToken, staleMs = 5 * 60 * 1000) {
+  const key = getReferralPayoutLockKey(refereeId);
+  const now = Date.now();
+  const lockPayload = {
+    ownerToken,
+    acquiredAt: new Date(now).toISOString(),
+  };
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await createVariable(gameServerId, moduleId, key, lockPayload);
+      return { acquired: true, key, ownerToken };
+    } catch (err) {
+      if (!looksLikeDuplicateVariableError(err)) throw err;
+
+      const existing = await findVariable(gameServerId, moduleId, key);
+      const parsed = safeJsonParse(existing?.value, null, `payout lock for ${refereeId}`);
+      const acquiredAtMs = new Date(parsed?.acquiredAt ?? 0).getTime();
+      const isStale = Number.isFinite(acquiredAtMs) && (now - acquiredAtMs) > staleMs;
+
+      if (!existing || isStale) {
+        await deleteVariable(gameServerId, moduleId, key);
+        continue;
+      }
+
+      return { acquired: false, key, ownerToken, existing: parsed };
+    }
+  }
+
+  return { acquired: false, key, ownerToken };
+}
+
+export async function releasePayoutLock(gameServerId, moduleId, refereeId, ownerToken) {
+  const key = getReferralPayoutLockKey(refereeId);
+  const existing = await findVariable(gameServerId, moduleId, key);
+  if (!existing) return;
+
+  const parsed = safeJsonParse(existing.value, null, `payout lock for ${refereeId}`);
+  if (parsed?.ownerToken && parsed.ownerToken !== ownerToken) return;
+  await takaro.variable.variableControllerDelete(existing.id);
 }
 
 export async function getReferralCode(gameServerId, moduleId, playerId) {
@@ -258,11 +326,18 @@ export function getVipMultiplier(pog) {
   };
 }
 
-export async function awardCurrency(gameServerId, playerId, amount) {
-  if (!amount || amount <= 0) return;
+export async function changeCurrency(gameServerId, playerId, amount) {
+  const normalized = Math.trunc(Number(amount) || 0);
+  if (!normalized) return 0;
   await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, playerId, {
-    currency: Math.floor(amount),
+    currency: normalized,
   });
+  return normalized;
+}
+
+export async function awardCurrency(gameServerId, playerId, amount) {
+  if (!amount || amount <= 0) return 0;
+  return changeCurrency(gameServerId, playerId, Math.floor(amount));
 }
 
 export function getNormalizedConfig(mod) {
@@ -389,6 +464,12 @@ export async function awardWelcomeBonus(gameServerId, refereeId, config) {
   return amount;
 }
 
+export async function rollbackWelcomeBonus(gameServerId, refereeId, amount) {
+  const normalized = Math.max(0, Math.floor(Number(amount) || 0));
+  if (!normalized) return 0;
+  return changeCurrency(gameServerId, refereeId, -normalized);
+}
+
 export async function adjustReferrerStatsForLink(gameServerId, moduleId, referrerId, link, direction = -1) {
   if (!referrerId || !link) return null;
 
@@ -417,87 +498,97 @@ export async function applyPaidReferral({
   config,
   reason,
 }) {
-  const currentLink = link ?? await getReferralLink(gameServerId, moduleId, refereeId);
-  if (!currentLink) {
-    return { paid: false, reason: 'missing-link' };
+  const ownerToken = `${reason}:${new Date().toISOString()}:${Math.random().toString(36).slice(2, 10)}`;
+  const lock = await tryAcquirePayoutLock(gameServerId, moduleId, refereeId, ownerToken);
+  if (!lock.acquired) {
+    return { paid: false, reason: 'payout-in-progress' };
   }
 
-  if (currentLink.status === 'paid') {
-    return { paid: false, reason: 'already-paid' };
-  }
-
-  if (currentLink.status === 'rejected') {
-    return { paid: false, reason: 'rejected' };
-  }
-
-  const [referrerStatsRaw, referrerPog] = await Promise.all([
-    getReferralStats(gameServerId, moduleId, referrerId),
-    getPog(gameServerId, referrerId),
-  ]);
-
-  const referrerStats = resetDailyCounterIfNeeded(referrerStatsRaw);
-
-  let reward;
-  let multiplierInfo;
-  let checkpointLink = currentLink;
-  const isResume = currentLink.status === 'paying';
-
-  if (isResume) {
-    reward = deserializePreparedReward(currentLink);
-    if (!reward) {
-      throw new Error(`Referral payout for referee=${refereeId} is marked as paying but has no prepared reward.`);
+  try {
+    const currentLink = link ?? await getReferralLink(gameServerId, moduleId, refereeId);
+    if (!currentLink) {
+      return { paid: false, reason: 'missing-link' };
     }
-    multiplierInfo = {
-      tier: Math.max(0, Math.min(Number(currentLink.vipTier ?? 0) || 0, 5)),
-      multiplier: Number(currentLink.vipMultiplier ?? (1 + ((Number(currentLink.vipTier ?? 0) || 0) * 0.05))) || 1,
-    };
-    console.log(`referral-program: resuming payout finalization for referee=${refereeId}, referrer=${referrerId}`);
-  } else {
-    multiplierInfo = getVipMultiplier(referrerPog);
-    reward = await planReferrerReward(gameServerId, referrerId, config, multiplierInfo);
-    checkpointLink = {
-      ...currentLink,
-      status: 'paying',
-      payoutPreparedAt: new Date().toISOString(),
-      ...serializePreparedRewardFields(reward, multiplierInfo, reason, currentLink.retries ?? 0),
-    };
-    await setReferralLink(gameServerId, moduleId, refereeId, checkpointLink);
-    try {
-      await executePreparedReward(gameServerId, referrerId, reward);
-    } catch (err) {
-      await setReferralLink(
-        gameServerId,
-        moduleId,
-        refereeId,
-        clearPreparedReward({ ...checkpointLink, status: 'pending', retries: currentLink.retries ?? 0 }),
-      );
-      throw err;
+
+    if (currentLink.status === 'paid') {
+      return { paid: false, reason: 'already-paid' };
     }
+
+    if (currentLink.status === 'rejected') {
+      return { paid: false, reason: 'rejected' };
+    }
+
+    const [referrerStatsRaw, referrerPog] = await Promise.all([
+      getReferralStats(gameServerId, moduleId, referrerId),
+      getPog(gameServerId, referrerId),
+    ]);
+
+    const referrerStats = resetDailyCounterIfNeeded(referrerStatsRaw);
+
+    let reward;
+    let multiplierInfo;
+    let checkpointLink = currentLink;
+    const isResume = currentLink.status === 'paying';
+
+    if (isResume) {
+      reward = deserializePreparedReward(currentLink);
+      if (!reward) {
+        throw new Error(`Referral payout for referee=${refereeId} is marked as paying but has no prepared reward.`);
+      }
+      multiplierInfo = {
+        tier: Math.max(0, Math.min(Number(currentLink.vipTier ?? 0) || 0, 5)),
+        multiplier: Number(currentLink.vipMultiplier ?? (1 + ((Number(currentLink.vipTier ?? 0) || 0) * 0.05))) || 1,
+      };
+      console.log(`referral-program: resuming payout finalization for referee=${refereeId}, referrer=${referrerId}`);
+    } else {
+      multiplierInfo = getVipMultiplier(referrerPog);
+      reward = await planReferrerReward(gameServerId, referrerId, config, multiplierInfo);
+      checkpointLink = {
+        ...currentLink,
+        status: 'paying',
+        payoutPreparedAt: new Date().toISOString(),
+        ...serializePreparedRewardFields(reward, multiplierInfo, reason, currentLink.retries ?? 0),
+      };
+      await setReferralLink(gameServerId, moduleId, refereeId, checkpointLink);
+      try {
+        await executePreparedReward(gameServerId, referrerId, reward);
+      } catch (err) {
+        await setReferralLink(
+          gameServerId,
+          moduleId,
+          refereeId,
+          clearPreparedReward({ ...checkpointLink, status: 'pending', retries: currentLink.retries ?? 0 }),
+        );
+        throw err;
+      }
+    }
+
+    const updatedStats = {
+      ...referrerStats,
+      referralsPaid: referrerStats.referralsPaid + 1,
+      currencyEarned: referrerStats.currencyEarned + (reward.rewardType === 'currency' ? (reward.amount ?? 0) : 0),
+      itemsEarned: referrerStats.itemsEarned + (reward.rewardType === 'item' ? (reward.amount ?? 0) : 0),
+    };
+    await setReferralStats(gameServerId, moduleId, referrerId, updatedStats);
+
+    const updatedLink = {
+      ...checkpointLink,
+      status: 'paid',
+      paidAt: new Date().toISOString(),
+      retries: currentLink.retries ?? 0,
+    };
+
+    await setReferralLink(gameServerId, moduleId, refereeId, updatedLink);
+    await removePendingReferee(gameServerId, moduleId, refereeId);
+
+    console.log(
+      `referral-program: paid referrer=${referrerId} for referee=${refereeId}, rewardType=${reward.rewardType}, amount=${reward.amount ?? 0}, vipTier=${multiplierInfo.tier}, reason=${reason}`,
+    );
+
+    return { paid: true, reward, multiplierInfo, link: updatedLink };
+  } finally {
+    await releasePayoutLock(gameServerId, moduleId, refereeId, ownerToken);
   }
-
-  const updatedStats = {
-    ...referrerStats,
-    referralsPaid: referrerStats.referralsPaid + 1,
-    currencyEarned: referrerStats.currencyEarned + (reward.rewardType === 'currency' ? (reward.amount ?? 0) : 0),
-    itemsEarned: referrerStats.itemsEarned + (reward.rewardType === 'item' ? (reward.amount ?? 0) : 0),
-  };
-  await setReferralStats(gameServerId, moduleId, referrerId, updatedStats);
-
-  const updatedLink = {
-    ...checkpointLink,
-    status: 'paid',
-    paidAt: new Date().toISOString(),
-    retries: currentLink.retries ?? 0,
-  };
-
-  await setReferralLink(gameServerId, moduleId, refereeId, updatedLink);
-  await removePendingReferee(gameServerId, moduleId, refereeId);
-
-  console.log(
-    `referral-program: paid referrer=${referrerId} for referee=${refereeId}, rewardType=${reward.rewardType}, amount=${reward.amount ?? 0}, vipTier=${multiplierInfo.tier}, reason=${reason}`,
-  );
-
-  return { paid: true, reward, multiplierInfo, link: updatedLink };
 }
 
 export async function rejectPendingReferral(gameServerId, moduleId, refereeId, link, reason) {
@@ -510,7 +601,7 @@ export async function rejectPendingReferral(gameServerId, moduleId, refereeId, l
   };
   await setReferralLink(gameServerId, moduleId, refereeId, updated);
   await removePendingReferee(gameServerId, moduleId, refereeId);
-  await adjustReferrerStatsForLink(gameServerId, moduleId, link.referrerId, updated, -1);
+  await adjustReferrerStatsForLink(gameServerId, moduleId, link.referrerId, link, -1);
 }
 
 export async function incrementLinkRetry(gameServerId, moduleId, refereeId, link, reason, options = {}) {
@@ -540,6 +631,10 @@ export async function maybePayReferral(gameServerId, moduleId, refereeId, mod, r
   if (link.status === 'rejected') {
     await removePendingReferee(gameServerId, moduleId, refereeId);
     return { paid: false, reason: 'rejected' };
+  }
+
+  if (link.status === 'linking') {
+    return { paid: false, reason: 'link-creation-in-progress' };
   }
 
   if (link.status === 'pending') {
