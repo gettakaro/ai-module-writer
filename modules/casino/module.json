@@ -255,6 +255,11 @@
       "eventType": "player-disconnected",
       "description": "Refund or cancel in-flight casino sessions when a player disconnects",
       "function": "src/hooks/on-player-disconnect/index.js"
+    },
+    "on-module-installed": {
+      "eventType": "module-installed",
+      "description": "Uninstall casino immediately when legacy gambling modules are installed on the same game server",
+      "function": "src/hooks/on-module-installed/index.js"
     }
   },
   "cronJobs": {

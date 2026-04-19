@@ -145,17 +145,22 @@ async function main() {
     }
 
     await placeBet({ gameServerId, moduleId: mod.moduleId, pog, player, config, game: 'duel', amount, skipLock: true });
-    await setDuel(gameServerId, mod.moduleId, player.id, {
-      opponentId: target.playerId,
-      opponentName: target.player?.name ?? targetName,
-      challengerName: player.name,
-      amount: Math.round(amount),
-      state: 'pending',
-      challengerPick: null,
-      opponentPick: null,
-      acceptedStakePlaced: false,
-      startedAt: new Date().toISOString(),
-    });
+    try {
+      await setDuel(gameServerId, mod.moduleId, player.id, {
+        opponentId: target.playerId,
+        opponentName: target.player?.name ?? targetName,
+        challengerName: player.name,
+        amount: Math.round(amount),
+        state: 'pending',
+        challengerPick: null,
+        opponentPick: null,
+        acceptedStakePlaced: false,
+        startedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      await refund({ gameServerId, moduleId: mod.moduleId, playerId: player.id, amount: Math.round(amount), config, skipLock: true });
+      throw new TakaroUserError('Your duel challenge could not be created, so your stake was refunded. Please try again.');
+    }
   });
 
   const opponentName = target.player?.name ?? targetName;

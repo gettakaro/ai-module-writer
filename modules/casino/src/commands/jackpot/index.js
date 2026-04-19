@@ -1,11 +1,11 @@
 import { data } from '@takaro/helpers';
-import { getJackpot, formatCurrency } from './casino-helpers.js';
+import { getJackpot, formatCurrency, formatPastTime } from './casino-helpers.js';
 
 async function main() {
   const { pog, gameServerId, module: mod } = data;
   const jackpot = await getJackpot(gameServerId, mod.moduleId);
   const history = jackpot.lastWinner
-    ? ` Last hit: ${jackpot.lastWinner} on ${jackpot.lastWinGame} at ${jackpot.lastWinAt}.`
+    ? ` Last hit: ${jackpot.lastWinner} on ${jackpot.lastWinGame} ${formatPastTime(jackpot.lastWinAt)}.`
     : ' No jackpot winner yet.';
   await pog.pm(`💰 Jackpot: ${formatCurrency(jackpot.amount)} coin.${history}`);
 }

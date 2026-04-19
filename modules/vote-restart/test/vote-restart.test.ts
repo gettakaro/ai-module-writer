@@ -541,6 +541,47 @@ describe('vote-restart edge cases', () => {
       `Expected "already passed" or "Waiting for restart" in logs, got: ${JSON.stringify(logs)}`,
     );
   });
+
+  it('should reject /voteyes from a player excluded from the locked eligible snapshot', async () => {
+    const activeState = {
+      startedAt: new Date(Date.now() - 10 * 1000).toISOString(),
+      initiatorName: 'TestPlayer',
+      voters: [ctx2.players[0].playerId],
+      status: 'active',
+      requiredVotes: 2,
+      eligiblePlayerIds: [ctx2.players[0].playerId],
+      eligibleCountAtStart: 1,
+    };
+    await client2.variable.variableControllerCreate({
+      key: 'vr_vote_state',
+      value: JSON.stringify(activeState),
+      gameServerId: ctx2.gameServer.id,
+      moduleId: moduleId2,
+    });
+
+    let event: Awaited<ReturnType<typeof triggerCommand2>>;
+    try {
+      event = await triggerCommand2(ctx2.players[1].playerId, 'voteyes');
+    } finally {
+      const varSearch = await client2.variable.variableControllerSearch({
+        filters: {
+          key: ['vr_vote_state'],
+          gameServerId: [ctx2.gameServer.id],
+          moduleId: [moduleId2],
+        },
+      });
+      for (const v of varSearch.data.data) {
+        await client2.variable.variableControllerDelete(v.id);
+      }
+    }
+
+    const { success, logs } = getResult2(event);
+    assert.equal(success, false, `Expected snapshot-excluded vote to fail, logs: ${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((l) => l.includes('cannot vote on this round') || l.includes('not online when this restart vote started')),
+      `Expected snapshot-exclusion message, got: ${JSON.stringify(logs)}`,
+    );
+  });
 });
 
 describe('vote-restart recovery paths and locked thresholds', () => {

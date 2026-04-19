@@ -1,5 +1,5 @@
 import { data, TakaroUserError } from '@takaro/helpers';
-import { getLeaderboardCache, refreshLeaderboardCache, formatCurrency } from './casino-helpers.js';
+import { getLeaderboardCache, formatCurrency, formatPastTime } from './casino-helpers.js';
 
 async function main() {
   const { pog, gameServerId, arguments: args, module: mod } = data;
@@ -15,19 +15,18 @@ async function main() {
     throw new TakaroUserError('Choose wager, won, winrate, roi, or biggest.');
   }
 
-  let cache = await getLeaderboardCache(gameServerId, mod.moduleId);
+  const cache = await getLeaderboardCache(gameServerId, mod.moduleId);
   const refreshedAt = cache.refreshedAt ? new Date(cache.refreshedAt).getTime() : 0;
-  const stale = !refreshedAt || (Date.now() - refreshedAt > 5 * 60 * 1000);
-  const empty = (cache.topWager?.length ?? 0) === 0 && (cache.topWon?.length ?? 0) === 0 && ((cache.topRoi?.length ?? cache.topWinrate?.length ?? 0) === 0) && (cache.topBiggest?.length ?? 0) === 0;
-  if (stale || empty) {
-    cache = await refreshLeaderboardCache(gameServerId, mod.moduleId);
-  }
+  const stale = Boolean(refreshedAt) && (Date.now() - refreshedAt > 5 * 60 * 1000);
 
   const [key, field, title] = map[category];
   const rows = cache[key] ?? [];
   const lines = [`🏆 ${title}`];
+  if (cache.refreshedAt) {
+    lines.push(`Cache refreshed ${formatPastTime(cache.refreshedAt)}${stale ? ' — waiting for the next cron refresh.' : ''}`);
+  }
   if (rows.length === 0) {
-    lines.push('No casino leaderboard data yet.');
+    lines.push('No casino leaderboard data yet. Wait for the refresh-leaderboards cronjob to populate the cache.');
     await pog.pm(lines.join('\n'));
     return;
   }

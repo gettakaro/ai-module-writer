@@ -20,7 +20,25 @@ async function main() {
     race: '🏁 /race <amount> — enter the shared weighted race pot.',
   };
 
+  const gameAliases = {
+    flip: 'flip',
+    dice: 'dice',
+    hilo: 'hilo',
+    roulette: 'roulette',
+    bet: 'roulette',
+    slots: 'slots',
+    blackjack: 'blackjack',
+    bj: 'blackjack',
+    crash: 'crash',
+    duel: 'duel',
+    race: 'race',
+  };
+
   if (game !== '?' && gameHelp[game]) {
+    const normalizedGame = gameAliases[game];
+    if (normalizedGame && config.games?.[normalizedGame] === false) {
+      throw new TakaroUserError(`The ${normalizedGame} game is disabled on this server.`);
+    }
     await pog.pm(gameHelp[game]);
     return;
   }

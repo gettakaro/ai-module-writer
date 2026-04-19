@@ -65,7 +65,12 @@ async function main() {
         return;
       }
 
-      await setPlayerSession(gameServerId, mod.moduleId, KEY_BLACKJACK_SESSION, player.id, session);
+      try {
+        await setPlayerSession(gameServerId, mod.moduleId, KEY_BLACKJACK_SESSION, player.id, session);
+      } catch (err) {
+        await refund({ gameServerId, moduleId: mod.moduleId, playerId: player.id, amount: session.stake, config, skipLock: true });
+        throw new TakaroUserError('Your blackjack hand could not be started, so your stake was refunded. Please try again.');
+      }
       await pog.pm(`🃏 Your hand: ${session.playerHand.map(cardLabel).join(' ')} (${playerTotal}). Dealer shows: ${cardLabel(session.dealerHand[0])}. /bj hit, /bj stand, /bj double`);
       return;
     }

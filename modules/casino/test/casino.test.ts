@@ -1,6 +1,8 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'path';
+import os from 'os';
+import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { Client, EventSearchInputAllowedFiltersEventNameEnum } from '@takaro/apiclient';
 import { createClient } from '../../../test/helpers/client.js';
@@ -101,7 +103,7 @@ describe('casino module', () => {
     const result = await client.event.eventControllerSearch({
       filters: {
         gameserverId: [ctx.gameServer.id],
-        eventName: ['chat-message' as any],
+        eventName: ['casino-big-win' as any],
       },
       greaterThan: { createdAt: after.toISOString() },
       limit: 20,
@@ -421,7 +423,7 @@ describe('casino module', () => {
     assert.equal(await getPlayerCurrency(player.playerId), beforeBalance, 'expected doubled blackjack stake refund to restore balance');
   });
 
-  it('emits a compatible big-win chat-message event for qualifying wins', async () => {
+  it('emits a custom casino-big-win event for qualifying wins', async () => {
     const player = ctx.players[0]!;
     const after = new Date();
     let event = await findBigWinEvent(after);
@@ -432,10 +434,10 @@ describe('casino module', () => {
       event = await findBigWinEvent(after);
     }
 
-    assert.ok(event, 'expected a compatible big-win event after repeated winning attempts');
+    assert.ok(event, 'expected a casino-big-win event after repeated winning attempts');
     const meta = event!.meta as unknown as Record<string, unknown>;
     assert.equal(meta.type, 'casino-big-win');
-    assert.equal(event!.eventName, 'chat-message');
+    assert.equal(event!.eventName, 'casino-big-win');
   });
 
   it('cancels active hilo sessions when the player becomes banned', async () => {
@@ -545,7 +547,7 @@ describe('casino module', () => {
         maxBet: 100,
         wagerCap: 120,
         lossCap: 80,
-        games: { ...(install.userConfig as any)?.games, dice: false },
+        games: { ...(install.userConfig as any)?.games, dice: false, blackjack: false },
       },
     });
 
@@ -553,12 +555,95 @@ describe('casino module', () => {
     assert.equal(disabled.success, false, 'expected disabled game rejection');
     assert.ok(disabled.logs.some((msg) => /disabled/i.test(msg)), `expected disabled-game message, logs=${JSON.stringify(disabled.logs)}`);
 
+    const disabledHelp = await triggerCommand(ctx.players[0]!.playerId, `${prefix}casino blackjack`);
+    assert.equal(disabledHelp.success, false, 'expected focused help for disabled game to fail');
+    assert.ok(disabledHelp.logs.some((msg) => /disabled/i.test(msg)), `expected disabled-focused-help message, logs=${JSON.stringify(disabledHelp.logs)}`);
+
     const vipBet = await triggerCommand(ctx.players[0]!.playerId, `${prefix}flip 150 heads`);
     assert.equal(vipBet.success, true, `expected VIP-scaled max bet to succeed, logs=${JSON.stringify(vipBet.logs)}`);
 
     const stats = await triggerCommand(ctx.players[0]!.playerId, `${prefix}casinostats`);
     assert.equal(stats.success, true, `expected casinostats success, logs=${JSON.stringify(stats.logs)}`);
     assert.ok(stats.logs.some((msg) => /remaining/i.test(msg)), `expected actionable cap feedback, logs=${JSON.stringify(stats.logs)}`);
+  });
+
+  it('covers core validation failures across casino commands', async () => {
+    const install = (await client.module.moduleInstallationsControllerGetModuleInstallation(moduleId, ctx.gameServer.id)).data.data;
+    await client.module.moduleInstallationsControllerUninstallModule(moduleId, ctx.gameServer.id);
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        ...(install.userConfig as any),
+        cooldownSeconds: 0,
+        games: { ...(install.userConfig as any)?.games, dice: true, blackjack: true },
+      },
+    });
+
+    const player = ctx.players[0]!;
+    const admin = ctx.players[1]!;
+
+    const invalidCrash = await triggerCommand(player.playerId, `${prefix}crash 10 1.0`);
+    assert.equal(invalidCrash.success, false, 'expected invalid crash target to fail');
+    assert.ok(invalidCrash.logs.some((msg) => /cashout target must be between 1\.01 and 1000/i.test(msg)), `expected crash validation message, logs=${JSON.stringify(invalidCrash.logs)}`);
+
+    const invalidDiceDirection = await triggerCommand(player.playerId, `${prefix}dice 10 sideways 50`);
+    assert.equal(invalidDiceDirection.success, false, 'expected invalid dice direction to fail');
+    assert.ok(invalidDiceDirection.logs.some((msg) => /over or under/i.test(msg)), `expected dice direction message, logs=${JSON.stringify(invalidDiceDirection.logs)}`);
+
+    const unknownGame = await triggerCommand(player.playerId, `${prefix}casino baccarat`);
+    assert.equal(unknownGame.success, false, 'expected unknown /casino game to fail');
+    assert.ok(unknownGame.logs.some((msg) => /unknown casino game/i.test(msg)), `expected unknown-game message, logs=${JSON.stringify(unknownGame.logs)}`);
+
+    const invalidTop = await triggerCommand(player.playerId, `${prefix}casinotop bananas`);
+    assert.equal(invalidTop.success, false, 'expected invalid leaderboard category to fail');
+    assert.ok(invalidTop.logs.some((msg) => /choose wager, won, winrate, roi, or biggest/i.test(msg)), `expected invalid-category message, logs=${JSON.stringify(invalidTop.logs)}`);
+
+    const missingAdminTarget = await triggerCommand(admin.playerId, `${prefix}casinoresetstats MissingPlayer`);
+    assert.equal(missingAdminTarget.success, false, 'expected missing admin target to fail');
+    assert.ok(missingAdminTarget.logs.some((msg) => /not found/i.test(msg)), `expected missing-target message, logs=${JSON.stringify(missingAdminTarget.logs)}`);
+
+    const duelWithoutInvite = await triggerCommand(player.playerId, `${prefix}duel accept`);
+    assert.equal(duelWithoutInvite.success, false, 'expected misuse of /duel accept to fail');
+    assert.ok(duelWithoutInvite.logs.some((msg) => /not part of an active duel/i.test(msg)), `expected duel misuse message, logs=${JSON.stringify(duelWithoutInvite.logs)}`);
+  });
+
+  it('rejects play while a legacy gambling module is installed', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'casino-legacy-module-'));
+    let legacyModuleId: string | undefined;
+    try {
+      await fs.writeFile(path.join(tempDir, 'module.json'), JSON.stringify({
+        name: 'blackjack',
+        author: 'test',
+        description: 'Legacy conflict fixture',
+        version: 'latest',
+        supportedGames: ['all'],
+        config: { type: 'object', properties: {}, additionalProperties: false },
+        systemConfig: { type: 'object', properties: {}, additionalProperties: true },
+        uiSchema: {},
+        permissions: [],
+        commands: {},
+        hooks: {},
+        cronJobs: {},
+        functions: {},
+      }, null, 2));
+
+      const legacyModule = await pushModule(client, tempDir);
+      legacyModuleId = legacyModule.id;
+      await installModule(client, legacyModule.latestVersion.id, ctx.gameServer.id, {});
+
+      const blocked = await triggerCommand(ctx.players[0]!.playerId, `${prefix}flip 10 heads`);
+      assert.equal(blocked.success, false, 'expected legacy conflict to block play');
+      assert.ok(blocked.logs.some((msg) => /old gambling modules are still installed/i.test(msg)), `expected legacy-conflict message, logs=${JSON.stringify(blocked.logs)}`);
+    } finally {
+      if (legacyModuleId) {
+        try {
+          await uninstallModule(client, legacyModuleId, ctx.gameServer.id);
+        } catch {}
+        try {
+          await deleteModule(client, legacyModuleId);
+        } catch {}
+      }
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('expires pending and accepted duels through the cleanup cronjob with full refunds', async () => {

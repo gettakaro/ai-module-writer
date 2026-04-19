@@ -70,6 +70,14 @@ export function formatFutureTime(value) {
   return `${formatDuration(diff)} (${formatUtcTimestamp(value)})`;
 }
 
+export function formatPastTime(value) {
+  const ts = new Date(value).getTime();
+  if (Number.isNaN(ts)) return String(value);
+  const diff = Date.now() - ts;
+  if (diff <= 0) return `just now (${formatUtcTimestamp(value)})`;
+  return `${formatDuration(diff)} ago (${formatUtcTimestamp(value)})`;
+}
+
 export function getDefaultConfig(userConfig = {}) {
   return {
     minBet: Number(userConfig.minBet ?? 1),
@@ -493,6 +501,7 @@ export async function resolvePlayerByName(name, gameServerId) {
   const exact = playerSearch.data.data.find((p) => p.name.toLowerCase() === normalized);
   if (!exact) return null;
   const pog = await getPlayerOnGameserver(gameServerId, exact.id);
+  if (!pog) return null;
   return {
     playerId: exact.id,
     player: exact,
@@ -582,7 +591,7 @@ export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, pl
 
   try {
     await takaro.event.eventControllerCreate({
-      eventName: 'chat-message',
+      eventName: 'casino-big-win',
       gameserverId: gameServerId,
       moduleId,
       actingModuleId: moduleId,
@@ -590,7 +599,7 @@ export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, pl
       meta,
     });
   } catch (err) {
-    console.error(`casino-helpers: failed to emit casino big-win chat-message event for ${playerName}: ${err}`);
+    console.error(`casino-helpers: failed to emit casino-big-win event for ${playerName}: ${err}`);
   }
 }
 
@@ -637,11 +646,23 @@ export async function placeBet({ gameServerId, moduleId, pog, player, config, ga
       throw new TakaroUserError('You do not have enough currency for that bet.');
     }
 
-    windowData.wagered += betAmount;
-    await setWindowData(gameServerId, moduleId, player.id, windowData.windowKey, windowData);
+    try {
+      windowData.wagered += betAmount;
+      await setWindowData(gameServerId, moduleId, player.id, windowData.windowKey, windowData);
 
-    if (config.cooldownSeconds > 0) {
-      await writeVariable(gameServerId, moduleId, KEY_COOLDOWN, { until: new Date(Date.now() + (config.cooldownSeconds * 1000)).toISOString() }, player.id);
+      if (config.cooldownSeconds > 0) {
+        await writeVariable(gameServerId, moduleId, KEY_COOLDOWN, { until: new Date(Date.now() + (config.cooldownSeconds * 1000)).toISOString() }, player.id);
+      }
+    } catch (err) {
+      console.error(`casino-helpers: placeBet persistence failed for ${player.name}, refunding deduction: ${err}`);
+      try {
+        await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, player.id, {
+          currency: betAmount,
+        });
+      } catch (refundErr) {
+        console.error(`casino-helpers: placeBet refund after persistence failure also failed for ${player.name}: ${refundErr}`);
+      }
+      throw new TakaroUserError('Your bet could not be saved. No currency was taken — please try again.');
     }
 
     return {

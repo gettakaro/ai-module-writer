@@ -42,8 +42,13 @@ async function main() {
       throw new TakaroUserError('You have already voted yes for this restart.');
     }
 
-    voteState.voters.push(pog.playerId);
     const eligiblePlayers = await getOnlineNonImmunePlayers(gameServerId);
+    const eligibleSnapshot = new Set(voteState.eligiblePlayerIds ?? eligiblePlayers.map((p) => p.playerId));
+    if (!eligibleSnapshot.has(pog.playerId)) {
+      throw new TakaroUserError('You were not online when this restart vote started, so you cannot vote on this round. Wait for the next vote.');
+    }
+
+    voteState.voters.push(pog.playerId);
     const threshold = getRequiredVotes(voteState, eligiblePlayers.length, config.passThreshold);
     const effectiveVotes = getEffectiveVotes(voteState, eligiblePlayers);
 

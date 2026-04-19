@@ -33,13 +33,18 @@ async function main() {
       const placed = await placeBet({ gameServerId, moduleId: mod.moduleId, pog, player, config, game: 'hilo', amount: startAmount, skipLock: true });
       const deck = createDeck();
       const currentCard = deck.pop();
-      await setPlayerSession(gameServerId, mod.moduleId, KEY_HILO_SESSION, player.id, {
-        stake: placed.amount,
-        multiplier: 1,
-        currentCard,
-        deck,
-        startedAt: new Date().toISOString(),
-      });
+      try {
+        await setPlayerSession(gameServerId, mod.moduleId, KEY_HILO_SESSION, player.id, {
+          stake: placed.amount,
+          multiplier: 1,
+          currentCard,
+          deck,
+          startedAt: new Date().toISOString(),
+        });
+      } catch (err) {
+        await refund({ gameServerId, moduleId: mod.moduleId, playerId: player.id, amount: placed.amount, config, skipLock: true });
+        throw new TakaroUserError('Your hilo streak could not be started, so your stake was refunded. Please try again.');
+      }
       await pog.pm(`🎴 Starting card: ${cardLabel(currentCard)}. /hilo higher or /hilo lower (1.00x).`);
       return;
     }
