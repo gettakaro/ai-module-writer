@@ -1,6 +1,7 @@
 import { data } from '@takaro/helpers';
 import {
   getVoteState,
+  getRestartPending,
   getOnlineNonImmunePlayers,
   computeThreshold,
 } from './vote-helpers.js';
@@ -11,16 +12,20 @@ async function main() {
   const moduleId = mod.moduleId;
 
   const voteState = await getVoteState(gameServerId, moduleId);
+  const restartPending = voteState?.status === 'passed'
+    ? voteState
+    : await getRestartPending(gameServerId, moduleId);
 
-  if (!voteState) {
+  if (!voteState && !restartPending) {
     console.log('vote-status: No active restart vote');
     await pog.pm('[Vote Restart] No active restart vote.');
     return;
   }
 
-  if (voteState.status === 'passed') {
-    const elapsedSincePassed = (Date.now() - new Date(voteState.passedAt).getTime()) / 1000;
-    const remainingDelay = Math.ceil(config.restartDelay - elapsedSincePassed);
+  if (restartPending) {
+    const elapsedSincePassed = (Date.now() - new Date(restartPending.passedAt).getTime()) / 1000;
+    const effectiveDelay = Number(restartPending.restartDelay ?? config.restartDelay) || 0;
+    const remainingDelay = Math.ceil(effectiveDelay - elapsedSincePassed);
 
     if (remainingDelay <= 0) {
       console.log('vote-status: passed, restart already initiated');

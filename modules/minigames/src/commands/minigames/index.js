@@ -26,11 +26,15 @@ async function main() {
   }
 
   const enabledDaily = [config.games.wordle && '/wordle', config.games.hangman && '/hangman', config.games.hotcold && '/hotcold'].filter(Boolean);
-  const enabledLive = [config.games.trivia && 'trivia', config.games.scramble && 'scramble', config.games.mathrace && 'mathrace', config.games.reactionrace && 'reaction-race'].filter(Boolean);
+  const liveAnswerGames = [config.games.trivia && 'trivia', config.games.scramble && 'scramble', config.games.mathrace && 'mathrace'].filter(Boolean);
+  const chatOnlyGames = [config.games.reactionrace && 'reaction-race'].filter(Boolean);
+  const liveSummary = [];
+  if (liveAnswerGames.length > 0) liveSummary.push(`/answer for ${liveAnswerGames.join(', ')}`);
+  if (chatOnlyGames.length > 0) liveSummary.push(`raw chat for ${chatOnlyGames.join(', ')}`);
   const message = [
     '🎮 miniGames',
     `Daily puzzles: ${enabledDaily.length > 0 ? `${enabledDaily.join(', ')}, /puzzle` : '/puzzle (all daily puzzle games are disabled)'}`,
-    `Live rounds: ${enabledLive.length > 0 ? `/answer, raw chat for reaction-race (${enabledLive.join(', ')})` : 'all live round games are disabled'}`,
+    `Live rounds: ${liveSummary.length > 0 ? liveSummary.join('; ') : 'all live round games are disabled'}`,
     'Stats: /minigamestats [player], /minigamesleaderboard <points|wordle|hangman|streak> (legacy: /minigamestop)',
     `Live round cadence: every ~${config.liveRoundIntervalMinutes} min when enough players are online.`,
   ].join('\n');

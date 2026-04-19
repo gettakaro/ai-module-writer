@@ -209,6 +209,7 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
     assert.ok(Array.isArray(cache.topPoints));
     assert.ok(cache.topPoints.length >= 1);
     assert.equal(cache.topPoints[0].value, 40);
+    assert.ok(cache.topPoints.every((entry: { value: number }) => entry.value > 0), `expected zero-value leaderboard entries to be filtered, got ${JSON.stringify(cache.topPoints)}`);
 
     const leaderboardEvent = await triggerCommand(ctx.players[1].playerId, `${prefix}minigamesleaderboard points`);
     const leaderboardMeta = leaderboardEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
@@ -249,6 +250,83 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
 
     const clearedBan = await readVariable(client, ctx.gameServer.id, moduleId, KEY_BAN, ctx.players[1].playerId);
     assert.equal(clearedBan, null, 'ban variable should be removed after unban');
+  });
+
+  it('enforces the published MINIGAMES_BANNED permission even without a ban variable', async () => {
+    const bannedRoleId = await assignPermissions(client, ctx.players[1].playerId, ctx.gameServer.id, ['MINIGAMES_BANNED']);
+    try {
+      const deniedEvent = await triggerCommand(ctx.players[1].playerId, `${prefix}puzzle`);
+      const deniedMeta = deniedEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+      const deniedLogs = (deniedMeta?.result?.logs ?? []).map((l) => l.msg);
+      assert.equal(deniedMeta?.result?.success, false, 'MINIGAMES_BANNED alone should block play');
+      assert.ok(deniedLogs.some((msg) => msg.includes('You are banned from mini-games.')), `expected permission-backed ban denial, got ${JSON.stringify(deniedLogs)}`);
+    } finally {
+      await cleanupRole(client, bannedRoleId);
+    }
+  });
+
+  it('does not consume a live round when the first winner cannot acquire the award lock', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE, {
+      game: 'scramble',
+      prompt: 'KRAOTA',
+      answer: 'takaro',
+      answerType: 'text',
+      displayedOptions: [],
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    });
+    await upsertVariable(client, ctx.gameServer.id, moduleId, `minigames_award_lock:${ctx.players[1].playerId}`, {
+      token: 'test-lock',
+      owner: 'test',
+      createdAt: new Date().toISOString(),
+    });
+
+    const blockedEvent = await triggerCommand(ctx.players[1].playerId, `${prefix}answer takaro`);
+    const blockedMeta = blockedEvent.meta as { result?: { success?: boolean } };
+    assert.equal(blockedMeta?.result?.success, false, 'answer should fail while the winner award lock is held');
+
+    const stillActive = await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE);
+    assert.ok(stillActive, 'round should remain active after the blocked winner attempt');
+
+    await client.variable.variableControllerDelete((await client.variable.variableControllerSearch({
+      filters: { key: [`minigames_award_lock:${ctx.players[1].playerId}`], gameServerId: [ctx.gameServer.id], moduleId: [moduleId] },
+    })).data.data[0]!.id);
+
+    const recoveryEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}answer takaro`);
+    const recoveryMeta = recoveryEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const recoveryLogs = (recoveryMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(recoveryMeta?.result?.success, true, `second player should still be able to win, logs=${JSON.stringify(recoveryLogs)}`);
+    assert.ok(recoveryLogs.some((msg) => msg.includes('live round settled game=scramble')), `expected recovery settlement log, got ${JSON.stringify(recoveryLogs)}`);
+  });
+
+  it('settles only one winner when two players answer the same live round concurrently', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE, {
+      game: 'trivia',
+      prompt: 'Concurrent?',
+      answer: 'takaro',
+      answerType: 'text',
+      displayedOptions: ['takaro', 'other'],
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    });
+
+    const beforeA = (await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[0].playerId))?.perGame?.trivia?.wins || 0;
+    const beforeB = (await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[1].playerId))?.perGame?.trivia?.wins || 0;
+
+    const [eventA, eventB] = await Promise.all([
+      triggerCommand(ctx.players[0].playerId, `${prefix}answer takaro`),
+      triggerCommand(ctx.players[1].playerId, `${prefix}answer takaro`),
+    ]);
+
+    const metaA = eventA.meta as { result?: { success?: boolean } };
+    const metaB = eventB.meta as { result?: { success?: boolean } };
+    assert.equal(metaA?.result?.success === true || metaA?.result?.success === false, true, 'first concurrent answer should complete');
+    assert.equal(metaB?.result?.success === true || metaB?.result?.success === false, true, 'second concurrent answer should complete');
+
+    const afterA = (await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[0].playerId))?.perGame?.trivia?.wins || 0;
+    const afterB = (await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[1].playerId))?.perGame?.trivia?.wins || 0;
+    assert.equal((afterA - beforeA) + (afterB - beforeB), 1, `expected exactly one trivia win across both players, got before=(${beforeA},${beforeB}) after=(${afterA},${afterB})`);
+    assert.equal(await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE), null, 'round should be cleared after the first successful settlement');
   });
 
   it('skips the active round through the admin command', async () => {
@@ -499,6 +577,72 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
 
     assert.equal(cleared, null, `reactionrace round should clear after chat win; stats=${JSON.stringify(stats)}`);
     assert.equal(stats?.perGame?.reactionrace?.wins, 1, `expected reactionrace win to be recorded, stats=${JSON.stringify(stats)}`);
+  });
+
+  it('awards reaction-race to only one player when matching chat messages race each other', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE, {
+      game: 'reactionrace',
+      prompt: '!grab',
+      answer: '!grab',
+      answerType: 'rawchat',
+      displayedOptions: [],
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    });
+
+    const beforeA = (await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[0].playerId))?.perGame?.reactionrace?.wins || 0;
+    const beforeB = (await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[1].playerId))?.perGame?.reactionrace?.wins || 0;
+
+    await Promise.all([
+      emitChatMessage(client, ctx, ctx.players[0].playerId, '!grab', moduleId),
+      emitChatMessage(client, ctx, ctx.players[1].playerId, '!grab', moduleId),
+    ]);
+
+    let afterA = beforeA;
+    let afterB = beforeB;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      afterA = (await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[0].playerId))?.perGame?.reactionrace?.wins || 0;
+      afterB = (await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[1].playerId))?.perGame?.reactionrace?.wins || 0;
+      const cleared = await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE);
+      if (cleared === null && (afterA - beforeA) + (afterB - beforeB) === 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+
+    assert.equal((afterA - beforeA) + (afterB - beforeB), 1, `expected exactly one reaction-race win across both players, got before=(${beforeA},${beforeB}) after=(${afterA},${afterB})`);
+    assert.equal(await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE), null, 'reaction-race round should be cleared after the first matching chat message');
+  });
+
+  it('supports offline player lookups for stats and admin reset commands', async () => {
+    const playerRecord = await client.player.playerControllerGetOne(ctx.players[1].playerId);
+    const targetName = playerRecord.data.data.name;
+
+    await client.playerOnGameserver.playerOnGameServerControllerDelete(ctx.gameServer.id, ctx.players[1].playerId);
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, {
+      totalPoints: 12,
+      gamesPlayed: 1,
+      biggestScore: { points: 12, game: 'scramble', at: new Date().toISOString() },
+      perGame: {
+        wordle: { points: 0, plays: 0, wins: 0 },
+        hangman: { points: 0, plays: 0, wins: 0 },
+        hotcold: { points: 0, plays: 0, wins: 0 },
+        trivia: { points: 0, plays: 0, wins: 0 },
+        scramble: { points: 12, plays: 1, wins: 1 },
+        mathrace: { points: 0, plays: 0, wins: 0 },
+        reactionrace: { points: 0, plays: 0, wins: 0 }
+      },
+      streaks: { wordle: { current: 0, best: 0, lastSolvedDate: null } }
+    }, ctx.players[1].playerId);
+
+    const statsEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamestats ${targetName}`);
+    const statsMeta = statsEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const statsLogs = (statsMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(statsMeta?.result?.success, true, 'offline player stats lookup should succeed');
+    assert.ok(statsLogs.some((msg) => msg.includes(`stats player=${targetName}`)), `expected offline-player stats lookup log, got ${JSON.stringify(statsLogs)}`);
+
+    const resetEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamesresetstats ${targetName}`);
+    const resetMeta = resetEvent.meta as { result?: { success?: boolean } };
+    assert.equal(resetMeta?.result?.success, true, 'offline player stat reset should succeed');
+    assert.equal(await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[1].playerId), null, 'offline target stats should be deleted');
   });
 
   it('closes an expired round via cronjob', async () => {

@@ -2,6 +2,7 @@ import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers'
 import {
   getVoteState,
   setVoteState,
+  setRestartPending,
   getOnlineNonImmunePlayers,
   computeThreshold,
 } from './vote-helpers.js';
@@ -55,7 +56,16 @@ async function main() {
   if (effectiveVotes >= threshold) {
     voteState.status = 'passed';
     voteState.passedAt = new Date().toISOString();
-    await setVoteState(gameServerId, moduleId, voteState);
+    await Promise.all([
+      setVoteState(gameServerId, moduleId, voteState),
+      setRestartPending(gameServerId, moduleId, {
+        status: 'passed',
+        passedAt: voteState.passedAt,
+        initiatorName: voteState.initiatorName,
+        restartDelay: config.restartDelay,
+        restartCommand: config.restartCommand,
+      }),
+    ]);
 
     console.log(`vote-restart: Vote passed! effectiveVotes=${effectiveVotes}, threshold=${threshold}, status changed to passed`);
 

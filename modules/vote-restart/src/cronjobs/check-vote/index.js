@@ -1,8 +1,11 @@
 import { data, takaro } from '@takaro/helpers';
 import {
   getVoteState,
+  getRestartPending,
   setVoteState,
   deleteVoteState,
+  setRestartPending,
+  deleteRestartPending,
   setCooldownUntil,
   getOnlineNonImmunePlayers,
   computeThreshold,
@@ -14,14 +17,18 @@ async function main() {
   const moduleId = mod.moduleId;
 
   const voteState = await getVoteState(gameServerId, moduleId);
-  if (!voteState) {
+  const restartPending = voteState?.status === 'passed'
+    ? voteState
+    : await getRestartPending(gameServerId, moduleId);
+
+  if (!voteState && !restartPending) {
     // No vote in progress — nothing to do
     return;
   }
 
-  console.log(`check-vote: evaluating vote status=${voteState.status}`);
+  console.log(`check-vote: evaluating vote status=${voteState?.status || restartPending?.status || 'none'}`);
 
-  if (voteState.status === 'active') {
+  if (voteState?.status === 'active') {
     const elapsed = (Date.now() - new Date(voteState.startedAt).getTime()) / 1000;
 
     // Check expiry
@@ -31,7 +38,10 @@ async function main() {
       // Set cooldown
       const cooldownUntil = new Date(Date.now() + config.cooldownDuration * 1000).toISOString();
       await setCooldownUntil(gameServerId, moduleId, cooldownUntil);
-      await deleteVoteState(gameServerId, moduleId);
+      await Promise.all([
+        deleteVoteState(gameServerId, moduleId),
+        deleteRestartPending(gameServerId, moduleId),
+      ]);
 
       await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
         message: `[Vote Restart] The restart vote started by ${voteState.initiatorName} has expired. A new vote can be started in ${config.cooldownDuration}s.`,
@@ -52,7 +62,16 @@ async function main() {
     if (effectiveVotes >= threshold) {
       voteState.status = 'passed';
       voteState.passedAt = new Date().toISOString();
-      await setVoteState(gameServerId, moduleId, voteState);
+      await Promise.all([
+        setVoteState(gameServerId, moduleId, voteState),
+        setRestartPending(gameServerId, moduleId, {
+          status: 'passed',
+          passedAt: voteState.passedAt,
+          initiatorName: voteState.initiatorName,
+          restartDelay: config.restartDelay,
+          restartCommand: config.restartCommand,
+        }),
+      ]);
 
       console.log(`check-vote: Vote passed! effectiveVotes=${effectiveVotes}, threshold=${threshold}, status changed to passed`);
 
@@ -61,10 +80,12 @@ async function main() {
         opts: {},
       });
     }
-  } else if (voteState.status === 'passed') {
-    const elapsedSincePassed = (Date.now() - new Date(voteState.passedAt).getTime()) / 1000;
+  } else if (restartPending) {
+    const delay = Number(restartPending.restartDelay ?? config.restartDelay) || 0;
+    const restartCommand = restartPending.restartCommand || config.restartCommand;
+    const elapsedSincePassed = (Date.now() - new Date(restartPending.passedAt).getTime()) / 1000;
 
-    if (elapsedSincePassed >= config.restartDelay) {
+    if (elapsedSincePassed >= delay) {
       console.log(`check-vote: restart delay elapsed (${Math.floor(elapsedSincePassed)}s), executing restart`);
 
       await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
@@ -74,12 +95,15 @@ async function main() {
 
       try {
         await takaro.gameserver.gameServerControllerExecuteCommand(gameServerId, {
-          command: config.restartCommand,
+          command: restartCommand,
         });
         console.log('check-vote: restart command executed successfully');
-        await deleteVoteState(gameServerId, moduleId);
+        await Promise.all([
+          deleteVoteState(gameServerId, moduleId),
+          deleteRestartPending(gameServerId, moduleId),
+        ]);
       } catch (cmdErr) {
-        console.error(`check-vote: failed to execute restart command "${config.restartCommand}": ${cmdErr}`);
+        console.error(`check-vote: failed to execute restart command "${restartCommand}": ${cmdErr}`);
 
         // Clean up vote state and set cooldown so the vote doesn't retry forever
         const cooldownUntil = new Date(Date.now() + config.cooldownDuration * 1000).toISOString();
@@ -89,7 +113,10 @@ async function main() {
           console.error('Failed to set cooldown', e);
         }
         try {
-          await deleteVoteState(gameServerId, moduleId);
+          await Promise.all([
+            deleteVoteState(gameServerId, moduleId),
+            deleteRestartPending(gameServerId, moduleId),
+          ]);
         } catch (e) {
           console.error('Failed to delete vote state', e);
         }

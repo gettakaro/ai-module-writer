@@ -17,6 +17,7 @@ export const BAN_KEY = 'minigames_ban';
 export const WORDLE_SESSION_KEY = 'minigames_session_wordle';
 export const HANGMAN_SESSION_KEY = 'minigames_session_hangman';
 export const HOTCOLD_SESSION_KEY = 'minigames_session_hotcold';
+export const BIG_SCORE_EVENT_NAME = 'minigames-big-score';
 
 const LIVE_ROUND_LOCK_TTL_MS = 2 * 60 * 1000;
 const PLAYER_AWARD_LOCK_TTL_MS = 30 * 1000;
@@ -364,7 +365,8 @@ export async function requirePlayable({ gameServerId, moduleId, pog, playerId })
     throw new TakaroUserError(formatBanMessage(ban));
   }
   if (checkPermission(pog, 'MINIGAMES_BANNED')) {
-    console.log(`minigames: ignoring stale MINIGAMES_BANNED marker for player=${playerId} because no active ban record exists`);
+    console.log(`minigames: blocked player=${playerId} via MINIGAMES_BANNED permission without an active ban variable`);
+    throw new TakaroUserError('You are banned from mini-games.');
   }
 }
 
@@ -455,6 +457,42 @@ export function getBoostMultiplier(pog) {
   return 1 + (tier * 0.25);
 }
 
+export async function emitBigScoreEvent({ gameServerId, moduleId, playerId, playerName, game, points, context }) {
+  const payload = {
+    eventName: BIG_SCORE_EVENT_NAME,
+    gameserverId: gameServerId,
+    moduleId,
+    actingModuleId: moduleId,
+    playerId,
+    meta: {
+      playerId,
+      playerName,
+      game,
+      points,
+      context: context || null,
+      emittedAt: new Date().toISOString(),
+    },
+  };
+
+  try {
+    if (takaro.event?.eventControllerCreate) {
+      await takaro.event.eventControllerCreate(payload);
+      console.log(`minigames: emitted ${BIG_SCORE_EVENT_NAME} player=${playerName} game=${game} points=${points}`);
+      return true;
+    }
+    if (takaro.axios?.post) {
+      await takaro.axios.post('/event', payload);
+      console.log(`minigames: emitted ${BIG_SCORE_EVENT_NAME} via axios fallback player=${playerName} game=${game} points=${points}`);
+      return true;
+    }
+    console.error(`minigames: could not emit ${BIG_SCORE_EVENT_NAME}; no event client available`);
+    return false;
+  } catch (err) {
+    console.error(`minigames: failed to emit ${BIG_SCORE_EVENT_NAME} for ${playerName}. Error: ${err}`);
+    return false;
+  }
+}
+
 export async function awardPoints({ gameServerId, moduleId, pog, playerId, playerName, config, game, basePoints, context }) {
   const awardLockKey = `${PLAYER_AWARD_LOCK_PREFIX}:${playerId}`;
   const awardLockToken = await acquireVariableLock({
@@ -509,12 +547,20 @@ export async function awardPoints({ gameServerId, moduleId, pog, playerId, playe
     }
 
     if (actualPoints >= (Number(config.bigScoreThreshold) || 500)) {
+      await emitBigScoreEvent({
+        gameServerId,
+        moduleId,
+        playerId,
+        playerName,
+        game,
+        points: actualPoints,
+        context,
+      });
       try {
         await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
           message: `🏆 BIG SCORE! ${playerName} earned ${actualPoints} points in ${getGameDisplayName(game)}${context ? ` (${context})` : ''}.`,
           opts: {},
         });
-        console.log('minigames: custom big-score events are not supported by the current Takaro API; sent chat announcement only');
       } catch (err) {
         console.error(`minigames: failed to broadcast big score for ${playerName}. Error: ${err}`);
       }
@@ -1316,29 +1362,45 @@ export async function settleLiveRound({ gameServerId, moduleId, player, pog, con
     return false;
   }
 
-  const claimed = await claimActiveRound(gameServerId, moduleId, round);
-  if (!claimed) {
-    console.log(`minigames: ${source} answer matched but round was already settled or replaced game=${round.game} player=${player.name}`);
+  const liveRoundLockToken = await acquireLiveRoundLock(gameServerId, moduleId);
+  if (!liveRoundLockToken) {
+    console.log(`minigames: ${source} could not acquire live round lock game=${round.game} player=${player.name}`);
     return false;
   }
 
-  const reward = await awardPoints({
-    gameServerId,
-    moduleId,
-    pog,
-    playerId: player.id,
-    playerName: player.name,
-    config,
-    game: round.game,
-    basePoints: getLiveRoundPoints(config, round.game),
-    context: `${source} win`,
-  });
-  await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-    message: `${gameEmoji(round.game)} ${player.name} won ${getGameDisplayName(round.game)}! +${reward.actualPoints} points${formatMultiplier(reward.multiplier)}. Answer: ${round.answer}`,
-    opts: {},
-  });
-  console.log(`minigames: live round settled game=${round.game} player=${player.name} source=${source} points=${reward.actualPoints}`);
-  return true;
+  try {
+    const currentRound = await getStoredActiveRound(gameServerId, moduleId);
+    if (!currentRound || !sameRound(currentRound, round)) {
+      console.log(`minigames: ${source} answer matched but round was already settled or replaced game=${round.game} player=${player.name}`);
+      return false;
+    }
+    if (new Date(currentRound.expiresAt).getTime() <= Date.now()) {
+      console.log(`minigames: ${source} answer matched but round expired before settlement game=${round.game} player=${player.name}`);
+      return false;
+    }
+
+    const reward = await awardPoints({
+      gameServerId,
+      moduleId,
+      pog,
+      playerId: player.id,
+      playerName: player.name,
+      config,
+      game: currentRound.game,
+      basePoints: getLiveRoundPoints(config, currentRound.game),
+      context: `${source} win`,
+    });
+
+    await clearActiveRound(gameServerId, moduleId);
+    await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
+      message: `${gameEmoji(currentRound.game)} ${player.name} won ${getGameDisplayName(currentRound.game)}! +${reward.actualPoints} points${formatMultiplier(reward.multiplier)}. Answer: ${currentRound.answer}`,
+      opts: {},
+    });
+    console.log(`minigames: live round settled game=${currentRound.game} player=${player.name} source=${source} points=${reward.actualPoints}`);
+    return true;
+  } finally {
+    await releaseLiveRoundLock(gameServerId, moduleId, liveRoundLockToken);
+  }
 }
 
 export function gameEmoji(game) {
@@ -1418,21 +1480,25 @@ export async function refreshLeaderboards(gameServerId, moduleId) {
   }
 
   const topPoints = [...enriched]
+    .filter((entry) => entry.stats.totalPoints > 0)
     .sort((a, b) => b.stats.totalPoints - a.stats.totalPoints)
     .slice(0, 10)
     .map((entry) => ({ playerId: entry.playerId, name: entry.name, value: entry.stats.totalPoints }));
 
   const topWordle = [...enriched]
+    .filter((entry) => entry.stats.perGame.wordle.wins > 0)
     .sort((a, b) => b.stats.perGame.wordle.wins - a.stats.perGame.wordle.wins)
     .slice(0, 10)
     .map((entry) => ({ playerId: entry.playerId, name: entry.name, value: entry.stats.perGame.wordle.wins }));
 
   const topHangman = [...enriched]
+    .filter((entry) => entry.stats.perGame.hangman.wins > 0)
     .sort((a, b) => b.stats.perGame.hangman.wins - a.stats.perGame.hangman.wins)
     .slice(0, 10)
     .map((entry) => ({ playerId: entry.playerId, name: entry.name, value: entry.stats.perGame.hangman.wins }));
 
   const topStreak = [...enriched]
+    .filter((entry) => entry.stats.streaks.wordle.best > 0)
     .sort((a, b) => b.stats.streaks.wordle.best - a.stats.streaks.wordle.best)
     .slice(0, 10)
     .map((entry) => ({ playerId: entry.playerId, name: entry.name, value: entry.stats.streaks.wordle.best }));
@@ -1480,6 +1546,33 @@ export async function findPlayerOnGameServerByName(gameServerId, name) {
   }
 
   return null;
+}
+
+export async function findPlayerByName(name, gameServerId) {
+  const wanted = String(name ?? '').trim();
+  if (!wanted) return null;
+
+  if (gameServerId) {
+    const onServer = await findPlayerOnGameServerByName(gameServerId, wanted);
+    if (onServer) return onServer;
+  }
+
+  try {
+    const playerSearch = await takaro.player.playerControllerSearch({
+      search: { name: [wanted] },
+    });
+    const found = playerSearch.data.data.find((entry) => String(entry.name || '').trim().toLowerCase() === wanted.toLowerCase());
+    if (!found) return null;
+    return {
+      id: found.id,
+      name: found.name || wanted,
+      pogId: null,
+      player: found,
+    };
+  } catch (err) {
+    console.error(`minigames: failed to resolve player by name=${wanted}. Error: ${err}`);
+    return null;
+  }
 }
 
 export function getBanMarkerRoleName(playerId, gameServerId) {
@@ -1553,8 +1646,8 @@ export async function removeBanMarkerRole({ roleId, playerId, gameServerId }) {
 
 export async function banPlayer({ gameServerId, moduleId, targetName, hours }) {
   const resolvedTarget = requireTargetName(targetName, 'Usage: /minigamesban <player> [hours]');
-  const target = await findPlayerOnGameServerByName(gameServerId, resolvedTarget);
-  if (!target) throw new TakaroUserError(`Player "${resolvedTarget}" not found on this game server.`);
+  const target = await findPlayerByName(resolvedTarget, gameServerId);
+  if (!target) throw new TakaroUserError(`Player "${resolvedTarget}" not found.`);
   const record = {};
   if (hours !== undefined && hours !== null && hours !== '') {
     const duration = Number(hours);
@@ -1569,8 +1662,8 @@ export async function banPlayer({ gameServerId, moduleId, targetName, hours }) {
 
 export async function unbanPlayer({ gameServerId, moduleId, targetName }) {
   const resolvedTarget = requireTargetName(targetName, 'Usage: /minigamesunban <player>');
-  const target = await findPlayerOnGameServerByName(gameServerId, resolvedTarget);
-  if (!target) throw new TakaroUserError(`Player "${resolvedTarget}" not found on this game server.`);
+  const target = await findPlayerByName(resolvedTarget, gameServerId);
+  if (!target) throw new TakaroUserError(`Player "${resolvedTarget}" not found.`);
   const existing = await readJsonVariable(gameServerId, moduleId, BAN_KEY, null, target.id);
   const removed = await deleteVariable(gameServerId, moduleId, BAN_KEY, target.id);
   await removeBanMarkerRole({ roleId: existing?.roleId, playerId: target.id, gameServerId });
@@ -1580,8 +1673,8 @@ export async function unbanPlayer({ gameServerId, moduleId, targetName }) {
 
 export async function resetPlayerStats({ gameServerId, moduleId, targetName }) {
   const resolvedTarget = requireTargetName(targetName, 'Usage: /minigamesresetstats <player>');
-  const target = await findPlayerOnGameServerByName(gameServerId, resolvedTarget);
-  if (!target) throw new TakaroUserError(`Player "${resolvedTarget}" not found on this game server.`);
+  const target = await findPlayerByName(resolvedTarget, gameServerId);
+  if (!target) throw new TakaroUserError(`Player "${resolvedTarget}" not found.`);
   const removedStats = await deleteVariable(gameServerId, moduleId, STATS_KEY, target.id);
   await deleteVariable(gameServerId, moduleId, DAILY_HISTORY_KEY, target.id);
   await deleteVariable(gameServerId, moduleId, WINDOW_KEY, target.id);

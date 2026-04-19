@@ -1,5 +1,5 @@
 import { data } from '@takaro/helpers';
-import { getDailyWindow, getPlayerStats, findPlayerOnGameServerByName, getPlayerName, requirePlayable, normalizeOptionalStringArg } from './minigames-helpers.js';
+import { getDailyWindow, getPlayerStats, findPlayerByName, getPlayerName, requirePlayable, normalizeOptionalStringArg } from './minigames-helpers.js';
 
 async function main() {
   const { gameServerId, player, pog, module: mod, arguments: args } = data;
@@ -10,9 +10,9 @@ async function main() {
   let targetName = player.name;
   const requestedPlayer = normalizeOptionalStringArg(args.player);
   if (requestedPlayer) {
-    const found = await findPlayerOnGameServerByName(gameServerId, requestedPlayer);
+    const found = await findPlayerByName(requestedPlayer, gameServerId);
     if (!found) {
-      await pog.pm(`Player "${requestedPlayer}" not found on this game server.`);
+      await pog.pm(`Player "${requestedPlayer}" not found.`);
       return;
     }
     targetId = found.id;

@@ -192,6 +192,7 @@ describe('minigames: daily puzzles and wordle scoring', () => {
     assert.equal(history.days[puzzleDate()].perGame.wordle.wins, 1);
 
     let foundBigScoreAnnouncement = false;
+    let foundBigScoreEvent = false;
     for (let attempt = 0; attempt < 10; attempt++) {
       const recentEvents = await client.event.eventControllerSearch({
         filters: {
@@ -208,10 +209,18 @@ describe('minigames: daily puzzles and wordle scoring', () => {
         const meta = entry.meta as { msg?: string } | undefined;
         return String(entry.eventName) === 'chat-message' && String(meta?.msg || '').includes('BIG SCORE!');
       });
-      if (foundBigScoreAnnouncement) break;
+      foundBigScoreEvent = recentEvents.data.data.some((entry) => {
+        const meta = entry.meta as { playerId?: string; points?: number; game?: string } | undefined;
+        return String(entry.eventName) === 'minigames-big-score'
+          && meta?.playerId === ctx.players[1].playerId
+          && meta?.game === 'wordle'
+          && Number(meta?.points) === 150;
+      });
+      if (foundBigScoreAnnouncement && foundBigScoreEvent) break;
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
     assert.equal(foundBigScoreAnnouncement, true, 'expected a big-score chat announcement event');
+    assert.equal(foundBigScoreEvent, true, 'expected a machine-readable minigames-big-score event');
 
     const pogSearch = await client.playerOnGameserver.playerOnGameServerControllerSearch({
       filters: { gameServerId: [ctx.gameServer.id], playerId: [ctx.players[1].playerId] },
@@ -322,6 +331,32 @@ describe('minigames: daily puzzles and wordle scoring', () => {
     assert.equal(statsMeta?.result?.success, true, 'minigamestats should succeed without args');
     assert.ok(statsLogs.some((msg) => msg.includes('minigames: stats player=')), `expected stats log, got ${JSON.stringify(statsLogs)}`);
     assert.ok(statsLogs.some((msg) => msg.includes('Total points:')), `expected stats content in logs, got ${JSON.stringify(statsLogs)}`);
+  });
+
+  it('reports helpful lookup and argument errors for player, help, and leaderboard branches', async () => {
+    const missingStatsEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamestats definitely-not-a-player`);
+    const missingStatsMeta = missingStatsEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const missingStatsLogs = (missingStatsMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(missingStatsMeta?.result?.success, true, 'minigamestats missing-player branch should return a friendly PM');
+    assert.ok(missingStatsLogs.some((msg) => msg.includes('Player "definitely-not-a-player" not found.')), `expected missing-player message, got ${JSON.stringify(missingStatsLogs)}`);
+
+    const helpTopicEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}minigames reactionrace`);
+    const helpTopicMeta = helpTopicEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const helpTopicLogs = (helpTopicMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(helpTopicMeta?.result?.success, true, 'game-specific help should succeed');
+    assert.ok(helpTopicLogs.some((msg) => msg.includes('type the token directly in chat')), `expected reactionrace help branch, got ${JSON.stringify(helpTopicLogs)}`);
+
+    const unknownHelpEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}minigames mysterygame`);
+    const unknownHelpMeta = unknownHelpEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const unknownHelpLogs = (unknownHelpMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(unknownHelpMeta?.result?.success, true, 'unknown help topics should still respond');
+    assert.ok(unknownHelpLogs.some((msg) => msg.includes('Unknown game "mysterygame"')), `expected unknown-game message, got ${JSON.stringify(unknownHelpLogs)}`);
+
+    const invalidLeaderboardEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamesleaderboard bananas`);
+    const invalidLeaderboardMeta = invalidLeaderboardEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const invalidLeaderboardLogs = (invalidLeaderboardMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(invalidLeaderboardMeta?.result?.success, false, 'invalid leaderboard categories should fail');
+    assert.ok(invalidLeaderboardLogs.some((msg) => msg.includes('Category must be one of: points, wordle, hangman, streak.')), `expected invalid-category message, got ${JSON.stringify(invalidLeaderboardLogs)}`);
   });
 });
 
