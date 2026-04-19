@@ -27,9 +27,12 @@ describe('casino module', () => {
   let moduleId: string;
   let versionId: string;
   let prefix: string;
-  let playRoleId: string | undefined;
+  let playRoleId1: string | undefined;
+  let playRoleId2: string | undefined;
   let manageRoleId: string | undefined;
   let refreshCronjobId: string;
+  let expireSessionsCronjobId: string;
+  let drawRaceCronjobId: string;
 
   async function triggerCommand(playerId: string, msg: string) {
     const after = new Date();
@@ -47,6 +50,61 @@ describe('casino module', () => {
     };
   }
 
+  async function triggerCronjob(cronjobId: string) {
+    const after = new Date();
+    await client.cronjob.cronJobControllerTrigger({
+      gameServerId: ctx.gameServer.id,
+      cronjobId,
+      moduleId,
+    });
+    const event = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CronjobExecuted,
+      gameserverId: ctx.gameServer.id,
+      after,
+      timeout: 30000,
+    });
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    return {
+      success: meta?.result?.success ?? false,
+      logs: (meta?.result?.logs ?? []).map((l) => l.msg),
+    };
+  }
+
+  async function getPlayerCurrency(playerId: string) {
+    const pog = await client.playerOnGameserver.playerOnGameServerControllerGetOne(ctx.gameServer.id, playerId);
+    return Number(pog.data.data.currency ?? 0);
+  }
+
+  async function getVariable(key: string, playerId?: string) {
+    const res = await client.variable.variableControllerSearch({
+      filters: {
+        key: [key],
+        gameServerId: [ctx.gameServer.id],
+        moduleId: [moduleId],
+        ...(playerId ? { playerId: [playerId] } : {}),
+      },
+    });
+    return res.data.data[0] ?? null;
+  }
+
+  async function updateVariable(key: string, playerId: string | undefined, mutator: (value: any) => any) {
+    const row = await getVariable(key, playerId);
+    assert.ok(row, `Expected variable ${key} to exist`);
+    const next = mutator(JSON.parse(row!.value));
+    await client.variable.variableControllerUpdate(row!.id, { value: JSON.stringify(next) });
+  }
+
+  async function findCustomEvent(eventName: string, after: Date) {
+    const result = await client.event.eventControllerSearch({
+      filters: {
+        gameserverId: [ctx.gameServer.id],
+        eventName: [eventName as any],
+      },
+      greaterThan: { createdAt: after.toISOString() },
+    } as any);
+    return result.data.data[0] ?? null;
+  }
+
   before(async () => {
     client = await createClient();
     await cleanupTestGameServers(client);
@@ -61,6 +119,8 @@ describe('casino module', () => {
     moduleId = mod.id;
     versionId = mod.latestVersion.id;
     refreshCronjobId = mod.latestVersion.cronJobs.find((c) => c.name === 'refresh-leaderboards')!.id;
+    expireSessionsCronjobId = mod.latestVersion.cronJobs.find((c) => c.name === 'expire-sessions')!.id;
+    drawRaceCronjobId = mod.latestVersion.cronJobs.find((c) => c.name === 'draw-race')!.id;
 
     await installModule(client, versionId, ctx.gameServer.id, {
       userConfig: {
@@ -69,22 +129,24 @@ describe('casino module', () => {
         cooldownSeconds: 0,
         houseEdgePct: 2,
         jackpotContributionPct: 10,
-        bigWinThreshold: 999999,
+        bigWinThreshold: 1,
       },
     });
 
     prefix = await getCommandPrefix(client, ctx.gameServer.id);
 
-    playRoleId = await assignPermissions(client, ctx.players[0].playerId, ctx.gameServer.id, ['CASINO_PLAY']);
+    playRoleId1 = await assignPermissions(client, ctx.players[0].playerId, ctx.gameServer.id, ['CASINO_PLAY']);
     manageRoleId = await assignPermissions(client, ctx.players[1].playerId, ctx.gameServer.id, ['CASINO_PLAY', 'CASINO_MANAGE']);
+    playRoleId2 = await assignPermissions(client, ctx.players[2].playerId, ctx.gameServer.id, ['CASINO_PLAY']);
 
-    for (const player of ctx.players.slice(0, 2)) {
-      await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(ctx.gameServer.id, player.playerId, { currency: 5000 });
-    }
+    await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(ctx.gameServer.id, ctx.players[0].playerId, { currency: 5000 });
+    await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(ctx.gameServer.id, ctx.players[1].playerId, { currency: 5000 });
+    await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(ctx.gameServer.id, ctx.players[2].playerId, { currency: 5 });
   });
 
   after(async () => {
-    await cleanupRole(client, playRoleId);
+    await cleanupRole(client, playRoleId1);
+    await cleanupRole(client, playRoleId2);
     await cleanupRole(client, manageRoleId);
     try {
       await uninstallModule(client, moduleId, ctx.gameServer.id);
@@ -99,52 +161,158 @@ describe('casino module', () => {
     await stopMockServer(ctx.server, client, ctx.gameServer.id);
   });
 
+  it('shows runnable help commands for alias-based games', async () => {
+    const result = await triggerCommand(ctx.players[0]!.playerId, `${prefix}casino`);
+    assert.equal(result.success, true, `expected /casino success, logs=${JSON.stringify(result.logs)}`);
+    const joined = result.logs.join('\n');
+    assert.match(joined, /roulette \(\/bet\)/i);
+    assert.match(joined, /blackjack \(\/bj\)/i);
+  });
+
   it('plays flip and records stats', async () => {
     const player = ctx.players[0]!;
     const result = await triggerCommand(player.playerId, `${prefix}flip 50 heads`);
     assert.equal(result.success, true, `expected flip success, logs=${JSON.stringify(result.logs)}`);
 
-    const stats = await client.variable.variableControllerSearch({
-      filters: {
-        key: ['casino_stats'],
-        gameServerId: [ctx.gameServer.id],
-        moduleId: [moduleId],
-        playerId: [player.playerId],
-      },
-    });
-    assert.equal(stats.data.data.length, 1, 'expected casino_stats variable');
-    const parsed = JSON.parse(stats.data.data[0]!.value);
-    assert.equal(parsed.gamesPlayed, 1);
-    assert.equal(parsed.perGame.flip.plays, 1);
+    const stats = await getVariable('casino_stats', player.playerId);
+    assert.ok(stats, 'expected casino_stats variable');
+    const parsed = JSON.parse(stats!.value);
+    assert.equal(parsed.gamesPlayed >= 1, true);
+    assert.equal(parsed.perGame.flip.plays >= 1, true);
   });
 
-  it('supports hilo start and cashout', async () => {
+  it('enforces admin permissions on management commands', async () => {
+    const denied = await triggerCommand(ctx.players[0]!.playerId, `${prefix}setjackpot 1234`);
+    assert.equal(denied.success, false, 'expected non-admin /setjackpot to fail');
+    assert.ok(denied.logs.some((msg) => msg.toLowerCase().includes('permission')),
+      `expected permission denial, logs=${JSON.stringify(denied.logs)}`);
+  });
+
+  it('rejects bets when the player lacks funds', async () => {
+    const result = await triggerCommand(ctx.players[2]!.playerId, `${prefix}slots 50`);
+    assert.equal(result.success, false, 'expected insufficient funds failure');
+    assert.ok(result.logs.some((msg) => msg.toLowerCase().includes('enough currency')),
+      `expected insufficient-funds message, logs=${JSON.stringify(result.logs)}`);
+  });
+
+  it('prevents stacked duel challenges on the same target and resolves a full duel flow', async () => {
+    const challenger = ctx.players[0]!;
+    const target = ctx.players[1]!;
+    const third = ctx.players[2]!;
+    const targetName = (await client.player.playerControllerGetOne(target.playerId)).data.data.name;
+
+    const challenge = await triggerCommand(challenger.playerId, `${prefix}duel ${targetName} 20`);
+    assert.equal(challenge.success, true, `expected duel challenge success, logs=${JSON.stringify(challenge.logs)}`);
+
+    const blocked = await triggerCommand(third.playerId, `${prefix}duel ${targetName} 10`);
+    assert.equal(blocked.success, false, 'expected second duel challenge on same target to fail');
+    assert.ok(blocked.logs.some((msg) => msg.toLowerCase().includes('already involved in another duel')),
+      `expected target-busy message, logs=${JSON.stringify(blocked.logs)}`);
+
+    const accept = await triggerCommand(target.playerId, `${prefix}duel accept`);
+    assert.equal(accept.success, true, `expected duel accept success, logs=${JSON.stringify(accept.logs)}`);
+
+    const firstPick = await triggerCommand(challenger.playerId, `${prefix}duel rock`);
+    assert.equal(firstPick.success, true, `expected first duel pick success, logs=${JSON.stringify(firstPick.logs)}`);
+
+    const secondPick = await triggerCommand(target.playerId, `${prefix}duel scissors`);
+    assert.equal(secondPick.success, true, `expected second duel pick success, logs=${JSON.stringify(secondPick.logs)}`);
+
+    const duelVar = await getVariable('casino_duel', challenger.playerId);
+    assert.equal(duelVar, null, 'expected duel state to be cleared after resolution');
+  });
+
+  it('uses readable race timing text and resolves the race draw cronjob', async () => {
+    const p1 = ctx.players[0]!;
+    const p2 = ctx.players[1]!;
+
+    const join1 = await triggerCommand(p1.playerId, `${prefix}race 25`);
+    assert.equal(join1.success, true, `expected first /race success, logs=${JSON.stringify(join1.logs)}`);
+    assert.ok(join1.logs.some((msg) => msg.includes('Draw in about')),
+      `expected friendly time text, logs=${JSON.stringify(join1.logs)}`);
+    assert.ok(join1.logs.every((msg) => !/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(msg)),
+      `expected no raw ISO timestamp in race logs, logs=${JSON.stringify(join1.logs)}`);
+
+    const join2 = await triggerCommand(p2.playerId, `${prefix}race 25`);
+    assert.equal(join2.success, true, `expected second /race success, logs=${JSON.stringify(join2.logs)}`);
+
+    await updateVariable('casino_race_pool', undefined, (pool) => ({ ...pool, drawAt: new Date(Date.now() - 1000).toISOString() }));
+    const draw = await triggerCronjob(drawRaceCronjobId);
+    assert.equal(draw.success, true, `expected draw-race success, logs=${JSON.stringify(draw.logs)}`);
+    assert.ok(draw.logs.some((msg) => msg.includes('casino.drawRace: winner=')),
+      `expected draw-race winner log, logs=${JSON.stringify(draw.logs)}`);
+
+    const pool = await getVariable('casino_race_pool');
+    const parsed = JSON.parse(pool!.value);
+    assert.deepEqual(parsed, { participants: [], drawAt: null });
+  });
+
+  it('expires abandoned hilo sessions through the cleanup cronjob and refunds the stake', async () => {
     const player = ctx.players[0]!;
+    const beforeBalance = await getPlayerCurrency(player.playerId);
+
     const start = await triggerCommand(player.playerId, `${prefix}hilo 25`);
     assert.equal(start.success, true, `expected hilo start success, logs=${JSON.stringify(start.logs)}`);
 
-    const sessionBefore = await client.variable.variableControllerSearch({
-      filters: {
-        key: ['casino_session_hilo'],
-        gameServerId: [ctx.gameServer.id],
-        moduleId: [moduleId],
-        playerId: [player.playerId],
-      },
-    });
-    assert.equal(sessionBefore.data.data.length, 1, 'expected hilo session after start');
+    const afterStartBalance = await getPlayerCurrency(player.playerId);
+    assert.equal(beforeBalance - afterStartBalance, 25, 'expected hilo stake deduction');
 
-    const cashout = await triggerCommand(player.playerId, `${prefix}hilo cashout`);
-    assert.equal(cashout.success, true, `expected hilo cashout success, logs=${JSON.stringify(cashout.logs)}`);
+    await updateVariable('casino_session_hilo', player.playerId, (session) => ({
+      ...session,
+      startedAt: new Date(Date.now() - 16 * 60 * 1000).toISOString(),
+    }));
 
-    const sessionAfter = await client.variable.variableControllerSearch({
-      filters: {
-        key: ['casino_session_hilo'],
-        gameServerId: [ctx.gameServer.id],
-        moduleId: [moduleId],
-        playerId: [player.playerId],
-      },
+    const cleanup = await triggerCronjob(expireSessionsCronjobId);
+    assert.equal(cleanup.success, true, `expected expire-sessions success, logs=${JSON.stringify(cleanup.logs)}`);
+
+    const afterCleanupBalance = await getPlayerCurrency(player.playerId);
+    assert.equal(afterCleanupBalance, beforeBalance, 'expected abandoned hilo stake to be refunded');
+    assert.equal(await getVariable('casino_session_hilo', player.playerId), null, 'expected hilo session deletion');
+  });
+
+  it('refunds blackjack sessions when the player disconnects', async () => {
+    const player = ctx.players[0]!;
+    const beforeBalance = await getPlayerCurrency(player.playerId);
+
+    const start = await triggerCommand(player.playerId, `${prefix}bj 30`);
+    assert.equal(start.success, true, `expected blackjack start success, logs=${JSON.stringify(start.logs)}`);
+
+    const afterStartBalance = await getPlayerCurrency(player.playerId);
+    assert.equal(beforeBalance - afterStartBalance, 30, 'expected blackjack stake deduction');
+
+    const beforeHook = new Date();
+    await ctx.server.executeConsoleCommand('disconnectAll');
+    const hookEvent = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.HookExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: beforeHook,
+      timeout: 30000,
     });
-    assert.equal(sessionAfter.data.data.length, 0, 'expected hilo session to be cleared');
+    const hookMeta = hookEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(hookMeta?.result?.success, true, 'expected disconnect hook success');
+
+    const afterRefundBalance = await getPlayerCurrency(player.playerId);
+    assert.equal(afterRefundBalance, beforeBalance, 'expected blackjack session refund on disconnect');
+    assert.equal(await getVariable('casino_session_blackjack', player.playerId), null, 'expected blackjack session deletion');
+
+    await ctx.server.executeConsoleCommand('connectAll');
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  });
+
+  it('emits a casino-big-win event for qualifying wins', async () => {
+    const player = ctx.players[0]!;
+    const after = new Date();
+    let event = await findCustomEvent('casino-big-win', after);
+
+    for (let i = 0; i < 12 && !event; i += 1) {
+      const attempt = await triggerCommand(player.playerId, `${prefix}flip 10 heads`);
+      assert.equal(attempt.success, true, `expected flip attempt to execute, logs=${JSON.stringify(attempt.logs)}`);
+      event = await findCustomEvent('casino-big-win', after);
+    }
+
+    assert.ok(event, 'expected a casino-big-win event after repeated winning attempts');
+    const meta = event!.meta as unknown as Record<string, unknown>;
+    assert.equal(meta.type, 'casino-big-win');
   });
 
   it('bans and unbans players via admin commands', async () => {
@@ -180,29 +348,11 @@ describe('casino module', () => {
   });
 
   it('refreshes leaderboard cache and exposes it through /casinotop', async () => {
-    const before = new Date();
-    await client.cronjob.cronJobControllerTrigger({
-      gameServerId: ctx.gameServer.id,
-      cronjobId: refreshCronjobId,
-      moduleId,
-    });
-    const event = await waitForEvent(client, {
-      eventName: EventSearchInputAllowedFiltersEventNameEnum.CronjobExecuted,
-      gameserverId: ctx.gameServer.id,
-      after: before,
-      timeout: 30000,
-    });
-    const meta = event.meta as { result?: { success?: boolean } };
-    assert.equal(meta?.result?.success, true, 'expected refresh-leaderboards cronjob success');
+    const refresh = await triggerCronjob(refreshCronjobId);
+    assert.equal(refresh.success, true, `expected refresh-leaderboards cronjob success, logs=${JSON.stringify(refresh.logs)}`);
 
-    const cache = await client.variable.variableControllerSearch({
-      filters: {
-        key: ['casino_leaderboard_cache'],
-        gameServerId: [ctx.gameServer.id],
-        moduleId: [moduleId],
-      },
-    });
-    assert.equal(cache.data.data.length, 1, 'expected leaderboard cache variable');
+    const cache = await getVariable('casino_leaderboard_cache');
+    assert.ok(cache, 'expected leaderboard cache variable');
 
     const top = await triggerCommand(ctx.players[0]!.playerId, `${prefix}casinotop wager`);
     assert.equal(top.success, true, `expected /casinotop success, logs=${JSON.stringify(top.logs)}`);

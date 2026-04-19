@@ -1,5 +1,5 @@
 import { data, TakaroUserError } from '@takaro/helpers';
-import { requireManagePermission, resolvePlayerByName, setBan } from './casino-helpers.js';
+import { requireManagePermission, resolvePlayerByName, setBan, formatUtcTimestamp } from './casino-helpers.js';
 
 async function main() {
   const { pog, gameServerId, arguments: args, module: mod } = data;
@@ -11,7 +11,7 @@ async function main() {
   const hours = Number(args.hours ?? 0);
   const expiresAt = hours > 0 ? new Date(Date.now() + (hours * 60 * 60 * 1000)).toISOString() : null;
   await setBan(gameServerId, mod.moduleId, target.playerId, { expiresAt });
-  await pog.pm(`🚫 ${target.player?.name ?? targetName} has been banned from the casino${expiresAt ? ` until ${expiresAt}` : ' permanently'}.`);
+  await pog.pm(`🚫 ${target.player?.name ?? targetName} has been banned from the casino${expiresAt ? ` until ${formatUtcTimestamp(expiresAt)}` : ' permanently'}.`);
 }
 
 await main();

@@ -1,6 +1,7 @@
 import { takaro, checkPermission } from '@takaro/helpers';
 
 export const VOTE_STATE_KEY = 'vr_vote_state';
+export const RESTART_STATE_KEY = 'vr_restart_state';
 export const COOLDOWN_KEY = 'vr_cooldown_until';
 
 // ── Generic variable CRUD ─────────────────────────────────────────────────────
@@ -73,6 +74,27 @@ export async function setVoteState(gameServerId, moduleId, state) {
 
 export async function deleteVoteState(gameServerId, moduleId) {
   await removeVariable(gameServerId, moduleId, VOTE_STATE_KEY);
+}
+
+export async function getRestartState(gameServerId, moduleId) {
+  const variable = await findVariable(gameServerId, moduleId, RESTART_STATE_KEY);
+  if (!variable) return null;
+  try {
+    const parsed = JSON.parse(variable.value);
+    if (!parsed?.passedAt || isNaN(new Date(parsed.passedAt).getTime())) return null;
+    return parsed;
+  } catch (err) {
+    console.error(`vote-helpers: failed to parse restartState: ${err}`);
+    return null;
+  }
+}
+
+export async function setRestartState(gameServerId, moduleId, state) {
+  await writeVariable(gameServerId, moduleId, RESTART_STATE_KEY, state);
+}
+
+export async function deleteRestartState(gameServerId, moduleId) {
+  await removeVariable(gameServerId, moduleId, RESTART_STATE_KEY);
 }
 
 // ── Cooldown ──────────────────────────────────────────────────────────────────

@@ -10,6 +10,7 @@ export const KEY_DUEL = 'casino_duel';
 export const KEY_HILO_SESSION = 'casino_session_hilo';
 export const KEY_BLACKJACK_SESSION = 'casino_session_blackjack';
 export const KEY_WINDOW_PREFIX = 'casino_window';
+export const KEY_LOCK_PREFIX = 'casino_lock';
 
 export const DEFAULT_STATS = {
   wagered: 0,
@@ -34,6 +35,37 @@ export function formatCurrency(value) {
 
 export function nowIso() {
   return new Date().toISOString();
+}
+
+export function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function formatUtcTimestamp(value) {
+  if (!value) return 'unknown time';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')} ${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')} UTC`;
+}
+
+export function formatDuration(ms) {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts = [];
+  if (hours) parts.push(`${hours}h`);
+  if (minutes) parts.push(`${minutes}m`);
+  if (seconds || parts.length === 0) parts.push(`${seconds}s`);
+  return parts.slice(0, 2).join(' ');
+}
+
+export function formatFutureTime(value) {
+  const ts = new Date(value).getTime();
+  if (Number.isNaN(ts)) return String(value);
+  const diff = ts - Date.now();
+  if (diff <= 0) return `now (${formatUtcTimestamp(value)})`;
+  return `${formatDuration(diff)} (${formatUtcTimestamp(value)})`;
 }
 
 export function getDefaultConfig(userConfig = {}) {
@@ -198,6 +230,76 @@ export async function deleteVariable(gameServerId, moduleId, key, playerId) {
   }
 }
 
+export function getLockKey(scope) {
+  return `${KEY_LOCK_PREFIX}:${scope}`;
+}
+
+export async function acquireLock(gameServerId, moduleId, scope, { ttlMs = 15000, timeoutMs = 10000, retryMs = 100 } = {}) {
+  const key = getLockKey(scope);
+  const owner = `${nowIso()}:${Math.random().toString(36).slice(2)}`;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+    try {
+      await takaro.variable.variableControllerCreate({
+        key,
+        value: JSON.stringify({ owner, expiresAt }),
+        gameServerId,
+        moduleId,
+      });
+      return {
+        owner,
+        key,
+        async release() {
+          const current = await findVariable(gameServerId, moduleId, key);
+          if (!current) return;
+          try {
+            const value = JSON.parse(current.value);
+            if (value?.owner === owner) {
+              await takaro.variable.variableControllerDelete(current.id);
+            }
+          } catch {
+            await takaro.variable.variableControllerDelete(current.id);
+          }
+        },
+      };
+    } catch (err) {
+      const existing = await findVariable(gameServerId, moduleId, key);
+      if (existing) {
+        try {
+          const parsed = JSON.parse(existing.value);
+          if (parsed?.expiresAt && new Date(parsed.expiresAt).getTime() <= Date.now()) {
+            await takaro.variable.variableControllerDelete(existing.id);
+            continue;
+          }
+        } catch {
+          await takaro.variable.variableControllerDelete(existing.id);
+          continue;
+        }
+      }
+      await sleep(retryMs);
+    }
+  }
+
+  throw new Error(`Timed out acquiring casino lock ${scope}`);
+}
+
+export async function withCasinoLocks(gameServerId, moduleId, scopes, fn, options) {
+  const uniqueScopes = [...new Set(scopes.filter(Boolean))].sort();
+  const locks = [];
+  try {
+    for (const scope of uniqueScopes) {
+      locks.push(await acquireLock(gameServerId, moduleId, scope, options));
+    }
+    return await fn();
+  } finally {
+    for (const lock of locks.reverse()) {
+      await lock.release();
+    }
+  }
+}
+
 export async function readJsonVariable(gameServerId, moduleId, key, playerId, fallback) {
   const existing = await findVariable(gameServerId, moduleId, key, playerId);
   if (!existing) return fallback;
@@ -247,6 +349,19 @@ export async function setJackpot(gameServerId, moduleId, jackpot) {
   });
 }
 
+export async function claimJackpot(gameServerId, moduleId, playerName, game) {
+  return await withCasinoLocks(gameServerId, moduleId, ['jackpot'], async () => {
+    const jackpot = await getJackpot(gameServerId, moduleId);
+    const payout = roundCurrency(jackpot.amount);
+    jackpot.amount = 0;
+    jackpot.lastWinner = playerName;
+    jackpot.lastWinAt = nowIso();
+    jackpot.lastWinGame = game;
+    await setJackpot(gameServerId, moduleId, jackpot);
+    return { payout, jackpot };
+  });
+}
+
 export async function getLeaderboardCache(gameServerId, moduleId) {
   return await readJsonVariable(gameServerId, moduleId, KEY_LEADERBOARD, undefined, {
     topWager: [],
@@ -270,6 +385,17 @@ export async function getRacePool(gameServerId, moduleId) {
 
 export async function setRacePool(gameServerId, moduleId, data) {
   await writeVariable(gameServerId, moduleId, KEY_RACE_POOL, data);
+}
+
+export async function mutateRacePool(gameServerId, moduleId, mutator) {
+  return await withCasinoLocks(gameServerId, moduleId, ['race-pool'], async () => {
+    const pool = await getRacePool(gameServerId, moduleId);
+    const next = await mutator(pool);
+    if (next !== undefined) {
+      await setRacePool(gameServerId, moduleId, next);
+    }
+    return next;
+  });
 }
 
 export async function getPlayerSession(gameServerId, moduleId, key, playerId) {
@@ -315,7 +441,7 @@ export async function ensurePlayerNotBanned(gameServerId, moduleId, playerId) {
     await clearBan(gameServerId, moduleId, playerId);
     return;
   }
-  const until = ban.expiresAt ? ` until ${ban.expiresAt}` : '';
+  const until = ban.expiresAt ? ` until ${formatUtcTimestamp(ban.expiresAt)}` : '';
   throw new TakaroUserError(`You are banned from the casino${until}.`);
 }
 
@@ -347,135 +473,174 @@ export async function getPlayerBalance(gameServerId, playerId) {
   return Number(pog.currency ?? 0);
 }
 
-export async function maybeAnnounceBigWin({ gameServerId, playerName, game, net, config, jackpotWin = false }) {
-  if (jackpotWin || net >= config.bigWinThreshold) {
-    const prefix = jackpotWin ? '💥 JACKPOT!' : '🎉 BIG WIN!';
-    try {
-      await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-        message: `${prefix} ${playerName} won ${formatCurrency(net)} on ${game}!`,
-        opts: {},
-      });
-    } catch (err) {
-      console.error(`casino-helpers: failed to announce big win for ${playerName}: ${err}`);
-    }
-  }
-}
+export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, playerName, game, net, config, jackpotWin = false, payout = 0, betAmount = 0 }) {
+  if (!(jackpotWin || net >= config.bigWinThreshold)) return;
 
-export async function placeBet({ gameServerId, moduleId, pog, player, config, game, amount }) {
-  requirePlayPermission(pog);
-  await ensurePlayerNotBanned(gameServerId, moduleId, player.id);
-  if (!getGameEnabled(config, game)) {
-    throw new TakaroUserError(`The ${game} game is disabled on this server.`);
-  }
+  const prefix = jackpotWin ? '💥 JACKPOT!' : '🎉 BIG WIN!';
+  const meta = {
+    type: 'casino-big-win',
+    jackpotWin,
+    playerName,
+    game,
+    net: roundCurrency(net),
+    payout: roundCurrency(payout),
+    betAmount: roundCurrency(betAmount),
+    threshold: roundCurrency(config.bigWinThreshold),
+    occurredAt: nowIso(),
+  };
 
-  const vipTier = getVipTier(pog);
-  const vipMultiplier = getVipMultiplier(vipTier);
-  const betAmount = validateBetAmount(amount, config, vipTier);
-
-  const cooldown = await readJsonVariable(gameServerId, moduleId, KEY_COOLDOWN, player.id, null);
-  const cooldownUntil = cooldown?.until ? new Date(cooldown.until).getTime() : 0;
-  if (cooldownUntil > Date.now()) {
-    const seconds = Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 1000));
-    throw new TakaroUserError(`Slow down — you can bet again in ${seconds}s.`);
-  }
-
-  const windowData = await getWindowData(gameServerId, moduleId, player.id, config);
-  if (config.wagerCap > 0) {
-    const wagerCap = Math.floor(config.wagerCap * vipMultiplier);
-    if (windowData.wagered + betAmount > wagerCap) {
-      throw new TakaroUserError(`That bet would exceed your ${config.capWindow} wager cap of ${formatCurrency(wagerCap)}.`);
-    }
-  }
-  if (config.lossCap > 0) {
-    const lossCap = Math.floor(config.lossCap * vipMultiplier);
-    if (windowData.lost >= lossCap) {
-      throw new TakaroUserError(`You already reached your ${config.capWindow} loss cap of ${formatCurrency(lossCap)}.`);
-    }
+  try {
+    await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
+      message: `${prefix} ${playerName} won ${formatCurrency(net)} on ${game}!`,
+      opts: {},
+    });
+  } catch (err) {
+    console.error(`casino-helpers: failed to announce big win for ${playerName}: ${err}`);
   }
 
   try {
-    await takaro.playerOnGameserver.playerOnGameServerControllerDeductCurrency(gameServerId, player.id, {
-      currency: betAmount,
+    await takaro.event.eventControllerCreate({
+      eventName: 'casino-big-win',
+      gameserverId: gameServerId,
+      moduleId,
+      playerId,
+      meta,
     });
   } catch (err) {
-    console.error(`casino-helpers: placeBet deduction failed for ${player.name}: ${err}`);
-    throw new TakaroUserError('You do not have enough currency for that bet.');
+    console.error(`casino-helpers: failed to emit casino-big-win for ${playerName}: ${err}`);
   }
-
-  windowData.wagered += betAmount;
-  await setWindowData(gameServerId, moduleId, player.id, windowData.windowKey, windowData);
-
-  if (config.cooldownSeconds > 0) {
-    await writeVariable(gameServerId, moduleId, KEY_COOLDOWN, { until: new Date(Date.now() + (config.cooldownSeconds * 1000)).toISOString() }, player.id);
-  }
-
-  return {
-    amount: betAmount,
-    vipTier,
-    vipMultiplier,
-    edgeFraction: getEffectiveEdgeFraction(config, vipTier),
-    windowKey: windowData.windowKey,
-  };
 }
 
-export async function settle({ gameServerId, moduleId, player, config, game, betAmount, payout, jackpotWin = false }) {
-  const safeBet = roundCurrency(betAmount);
-  const safePayout = roundCurrency(payout);
+export async function placeBet({ gameServerId, moduleId, pog, player, config, game, amount, skipLock = false }) {
+  const run = async () => {
+    requirePlayPermission(pog);
+    await ensurePlayerNotBanned(gameServerId, moduleId, player.id);
+    if (!getGameEnabled(config, game)) {
+      throw new TakaroUserError(`The ${game} game is disabled on this server.`);
+    }
 
-  if (safePayout > 0) {
-    await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, player.id, {
-      currency: safePayout,
-    });
-  }
+    const vipTier = getVipTier(pog);
+    const vipMultiplier = getVipMultiplier(vipTier);
+    const betAmount = validateBetAmount(amount, config, vipTier);
 
-  const net = safePayout - safeBet;
-  const stats = await getPlayerStats(gameServerId, moduleId, player.id);
-  const currentGame = stats.perGame[game] ?? { wagered: 0, won: 0, plays: 0 };
-  currentGame.wagered += safeBet;
-  currentGame.won += safePayout;
-  currentGame.plays += 1;
-  stats.perGame[game] = currentGame;
-  stats.wagered += safeBet;
-  stats.won += safePayout;
-  stats.net += net;
-  stats.gamesPlayed += 1;
-  if (safePayout > Number(stats.biggestWin?.amount ?? 0)) {
-    stats.biggestWin = { amount: safePayout, game, at: nowIso() };
-  }
-  await setPlayerStats(gameServerId, moduleId, player.id, stats);
+    const cooldown = await readJsonVariable(gameServerId, moduleId, KEY_COOLDOWN, player.id, null);
+    const cooldownUntil = cooldown?.until ? new Date(cooldown.until).getTime() : 0;
+    if (cooldownUntil > Date.now()) {
+      const seconds = Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 1000));
+      throw new TakaroUserError(`Slow down — you can bet again in ${seconds}s.`);
+    }
 
-  let jackpotContribution = 0;
-  let jackpot = await getJackpot(gameServerId, moduleId);
-  if (net < 0) {
     const windowData = await getWindowData(gameServerId, moduleId, player.id, config);
-    windowData.lost += Math.abs(net);
+    if (config.wagerCap > 0) {
+      const wagerCap = Math.floor(config.wagerCap * vipMultiplier);
+      if (windowData.wagered + betAmount > wagerCap) {
+        throw new TakaroUserError(`That bet would exceed your ${config.capWindow} wager cap of ${formatCurrency(wagerCap)}.`);
+      }
+    }
+    if (config.lossCap > 0) {
+      const lossCap = Math.floor(config.lossCap * vipMultiplier);
+      if (windowData.lost >= lossCap) {
+        throw new TakaroUserError(`You already reached your ${config.capWindow} loss cap of ${formatCurrency(lossCap)}.`);
+      }
+    }
+
+    try {
+      await takaro.playerOnGameserver.playerOnGameServerControllerDeductCurrency(gameServerId, player.id, {
+        currency: betAmount,
+      });
+    } catch (err) {
+      console.error(`casino-helpers: placeBet deduction failed for ${player.name}: ${err}`);
+      throw new TakaroUserError('You do not have enough currency for that bet.');
+    }
+
+    windowData.wagered += betAmount;
     await setWindowData(gameServerId, moduleId, player.id, windowData.windowKey, windowData);
 
-    jackpotContribution = roundCurrency(Math.abs(net) * (config.jackpotContributionPct / 100));
-    jackpot.amount += jackpotContribution;
-    await setJackpot(gameServerId, moduleId, jackpot);
-  }
+    if (config.cooldownSeconds > 0) {
+      await writeVariable(gameServerId, moduleId, KEY_COOLDOWN, { until: new Date(Date.now() + (config.cooldownSeconds * 1000)).toISOString() }, player.id);
+    }
 
-  if (jackpotWin) {
-    jackpot.lastWinner = player.name;
-    jackpot.lastWinAt = nowIso();
-    jackpot.lastWinGame = game;
-    await setJackpot(gameServerId, moduleId, jackpot);
-  }
+    return {
+      amount: betAmount,
+      vipTier,
+      vipMultiplier,
+      edgeFraction: getEffectiveEdgeFraction(config, vipTier),
+      windowKey: windowData.windowKey,
+    };
+  };
 
-  await maybeAnnounceBigWin({ gameServerId, playerName: player.name, game, net, config, jackpotWin });
-
-  const balance = await getPlayerBalance(gameServerId, player.id);
-  return { net, balance, jackpotContribution, jackpot };
+  if (skipLock) return await run();
+  return await withCasinoLocks(gameServerId, moduleId, [`player:${player.id}`], run);
 }
 
-export async function refund({ gameServerId, moduleId, playerId, amount, config }) {
-  const safeAmount = roundCurrency(amount);
-  if (safeAmount <= 0) return;
-  await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, playerId, { currency: safeAmount });
-  const windowData = await getWindowData(gameServerId, moduleId, playerId, config);
-  windowData.wagered = Math.max(0, windowData.wagered - safeAmount);
-  await setWindowData(gameServerId, moduleId, playerId, windowData.windowKey, windowData);
+export async function settle({ gameServerId, moduleId, player, config, game, betAmount, payout, jackpotWin = false, skipLock = false }) {
+  const run = async () => {
+    const safeBet = roundCurrency(betAmount);
+    const safePayout = roundCurrency(payout);
+
+    if (safePayout > 0) {
+      await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, player.id, {
+        currency: safePayout,
+      });
+    }
+
+    const net = safePayout - safeBet;
+    const stats = await getPlayerStats(gameServerId, moduleId, player.id);
+    const currentGame = stats.perGame[game] ?? { wagered: 0, won: 0, plays: 0 };
+    currentGame.wagered += safeBet;
+    currentGame.won += safePayout;
+    currentGame.plays += 1;
+    stats.perGame[game] = currentGame;
+    stats.wagered += safeBet;
+    stats.won += safePayout;
+    stats.net += net;
+    stats.gamesPlayed += 1;
+    if (safePayout > Number(stats.biggestWin?.amount ?? 0)) {
+      stats.biggestWin = { amount: safePayout, game, at: nowIso() };
+    }
+    await setPlayerStats(gameServerId, moduleId, player.id, stats);
+
+    let jackpotContribution = 0;
+    let jackpot = await getJackpot(gameServerId, moduleId);
+    if (net < 0) {
+      const windowData = await getWindowData(gameServerId, moduleId, player.id, config);
+      windowData.lost += Math.abs(net);
+      await setWindowData(gameServerId, moduleId, player.id, windowData.windowKey, windowData);
+
+      jackpotContribution = roundCurrency(Math.abs(net) * (config.jackpotContributionPct / 100));
+      jackpot.amount += jackpotContribution;
+      await setJackpot(gameServerId, moduleId, jackpot);
+    }
+
+    if (jackpotWin) {
+      jackpot.lastWinner = player.name;
+      jackpot.lastWinAt = nowIso();
+      jackpot.lastWinGame = game;
+      await setJackpot(gameServerId, moduleId, jackpot);
+    }
+
+    await maybeAnnounceBigWin({ gameServerId, moduleId, playerId: player.id, playerName: player.name, game, net, config, jackpotWin, payout: safePayout, betAmount: safeBet });
+
+    const balance = await getPlayerBalance(gameServerId, player.id);
+    return { net, balance, jackpotContribution, jackpot };
+  };
+
+  if (skipLock) return await run();
+  return await withCasinoLocks(gameServerId, moduleId, ['jackpot', `player:${player.id}`], run);
+}
+
+export async function refund({ gameServerId, moduleId, playerId, amount, config, skipLock = false }) {
+  const run = async () => {
+    const safeAmount = roundCurrency(amount);
+    if (safeAmount <= 0) return;
+    await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, playerId, { currency: safeAmount });
+    const windowData = await getWindowData(gameServerId, moduleId, playerId, config);
+    windowData.wagered = Math.max(0, windowData.wagered - safeAmount);
+    await setWindowData(gameServerId, moduleId, playerId, windowData.windowKey, windowData);
+  };
+
+  if (skipLock) return await run();
+  return await withCasinoLocks(gameServerId, moduleId, [`player:${playerId}`], run);
 }
 
 export async function listAllStats(gameServerId, moduleId) {
@@ -697,7 +862,8 @@ export async function sweepExpiredWindows(gameServerId, moduleId, config) {
   return deleted;
 }
 
-export async function findDuelForPlayer(gameServerId, moduleId, playerId) {
+export async function listDuels(gameServerId, moduleId) {
+  const duels = [];
   let page = 0;
   while (page < 100) {
     const res = await takaro.variable.variableControllerSearch({
@@ -708,10 +874,7 @@ export async function findDuelForPlayer(gameServerId, moduleId, playerId) {
     const batch = res.data.data;
     for (const row of batch) {
       try {
-        const duel = JSON.parse(row.value);
-        if (row.playerId === playerId || duel.opponentId === playerId) {
-          return { challengerId: row.playerId, duel };
-        }
+        duels.push({ challengerId: row.playerId, duel: JSON.parse(row.value) });
       } catch (err) {
         console.error(`casino-helpers: failed to parse duel ${row.id}: ${err}`);
       }
@@ -719,7 +882,17 @@ export async function findDuelForPlayer(gameServerId, moduleId, playerId) {
     if (batch.length < 100) break;
     page += 1;
   }
-  return null;
+  return duels;
+}
+
+export async function findDuelForPlayer(gameServerId, moduleId, playerId) {
+  const matches = (await listDuels(gameServerId, moduleId)).filter(({ challengerId, duel }) => (
+    challengerId === playerId || duel.opponentId === playerId
+  ));
+  if (matches.length > 1) {
+    throw new TakaroUserError('You are already involved in multiple duel requests. Ask an admin to clear stale duels.');
+  }
+  return matches[0] ?? null;
 }
 
 export async function sweepExpiredSessions(gameServerId, moduleId, config) {

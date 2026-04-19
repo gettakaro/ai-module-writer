@@ -1,6 +1,7 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
   getVoteState,
+  getRestartState,
   setVoteState,
   getCooldownUntil,
   deleteCooldown,
@@ -20,8 +21,9 @@ async function main() {
 
   // 2. Check if vote already active or passed
   const existingState = await getVoteState(gameServerId, moduleId);
-  if (existingState) {
-    if (existingState.status === 'passed') {
+  const restartState = await getRestartState(gameServerId, moduleId);
+  if (existingState || restartState) {
+    if (existingState?.status === 'passed' || restartState) {
       throw new TakaroUserError('A restart vote has already passed. Server restarting shortly.');
     }
     const elapsed = (Date.now() - new Date(existingState.startedAt).getTime()) / 1000;

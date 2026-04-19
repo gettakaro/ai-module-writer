@@ -1,5 +1,5 @@
 import { data } from '@takaro/helpers';
-import { getDefaultConfig, placeBet, settle, roundCurrency, formatCurrency, pickSlotSymbol, getJackpot, setJackpot } from './casino-helpers.js';
+import { getDefaultConfig, placeBet, settle, roundCurrency, formatCurrency, pickSlotSymbol, claimJackpot } from './casino-helpers.js';
 
 async function main() {
   const { gameServerId, pog, player, arguments: args, module: mod } = data;
@@ -15,13 +15,8 @@ async function main() {
   let jackpotWin = false;
 
   if (allSame && reels[0].emoji === '7️⃣') {
-    const jackpot = await getJackpot(gameServerId, mod.moduleId);
-    payout = roundCurrency(jackpot.amount);
-    jackpot.amount = 0;
-    jackpot.lastWinner = player.name;
-    jackpot.lastWinAt = new Date().toISOString();
-    jackpot.lastWinGame = 'slots';
-    await setJackpot(gameServerId, mod.moduleId, jackpot);
+    const jackpot = await claimJackpot(gameServerId, mod.moduleId, player.name, 'slots');
+    payout = roundCurrency(jackpot.payout);
     jackpotWin = true;
   } else if (allSame) {
     payout = roundCurrency(placed.amount * reels[0].triple * (1 - placed.edgeFraction));
