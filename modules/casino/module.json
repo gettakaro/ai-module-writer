@@ -1,0 +1,275 @@
+{
+  "name": "casino",
+  "author": "Takaro",
+  "description": "Unified casino with multiple betting games, admin-configurable limits, cross-game analytics, leaderboards, and economy-safety guardrails.",
+  "version": "latest",
+  "supportedGames": ["all"],
+  "config": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "minBet": { "type": "number", "default": 1, "minimum": 1 },
+      "maxBet": { "type": "number", "default": 1000, "minimum": 1 },
+      "capWindow": { "type": "string", "enum": ["daily", "weekly"], "default": "daily" },
+      "wagerCap": { "type": "number", "default": 0, "minimum": 0, "description": "Max currency wagered per window. 0 = unlimited." },
+      "lossCap": { "type": "number", "default": 0, "minimum": 0, "description": "Max net loss per window. 0 = unlimited." },
+      "houseEdgePct": { "type": "number", "default": 2, "minimum": 0, "maximum": 50 },
+      "jackpotContributionPct": { "type": "number", "default": 1, "minimum": 0, "maximum": 100, "description": "% of losing bets added to the jackpot." },
+      "cooldownSeconds": { "type": "number", "default": 3, "minimum": 0 },
+      "bigWinThreshold": { "type": "number", "default": 1000, "minimum": 1, "description": "Wins at/above this emit a global announcement." },
+      "games": {
+        "type": "object",
+        "properties": {
+          "flip": { "type": "boolean", "default": true },
+          "dice": { "type": "boolean", "default": true },
+          "hilo": { "type": "boolean", "default": true },
+          "roulette": { "type": "boolean", "default": true },
+          "slots": { "type": "boolean", "default": true },
+          "blackjack": { "type": "boolean", "default": true },
+          "crash": { "type": "boolean", "default": true },
+          "duel": { "type": "boolean", "default": true },
+          "race": { "type": "boolean", "default": true }
+        },
+        "additionalProperties": false,
+        "default": {}
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  },
+  "uiSchema": {},
+  "permissions": [
+    {
+      "permission": "CASINO_PLAY",
+      "friendlyName": "Play Casino Games",
+      "description": "Allows a player to use casino games",
+      "canHaveCount": false
+    },
+    {
+      "permission": "CASINO_VIP",
+      "friendlyName": "Casino VIP Tier",
+      "description": "Count = VIP tier (1=bronze, 2=silver, 3=gold)",
+      "canHaveCount": true
+    },
+    {
+      "permission": "CASINO_MANAGE",
+      "friendlyName": "Manage Casino",
+      "description": "Allows a player to use casino admin commands",
+      "canHaveCount": false
+    },
+    {
+      "permission": "CASINO_BANNED",
+      "friendlyName": "Banned From Casino",
+      "description": "Explicitly banned from playing casino games",
+      "canHaveCount": false
+    }
+  ],
+  "commands": {
+    "casino": {
+      "trigger": "casino",
+      "description": "Show the casino overview and available games",
+      "helpText": "Usage: /casino [game]",
+      "function": "src/commands/casino/index.js",
+      "arguments": [
+        { "name": "game", "type": "string", "helpText": "Optional game to show details for", "position": 0, "defaultValue": "?" }
+      ]
+    },
+    "flip": {
+      "trigger": "flip",
+      "description": "Play a coin flip",
+      "helpText": "Usage: /flip <amount> <heads|tails>",
+      "function": "src/commands/flip/index.js",
+      "arguments": [
+        { "name": "amount", "type": "number", "helpText": "Bet amount", "position": 0 },
+        { "name": "side", "type": "string", "helpText": "heads or tails", "position": 1 }
+      ]
+    },
+    "dice": {
+      "trigger": "dice",
+      "description": "Play over/under dice",
+      "helpText": "Usage: /dice <amount> <over|under> <2-98>",
+      "function": "src/commands/dice/index.js",
+      "arguments": [
+        { "name": "amount", "type": "number", "helpText": "Bet amount", "position": 0 },
+        { "name": "direction", "type": "string", "helpText": "over or under", "position": 1 },
+        { "name": "target", "type": "number", "helpText": "Target number between 2 and 98", "position": 2 }
+      ]
+    },
+    "hilo": {
+      "trigger": "hilo",
+      "description": "Play higher or lower",
+      "helpText": "Usage: /hilo <amount> | /hilo <higher|lower|cashout>",
+      "function": "src/commands/hilo/index.js",
+      "arguments": [
+        { "name": "action", "type": "string", "helpText": "A bet amount or one of higher/lower/cashout", "position": 0 }
+      ]
+    },
+    "bet": {
+      "trigger": "bet",
+      "description": "Play roulette",
+      "helpText": "Usage: /bet <amount> <red|black|odd|even|green|0-36>",
+      "function": "src/commands/bet/index.js",
+      "arguments": [
+        { "name": "amount", "type": "number", "helpText": "Bet amount", "position": 0 },
+        { "name": "selection", "type": "string", "helpText": "Roulette selection", "position": 1 }
+      ]
+    },
+    "slots": {
+      "trigger": "slots",
+      "description": "Spin the slot machine",
+      "helpText": "Usage: /slots <amount>",
+      "function": "src/commands/slots/index.js",
+      "arguments": [
+        { "name": "amount", "type": "number", "helpText": "Bet amount", "position": 0 }
+      ]
+    },
+    "bj": {
+      "trigger": "bj",
+      "description": "Play blackjack",
+      "helpText": "Usage: /bj <amount> | /bj <hit|stand|double>",
+      "function": "src/commands/bj/index.js",
+      "arguments": [
+        { "name": "action", "type": "string", "helpText": "A bet amount or one of hit/stand/double", "position": 0 }
+      ]
+    },
+    "crash": {
+      "trigger": "crash",
+      "description": "Play the crash multiplier game",
+      "helpText": "Usage: /crash <amount> <cashoutAt>",
+      "function": "src/commands/crash/index.js",
+      "arguments": [
+        { "name": "amount", "type": "number", "helpText": "Bet amount", "position": 0 },
+        { "name": "cashoutAt", "type": "number", "helpText": "Target multiplier", "position": 1 }
+      ]
+    },
+    "duel": {
+      "trigger": "duel",
+      "description": "Challenge another player to rock-paper-scissors",
+      "helpText": "Usage: /duel <player> <amount> | /duel <accept|decline|rock|paper|scissors>",
+      "function": "src/commands/duel/index.js",
+      "arguments": [
+        { "name": "arg1", "type": "string", "helpText": "Player name or action", "position": 0 },
+        { "name": "arg2", "type": "string", "helpText": "Amount when challenging", "position": 1, "defaultValue": "?" }
+      ]
+    },
+    "race": {
+      "trigger": "race",
+      "description": "Join the next weighted race pot",
+      "helpText": "Usage: /race <amount>",
+      "function": "src/commands/race/index.js",
+      "arguments": [
+        { "name": "amount", "type": "number", "helpText": "Bet amount", "position": 0 }
+      ]
+    },
+    "casinostats": {
+      "trigger": "casinostats",
+      "description": "Show casino stats for yourself or another player",
+      "helpText": "Usage: /casinostats [player]",
+      "function": "src/commands/casinostats/index.js",
+      "arguments": [
+        { "name": "player", "type": "string", "helpText": "Optional player name", "position": 0, "defaultValue": "?" }
+      ]
+    },
+    "casinotop": {
+      "trigger": "casinotop",
+      "description": "Show cached casino leaderboards",
+      "helpText": "Usage: /casinotop <wager|won|winrate|biggest>",
+      "function": "src/commands/casinotop/index.js",
+      "arguments": [
+        { "name": "category", "type": "string", "helpText": "Leaderboard category", "position": 0, "defaultValue": "wager" }
+      ]
+    },
+    "jackpot": {
+      "trigger": "jackpot",
+      "description": "Show the current jackpot",
+      "helpText": "Usage: /jackpot",
+      "function": "src/commands/jackpot/index.js",
+      "arguments": []
+    },
+    "casinoban": {
+      "trigger": "casinoban",
+      "description": "Ban a player from the casino",
+      "helpText": "Usage: /casinoban <player> [hours]",
+      "function": "src/commands/casinoban/index.js",
+      "arguments": [
+        { "name": "player", "type": "string", "helpText": "Player name", "position": 0 },
+        { "name": "hours", "type": "number", "helpText": "Optional ban duration in hours", "position": 1, "defaultValue": "0" }
+      ]
+    },
+    "casinounban": {
+      "trigger": "casinounban",
+      "description": "Remove a casino ban",
+      "helpText": "Usage: /casinounban <player>",
+      "function": "src/commands/casinounban/index.js",
+      "arguments": [
+        { "name": "player", "type": "string", "helpText": "Player name", "position": 0 }
+      ]
+    },
+    "casinoresetstats": {
+      "trigger": "casinoresetstats",
+      "description": "Reset one player's casino stats",
+      "helpText": "Usage: /casinoresetstats <player>",
+      "function": "src/commands/casinoresetstats/index.js",
+      "arguments": [
+        { "name": "player", "type": "string", "helpText": "Player name", "position": 0 }
+      ]
+    },
+    "setjackpot": {
+      "trigger": "setjackpot",
+      "description": "Set the jackpot amount",
+      "helpText": "Usage: /setjackpot <amount>",
+      "function": "src/commands/setjackpot/index.js",
+      "arguments": [
+        { "name": "amount", "type": "number", "helpText": "New jackpot amount", "position": 0 }
+      ]
+    },
+    "casinoreport": {
+      "trigger": "casinoreport",
+      "description": "Show an aggregate casino report",
+      "helpText": "Usage: /casinoreport [days]",
+      "function": "src/commands/casinoreport/index.js",
+      "arguments": [
+        { "name": "days", "type": "number", "helpText": "Currently informational only; defaults to 7", "position": 0, "defaultValue": "7" }
+      ]
+    }
+  },
+  "hooks": {
+    "on-player-disconnect": {
+      "eventType": "player-disconnected",
+      "description": "Refund or cancel in-flight casino sessions when a player disconnects",
+      "function": "src/hooks/on-player-disconnect/index.js"
+    }
+  },
+  "cronJobs": {
+    "refresh-leaderboards": {
+      "temporalValue": "*/5 * * * *",
+      "description": "Refresh cached casino leaderboards",
+      "function": "src/cronjobs/refresh-leaderboards/index.js"
+    },
+    "draw-race": {
+      "temporalValue": "*/10 * * * *",
+      "description": "Resolve the current race pool when the draw time arrives",
+      "function": "src/cronjobs/draw-race/index.js"
+    },
+    "expire-windows": {
+      "temporalValue": "0 0 * * *",
+      "description": "Delete outdated daily or weekly cap windows",
+      "function": "src/cronjobs/expire-windows/index.js"
+    },
+    "expire-sessions": {
+      "temporalValue": "*/5 * * * *",
+      "description": "Refund abandoned sessions and cancel stale duels",
+      "function": "src/cronjobs/expire-sessions/index.js"
+    },
+    "expire-bans": {
+      "temporalValue": "0 * * * *",
+      "description": "Remove expired temporary casino bans",
+      "function": "src/cronjobs/expire-bans/index.js"
+    }
+  },
+  "functions": {
+    "casino-helpers": {
+      "function": "src/functions/casino-helpers.js"
+    }
+  }
+}
