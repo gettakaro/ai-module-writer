@@ -13,11 +13,13 @@ import {
   renderMessage,
   setState,
   shuffleBag,
+  startExecutionLockHeartbeat,
 } from './server-message-helpers.js';
 
 async function main() {
   const { gameServerId, module: mod } = data;
   const lock = await acquireExecutionLock(gameServerId, mod.moduleId);
+  const heartbeat = startExecutionLockHeartbeat(lock);
 
   try {
     const order = normalizeOrder(mod.userConfig?.order);
@@ -90,6 +92,11 @@ async function main() {
       serverName,
     });
 
+    if (renderedMessage.trim().length === 0) {
+      console.warn(`server-messages: rendered message for index=${messageIndex} was blank after placeholder rendering, skipping broadcast without advancing state`);
+      return;
+    }
+
     await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
       message: renderedMessage,
     });
@@ -99,7 +106,8 @@ async function main() {
       `server-messages: broadcasted order=${order} index=${messageIndex} playerCount=${onlinePlayerCount} message=${renderedMessage}`,
     );
   } finally {
-    await releaseExecutionLock(lock?.id);
+    await heartbeat.stop();
+    await releaseExecutionLock(lock);
   }
 }
 

@@ -360,7 +360,7 @@ describe('server-messages: broadcast cronjob', () => {
     );
   });
 
-  it('renders supported placeholders and strips unknown placeholders with a warning', async () => {
+  it('renders supported placeholders and preserves unknown placeholders with a warning', async () => {
     await reinstall({
       order: 'sequential',
       messages: [{ text: 'Players={playerCount} Server={serverName} Unknown={unknownToken}' }],
@@ -369,12 +369,23 @@ describe('server-messages: broadcast cronjob', () => {
     const result = await triggerCronjobAndCollectMessages();
     assert.equal(result.success, true, `Expected placeholder run to succeed, logs: ${JSON.stringify(result.logs)}`);
     assert.deepEqual(result.chatMessages, [
-      `Players=3 Server=${ctx.gameServer.name} Unknown=`,
+      `Players=3 Server=${ctx.gameServer.name} Unknown={unknownToken}`,
     ]);
     assert.ok(
-      result.logs.some((log) => log.includes('removed unknown placeholders') && log.includes('unknownToken')),
+      result.logs.some((log) => log.includes('left unknown placeholders unchanged') && log.includes('unknownToken')),
       `Expected unknown-placeholder warning log, got: ${JSON.stringify(result.logs)}`,
     );
+  });
+
+  it('does not turn an unknown-placeholder-only message into a blank broadcast', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: '  {missingToken}  ' }],
+    });
+
+    const result = await triggerCronjobAndCollectMessages();
+    assert.equal(result.success, true, `Expected unknown-placeholder-only run to succeed, logs: ${JSON.stringify(result.logs)}`);
+    assert.deepEqual(result.chatMessages, ['{missingToken}']);
   });
 
   it('resets rotation cleanly after reinstalling with a changed message list', async () => {
@@ -599,7 +610,7 @@ describe('server-messages: broadcast cronjob', () => {
     };
 
     assert.match(moduleJson.config.properties.messages.description ?? '', /\{playerCount\}.*\{serverName\}/);
-    assert.match(moduleJson.config.properties.messages.description ?? '', /Unknown placeholders are removed with a warning/);
+    assert.match(moduleJson.config.properties.messages.description ?? '', /Unknown placeholders are left unchanged/);
     assert.equal(moduleJson.config.properties.messages.maxItems, 100);
     assert.match(moduleJson.config.properties.messages.items.properties.text.description ?? '', /Whitespace-only messages are ignored/);
     assert.equal(moduleJson.config.properties.messages.items.properties.weight.type, 'number');

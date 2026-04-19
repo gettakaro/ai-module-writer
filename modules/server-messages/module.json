@@ -11,7 +11,7 @@
     "properties": {
       "messages": {
         "type": "array",
-        "description": "Messages to broadcast. Supports {playerCount} and {serverName} placeholders. Unknown placeholders are removed with a warning. Weight only affects random order. Limited to 100 messages to keep shuffle bags bounded.",
+        "description": "Messages to broadcast. Supports {playerCount} and {serverName} placeholders. Unknown placeholders are left unchanged with a warning. Weight only affects random order. Limited to 100 messages to keep shuffle bags bounded.",
         "default": [],
         "maxItems": 100,
         "items": {
@@ -19,7 +19,7 @@
           "properties": {
             "text": {
               "type": "string",
-              "description": "The message text to broadcast. Supports {playerCount} and {serverName}; unknown placeholders are removed with a warning. Whitespace-only messages are ignored."
+              "description": "The message text to broadcast. Supports {playerCount} and {serverName}; unknown placeholders are left unchanged with a warning. Whitespace-only messages are ignored."
             },
             "weight": {
               "type": "number",

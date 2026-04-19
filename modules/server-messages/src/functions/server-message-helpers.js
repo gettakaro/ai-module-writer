@@ -7,6 +7,7 @@ export const MAX_MESSAGE_COUNT = 100;
 const LOCK_RETRY_DELAY_MS = 250;
 const LOCK_TIMEOUT_MS = 10000;
 const LOCK_TTL_MS = 30000;
+const LOCK_HEARTBEAT_INTERVAL_MS = 5000;
 const PLAYER_COUNT_PAGE_SIZE = 100;
 const MAX_PLAYER_COUNT_PAGES = 100;
 const SUPPORTED_PLACEHOLDERS = ['playerCount', 'serverName'];
@@ -128,10 +129,7 @@ export async function writeVariable(gameServerId, moduleId, key, value) {
 }
 
 async function sleep(ms) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    await Promise.resolve();
-  }
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isConflictError(err) {
@@ -176,6 +174,78 @@ async function tryDeleteVariable(variableId) {
   }
 }
 
+function createLockToken() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function buildLockPayload(token, now = new Date()) {
+  return {
+    token,
+    acquiredAt: now.toISOString(),
+    heartbeatAt: now.toISOString(),
+  };
+}
+
+function parseLockPayload(lockVariable) {
+  try {
+    const parsedValue = JSON.parse(lockVariable?.value ?? '{}');
+    return parsedValue && typeof parsedValue === 'object' ? parsedValue : {};
+  } catch {
+    return {};
+  }
+}
+
+function getLockToken(lockVariable) {
+  const payload = parseLockPayload(lockVariable);
+  return typeof payload.token === 'string' && payload.token.length > 0 ? payload.token : null;
+}
+
+async function refreshExecutionLock(lock, ttlMs) {
+  const existingLock = await findVariable(lock.gameServerId, lock.moduleId, SERVER_MESSAGES_LOCK_KEY);
+  if (!existingLock || existingLock.id !== lock.id) {
+    throw new Error(`server-message-helpers: execution lock ${lock.id} disappeared during heartbeat`);
+  }
+
+  const currentToken = getLockToken(existingLock);
+  if (currentToken !== lock.token) {
+    throw new Error(`server-message-helpers: execution lock ${lock.id} ownership changed during heartbeat`);
+  }
+
+  const now = new Date();
+  await takaro.variable.variableControllerUpdate(lock.id, {
+    value: JSON.stringify(buildLockPayload(lock.token, now)),
+    expiresAt: new Date(now.getTime() + ttlMs).toISOString(),
+  });
+}
+
+export function startExecutionLockHeartbeat(lock, options = {}) {
+  if (!lock?.id || !lock?.token) {
+    return {
+      stop: async () => {},
+    };
+  }
+
+  const ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : LOCK_TTL_MS;
+  const intervalMs = Number.isFinite(options.intervalMs)
+    ? options.intervalMs
+    : Math.min(LOCK_HEARTBEAT_INTERVAL_MS, Math.max(1000, Math.floor(ttlMs / 3)));
+
+  let timer = setInterval(() => {
+    void refreshExecutionLock(lock, ttlMs).catch((err) => {
+      console.error(`server-message-helpers: failed to heartbeat execution lock ${lock.id}: ${err}`);
+    });
+  }, intervalMs);
+
+  return {
+    stop: async () => {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    },
+  };
+}
+
 export async function acquireExecutionLock(gameServerId, moduleId, options = {}) {
   const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : LOCK_TIMEOUT_MS;
   const retryDelayMs = Number.isFinite(options.retryDelayMs) ? options.retryDelayMs : LOCK_RETRY_DELAY_MS;
@@ -183,16 +253,24 @@ export async function acquireExecutionLock(gameServerId, moduleId, options = {})
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
+    const token = createLockToken();
+    const now = new Date();
+
     try {
       const res = await takaro.variable.variableControllerCreate({
         key: SERVER_MESSAGES_LOCK_KEY,
-        value: JSON.stringify({ acquiredAt: new Date().toISOString() }),
-        expiresAt: new Date(Date.now() + ttlMs).toISOString(),
+        value: JSON.stringify(buildLockPayload(token, now)),
+        expiresAt: new Date(now.getTime() + ttlMs).toISOString(),
         gameServerId,
         moduleId,
       });
 
-      return res.data.data;
+      return {
+        ...res.data.data,
+        token,
+        gameServerId,
+        moduleId,
+      };
     } catch (err) {
       if (!isConflictError(err)) throw err;
 
@@ -212,11 +290,20 @@ export async function acquireExecutionLock(gameServerId, moduleId, options = {})
   throw new Error(`server-message-helpers: timed out acquiring execution lock after ${timeoutMs}ms`);
 }
 
-export async function releaseExecutionLock(lockId) {
-  if (!lockId) return;
+export async function releaseExecutionLock(lock) {
+  if (!lock?.id) return;
 
   try {
-    await takaro.variable.variableControllerDelete(lockId);
+    if (lock.token) {
+      const existingLock = await findVariable(lock.gameServerId, lock.moduleId, SERVER_MESSAGES_LOCK_KEY);
+      const currentToken = existingLock ? getLockToken(existingLock) : null;
+      if (!existingLock || existingLock.id !== lock.id || currentToken !== lock.token) {
+        console.warn(`server-message-helpers: skipping release for lock ${lock.id} because ownership changed`);
+        return;
+      }
+    }
+
+    await takaro.variable.variableControllerDelete(lock.id);
   } catch (err) {
     if (err?.response?.status !== 404) {
       throw err;
@@ -278,10 +365,10 @@ export async function getOnlinePlayerCount(gameServerId) {
 export async function getServerName(gameServerId) {
   try {
     const res = await takaro.gameserver.gameServerControllerGetOne(gameServerId);
-    return res.data.data?.name ?? res.data.name ?? 'Unknown Server';
+    return res.data.data?.name ?? res.data.name ?? '';
   } catch (err) {
-    console.error(`server-message-helpers: failed to load server name for ${gameServerId}, using fallback. Error: ${err}`);
-    return 'Unknown Server';
+    console.error(`server-message-helpers: failed to load server name for ${gameServerId}; leaving {serverName} blank. Error: ${err}`);
+    return '';
   }
 }
 
@@ -294,12 +381,12 @@ export function renderMessage(template, context) {
     }
 
     unknownTokens.add(token);
-    return '';
+    return match;
   });
 
   if (unknownTokens.size > 0) {
     console.warn(
-      `server-message-helpers: removed unknown placeholders [${[...unknownTokens].join(', ')}]; supported placeholders: ${SUPPORTED_PLACEHOLDERS.join(', ')}`,
+      `server-message-helpers: left unknown placeholders unchanged [${[...unknownTokens].join(', ')}]; supported placeholders: ${SUPPORTED_PLACEHOLDERS.join(', ')}`,
     );
   }
 
