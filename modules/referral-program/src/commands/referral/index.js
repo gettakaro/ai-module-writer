@@ -1,4 +1,4 @@
-import { data, checkPermission, TakaroUserError } from '@takaro/helpers';
+import { data, TakaroUserError } from '@takaro/helpers';
 import {
   ensureReferralCode,
   getNormalizedConfig,
@@ -31,10 +31,6 @@ function getWelcomeMessage(welcomeBonus, thresholdMinutes) {
 async function main() {
   const { pog, gameServerId, arguments: args, module: mod } = data;
   const moduleId = mod.moduleId;
-
-  if (!checkPermission(pog, 'REFERRAL_USE')) {
-    throw new TakaroUserError('You do not have permission to use referral commands.');
-  }
 
   const code = String(args.code || '').trim().toUpperCase();
   if (!code) {

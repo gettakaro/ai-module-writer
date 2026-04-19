@@ -1,12 +1,8 @@
-import { data, checkPermission, TakaroUserError } from '@takaro/helpers';
+import { data } from '@takaro/helpers';
 import { listStatsEntries, getPlayerName } from './referral-helpers.js';
 
 async function main() {
   const { pog, gameServerId, module: mod } = data;
-
-  if (!checkPermission(pog, 'REFERRAL_USE')) {
-    throw new TakaroUserError('You do not have permission to use referral commands.');
-  }
 
   const entries = await listStatsEntries(gameServerId, mod.moduleId);
   const ranked = entries
