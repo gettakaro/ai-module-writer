@@ -438,6 +438,34 @@ describe('server-messages: broadcast cronjob', () => {
     assert.equal(state.cursor, 1, `Expected rebuilt bag cursor to advance from the fresh bag, got ${stateVariable.value}`);
   });
 
+  it('resets persisted rotation state when only order changes', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: 'A', weight: 1 }, { text: 'B', weight: 3 }],
+    });
+
+    const firstSequentialRun = await triggerCronjobAndCollectMessages();
+    assert.deepEqual(firstSequentialRun.chatMessages, ['A']);
+
+    await reinstall(
+      {
+        order: 'random',
+        messages: [{ text: 'A', weight: 1 }, { text: 'B', weight: 3 }],
+      },
+      { clearState: false },
+    );
+
+    const randomResult = await triggerCronjobAndCollectMessages();
+    assert.equal(randomResult.success, true, `Expected order-change run to succeed, logs: ${JSON.stringify(randomResult.logs)}`);
+
+    const stateVariable = await getStateVariable();
+    assert.ok(stateVariable, 'Expected state variable after order-change reset');
+    const state = JSON.parse(stateVariable.value) as { bag?: number[]; cursor?: number; sequentialIndex?: number };
+    assert.equal(state.bag?.length, 4, `Expected random mode to rebuild a weighted bag after order change, got ${stateVariable.value}`);
+    assert.equal(state.cursor, 1, `Expected rebuilt random bag cursor to advance once, got ${stateVariable.value}`);
+    assert.equal(state.sequentialIndex, 0, `Expected sequential index reset after switching to random, got ${stateVariable.value}`);
+  });
+
   it('recovers from malformed persisted state without crashing', async () => {
     await reinstall({
       order: 'sequential',
@@ -594,6 +622,22 @@ describe('server-messages: broadcast cronjob', () => {
 
     const stateAfterFailure = await getStateVariable();
     assert.equal(stateAfterFailure, null, 'Expected no rotation state to be persisted after a failed first broadcast');
+  });
+
+  it('removes the execution lock after a failed broadcast', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: 'Recover First' }, { text: 'Recover Second' }],
+    });
+
+    await ctx.server.shutdown();
+    await wait(500);
+
+    const failed = await triggerCronjob();
+    assert.equal(failed.success, false, `Expected failed broadcast run to report failure, logs: ${JSON.stringify(failed.logs)}`);
+
+    const lockAfterFailure = await getVariable(LOCK_KEY);
+    assert.equal(lockAfterFailure, null, 'Expected failed run to release its execution lock');
   });
 
   it('documents placeholder support, normalization behavior, and bounded message lists in module.json', async () => {

@@ -1,0 +1,21 @@
+{
+  "date": "2026-04-19",
+  "gameServerId": "eaf1086a-a81d-41c4-b3f0-afa6a60ddda9",
+  "moduleId": "56ea14b1-6d57-43f6-a366-ab5b14e98334",
+  "versionId": "90132121-2665-4a10-a524-1bd22f8571a6",
+  "cronjobId": "24eca799-9a72-41b5-94a4-11837f5115b9",
+  "sequentialMessages": [
+    "Live Seq 1",
+    "Live Seq 2"
+  ],
+  "noPlayersMessages": [],
+  "resumedMessages": [
+    "Live Seq 1"
+  ],
+  "randomMessages": [
+    "Live Green",
+    "Live Red",
+    "Live Gold",
+    "Live Green"
+  ]
+}

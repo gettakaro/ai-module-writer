@@ -7,7 +7,6 @@ export const MAX_MESSAGE_COUNT = 100;
 const LOCK_RETRY_DELAY_MS = 250;
 const LOCK_TIMEOUT_MS = 10000;
 const LOCK_TTL_MS = 30000;
-const LOCK_HEARTBEAT_INTERVAL_MS = 5000;
 const PLAYER_COUNT_PAGE_SIZE = 100;
 const MAX_PLAYER_COUNT_PAGES = 100;
 const SUPPORTED_PLACEHOLDERS = ['playerCount', 'serverName'];
@@ -128,10 +127,6 @@ export async function writeVariable(gameServerId, moduleId, key, value) {
   });
 }
 
-async function sleep(ms) {
-  await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function isConflictError(err) {
   return err?.response?.status === 409 || /duplicate key|already exists|unique/i.test(String(err?.message ?? err));
 }
@@ -221,27 +216,29 @@ async function refreshExecutionLock(lock, ttlMs) {
 export function startExecutionLockHeartbeat(lock, options = {}) {
   if (!lock?.id || !lock?.token) {
     return {
+      beat: async () => {},
       stop: async () => {},
     };
   }
 
   const ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : LOCK_TTL_MS;
-  const intervalMs = Number.isFinite(options.intervalMs)
-    ? options.intervalMs
-    : Math.min(LOCK_HEARTBEAT_INTERVAL_MS, Math.max(1000, Math.floor(ttlMs / 3)));
-
-  let timer = setInterval(() => {
-    void refreshExecutionLock(lock, ttlMs).catch((err) => {
-      console.error(`server-message-helpers: failed to heartbeat execution lock ${lock.id}: ${err}`);
-    });
-  }, intervalMs);
+  let stopped = false;
+  let lastError = null;
 
   return {
-    stop: async () => {
-      if (timer) {
-        clearInterval(timer);
-        timer = null;
+    beat: async (label = 'checkpoint') => {
+      if (stopped) return;
+      if (lastError) throw lastError;
+
+      try {
+        await refreshExecutionLock(lock, ttlMs);
+      } catch (err) {
+        lastError = new Error(`server-message-helpers: execution lock heartbeat failed at ${label}: ${err}`);
+        throw lastError;
       }
+    },
+    stop: async () => {
+      stopped = true;
     },
   };
 }
@@ -251,8 +248,9 @@ export async function acquireExecutionLock(gameServerId, moduleId, options = {})
   const retryDelayMs = Number.isFinite(options.retryDelayMs) ? options.retryDelayMs : LOCK_RETRY_DELAY_MS;
   const ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : LOCK_TTL_MS;
   const deadline = Date.now() + timeoutMs;
+  const maxAttempts = Math.max(1, Math.ceil(timeoutMs / Math.max(1, retryDelayMs)) * 4);
 
-  while (Date.now() < deadline) {
+  for (let attempt = 0; Date.now() < deadline && attempt < maxAttempts; attempt++) {
     const token = createLockToken();
     const now = new Date();
 
@@ -280,10 +278,7 @@ export async function acquireExecutionLock(gameServerId, moduleId, options = {})
         if (deleted) {
           console.warn(`server-message-helpers: cleared stale execution lock ${existingLock.id}`);
         }
-        continue;
       }
-
-      await sleep(retryDelayMs);
     }
   }
 
@@ -367,17 +362,24 @@ export async function getServerName(gameServerId) {
     const res = await takaro.gameserver.gameServerControllerGetOne(gameServerId);
     return res.data.data?.name ?? res.data.name ?? '';
   } catch (err) {
-    console.error(`server-message-helpers: failed to load server name for ${gameServerId}; leaving {serverName} blank. Error: ${err}`);
+    console.error(`server-message-helpers: failed to load server name for ${gameServerId}; leaving {serverName} unchanged. Error: ${err}`);
     return '';
   }
 }
 
 export function renderMessage(template, context) {
   const unknownTokens = new Set();
+  const unavailableTokens = new Set();
 
   const rendered = template.replace(/\{([^{}]+)\}/g, (match, token) => {
     if (Object.prototype.hasOwnProperty.call(context, token)) {
-      return String(context[token]);
+      const value = context[token];
+      if (value === '' || value === null || value === undefined) {
+        unavailableTokens.add(token);
+        return match;
+      }
+
+      return String(value);
     }
 
     unknownTokens.add(token);
@@ -387,6 +389,12 @@ export function renderMessage(template, context) {
   if (unknownTokens.size > 0) {
     console.warn(
       `server-message-helpers: left unknown placeholders unchanged [${[...unknownTokens].join(', ')}]; supported placeholders: ${SUPPORTED_PLACEHOLDERS.join(', ')}`,
+    );
+  }
+
+  if (unavailableTokens.size > 0) {
+    console.warn(
+      `server-message-helpers: left unavailable placeholders unchanged [${[...unavailableTokens].join(', ')}] because runtime values were blank or missing`,
     );
   }
 

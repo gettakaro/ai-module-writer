@@ -37,6 +37,7 @@ async function main() {
 
     if (messages.length === 0) {
       if (shouldPersistState) {
+        await heartbeat.beat('persist-empty-config-state');
         await setState(gameServerId, mod.moduleId, state);
       }
       console.log('server-messages: no messages configured, skipping broadcast');
@@ -46,6 +47,7 @@ async function main() {
     const onlinePlayerCount = await getOnlinePlayerCount(gameServerId);
     if (onlinePlayerCount === 0) {
       if (shouldPersistState) {
+        await heartbeat.beat('persist-no-players-state');
         await setState(gameServerId, mod.moduleId, state);
       }
       console.log('server-messages: no online players, skipping broadcast');
@@ -93,14 +95,18 @@ async function main() {
     });
 
     if (renderedMessage.trim().length === 0) {
-      console.warn(`server-messages: rendered message for index=${messageIndex} was blank after placeholder rendering, skipping broadcast without advancing state`);
+      console.warn(`server-messages: rendered message for index=${messageIndex} was blank after placeholder rendering, advancing rotation without broadcast to avoid stalling`);
+      await heartbeat.beat('persist-blank-render-state');
+      await setState(gameServerId, mod.moduleId, nextState);
       return;
     }
 
+    await heartbeat.beat('before-broadcast');
     await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
       message: renderedMessage,
     });
 
+    await heartbeat.beat('before-state-persist');
     await setState(gameServerId, mod.moduleId, nextState);
     console.log(
       `server-messages: broadcasted order=${order} index=${messageIndex} playerCount=${onlinePlayerCount} message=${renderedMessage}`,
