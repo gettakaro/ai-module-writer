@@ -1,5 +1,4 @@
 import { takaro } from '@takaro/helpers';
-import { formatOnlinePlayersLine } from './utils-formatters.js';
 
 export function isBlank(value) {
   return value === undefined || value === null || String(value).trim() === '';
@@ -25,23 +24,27 @@ function escapeRegex(value) {
 }
 
 export function extractReason(argsReason, chatMessage, consumedValues = []) {
-  const parsedReason = trimOrEmpty(argsReason);
-  if (parsedReason !== '') return parsedReason;
+  const parsedReason = trimOrEmpty(argsReason) === '?' ? '' : trimOrEmpty(argsReason);
 
   let remaining = trimOrEmpty(getChatMessageText(chatMessage));
-  if (remaining === '') return '';
+  if (remaining !== '') {
+    remaining = remaining.replace(/^\S+\s*/, '');
 
-  remaining = remaining.replace(/^\S+\s*/, '');
+    for (const value of consumedValues) {
+      const normalized = trimOrEmpty(value);
+      if (normalized === '') continue;
+      const flexibleWhitespace = escapeRegex(normalized).replace(/\s+/g, '\\s+');
+      const pattern = new RegExp(`^${flexibleWhitespace}(?:\\s+|$)`, 'i');
+      remaining = remaining.replace(pattern, '');
+    }
 
-  for (const value of consumedValues) {
-    const normalized = trimOrEmpty(value);
-    if (normalized === '') continue;
-    const flexibleWhitespace = escapeRegex(normalized).replace(/\s+/g, '\\s+');
-    const pattern = new RegExp(`^${flexibleWhitespace}(?:\\s+|$)`, 'i');
-    remaining = remaining.replace(pattern, '');
+    const reconstructedReason = trimOrEmpty(remaining);
+    if (reconstructedReason !== '') {
+      return reconstructedReason;
+    }
   }
 
-  return trimOrEmpty(remaining);
+  return parsedReason;
 }
 
 export function compactRules(rules) {
@@ -49,6 +52,22 @@ export function compactRules(rules) {
   return rules
     .map((rule) => trimOrEmpty(rule))
     .filter((rule) => rule !== '');
+}
+
+export function formatOnlinePlayersLine(players) {
+  const names = players
+    .map((player) => trimOrEmpty(player.name || player.playerName))
+    .filter((name) => name !== '')
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+
+  if (names.length === 0) {
+    return 'No players are currently online.';
+  }
+
+  const visible = names.slice(0, 10);
+  const suffix = names.length > 10 ? ', ...' : '';
+  const noun = names.length === 1 ? 'player' : 'players';
+  return `${names.length} ${noun} online: ${visible.join(', ')}${suffix}`;
 }
 
 export function renderTemplate(template, placeholders) {
@@ -161,6 +180,56 @@ export async function getPlayerName(playerId, fallback) {
   } catch (err) {
     console.error(`utils-helpers: failed to load player ${playerId}: ${err}`);
     return fallback || 'Unknown Player';
+  }
+}
+
+export async function findPlayerByExactName(playerName) {
+  const normalizedName = trimOrEmpty(playerName);
+  if (normalizedName === '') return null;
+
+  try {
+    const result = await takaro.player.playerControllerSearch({
+      search: { name: [normalizedName] },
+      limit: 20,
+    });
+
+    return result.data.data.find((candidate) => trimOrEmpty(candidate.name).toLowerCase() === normalizedName.toLowerCase()) || null;
+  } catch (err) {
+    console.error(`utils-helpers: failed to search player '${normalizedName}': ${err}`);
+    return null;
+  }
+}
+
+export async function resolvePlayerOnGameServer(gameServerId, playerName, { requireOnline = false } = {}) {
+  const player = await findPlayerByExactName(playerName);
+  if (!player) return null;
+
+  try {
+    const result = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
+      filters: {
+        gameServerId: [gameServerId],
+        playerId: [player.id],
+        ...(requireOnline ? { online: [true] } : {}),
+      },
+      limit: 1,
+    });
+
+    const pog = result.data.data[0];
+    if (!pog) {
+      return requireOnline ? null : {
+        playerId: player.id,
+        name: player.name,
+      };
+    }
+
+    return {
+      ...pog,
+      playerId: player.id,
+      name: player.name,
+    };
+  } catch (err) {
+    console.error(`utils-helpers: failed to resolve player '${playerName}' on gameserver ${gameServerId}: ${err}`);
+    return null;
   }
 }
 

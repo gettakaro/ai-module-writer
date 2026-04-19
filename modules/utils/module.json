@@ -126,7 +126,7 @@
       "arguments": [
         {
           "name": "player",
-          "type": "player",
+          "type": "string",
           "helpText": "The player to kick",
           "position": 0
         },
@@ -134,7 +134,8 @@
           "name": "reason",
           "type": "string",
           "helpText": "Optional reason shown to the target and in broadcasts",
-          "position": 1
+          "position": 1,
+          "defaultValue": "?"
         }
       ]
     },
@@ -146,7 +147,7 @@
       "arguments": [
         {
           "name": "player",
-          "type": "player",
+          "type": "string",
           "helpText": "The player to ban",
           "position": 0
         },
@@ -160,7 +161,8 @@
           "name": "reason",
           "type": "string",
           "helpText": "Optional reason shown in the ban confirmation and broadcasts",
-          "position": 2
+          "position": 2,
+          "defaultValue": "?"
         }
       ]
     },
@@ -172,7 +174,7 @@
       "arguments": [
         {
           "name": "player",
-          "type": "player",
+          "type": "string",
           "helpText": "The player to receive currency",
           "position": 0
         },
@@ -188,6 +190,9 @@
   "functions": {
     "utils-helpers": {
       "function": "src/functions/utils-helpers.js"
+    },
+    "utils-formatters": {
+      "function": "src/functions/utils-formatters.js"
     }
   }
 }

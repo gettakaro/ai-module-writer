@@ -5,6 +5,7 @@ import {
   normalizeReason,
   parseBanDurationToken,
   renderTemplate,
+  resolvePlayerOnGameServer,
   safeBroadcast,
   safePrivateMessage,
 } from './utils-helpers.js';
@@ -16,7 +17,12 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const target = args.player;
+  const targetNameInput = args.player;
+  if (!targetNameInput) {
+    throw new TakaroUserError('Please specify a valid player to ban.');
+  }
+
+  const target = await resolvePlayerOnGameServer(gameServerId, targetNameInput);
   if (!target) {
     throw new TakaroUserError('Please specify a valid player to ban.');
   }
@@ -43,12 +49,17 @@ async function main() {
     payload.expiresAt = parsedDuration.expiresAt;
   }
 
+  console.log(`utils:ban payload=${JSON.stringify(payload)}`);
   const banResult = await takaro.gameserver.gameServerControllerBanPlayer(gameServerId, target.playerId, payload);
 
   console.log(`utils:ban result=${JSON.stringify(banResult.data.data)}`);
   console.log(`utils:ban admin=${adminName} target=${targetName} duration=${parsedDuration.humanDuration} reason=${reason}`);
 
-  await safePrivateMessage(pog, `Banned ${targetName} for ${parsedDuration.humanDuration}. Reason: ${reason}`);
+  const confirmationMessage = parsedDuration.isPermanent
+    ? `Banned ${targetName} permanently. Reason: ${reason}`
+    : `Banned ${targetName} for ${parsedDuration.humanDuration}. Reason: ${reason}`;
+
+  await safePrivateMessage(pog, confirmationMessage);
 
   if (mod.userConfig.broadcastBans) {
     const message = renderTemplate(mod.userConfig.banBroadcastMessage, {

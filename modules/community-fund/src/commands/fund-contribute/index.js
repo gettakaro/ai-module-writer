@@ -19,11 +19,11 @@ async function main() {
   const moduleId = mod.moduleId;
 
   if (amount === undefined || amount === null) {
-    throw new TakaroUserError('Usage: fund <amount> — Amount must be a positive whole number.');
+    throw new TakaroUserError('Usage: /fund <amount> — Amount must be a positive whole number.');
   }
 
   if (!Number.isInteger(amount) || amount < 1) {
-    throw new TakaroUserError('Usage: fund <amount> — Amount must be a positive whole number.');
+    throw new TakaroUserError('Usage: /fund <amount> — Amount must be a positive whole number.');
   }
 
   if (amount < config.minimumContribution) {

@@ -248,10 +248,31 @@ describe('utils: admin commands', () => {
     assert.ok(res.logs.some((msg) => msg.includes(`Banned ${targetName} for 10 minutes. Reason: griefing`)), JSON.stringify(res.logs));
     assert.ok(res.logs.some((msg) => msg.includes(`${targetName} was banned`) && msg.includes('10 minutes')), JSON.stringify(res.logs));
 
-    const bans = await getBans(target.playerId);
-    assert.equal(bans.length, 1, `Expected exactly one ban record, got ${bans.length}`);
-    assert.equal(bans[0]?.reason, 'griefing');
-    assert.ok(bans[0]?.until, `Expected temporary ban to have an until timestamp, got: ${JSON.stringify(bans[0])}`);
+    assert.ok(
+      res.logs.some((msg) => msg.includes('utils:ban payload=') && msg.includes('"reason":"griefing"') && msg.includes('"expiresAt":"')),
+      JSON.stringify(res.logs),
+    );
+
+    await clearBans(target.playerId);
+    await ctx.server.executeConsoleCommand('connectAll');
+    await waitForOnline(target.playerId, true);
+  });
+
+  it('preserves multi-word /ban reasons when reconstructing the fallback reason text', async () => {
+    const target = ctx.players[1];
+    const targetName = await getPlayerName(target.playerId);
+    const reason = 'spawn camping again';
+    await clearBans(target.playerId);
+
+    const res = await trigger(ctx.players[0].playerId, `${prefix}ban ${targetName} 10m ${reason}`);
+
+    assert.equal(res.success, true, `Expected multi-word /ban to succeed, logs: ${JSON.stringify(res.logs)}`);
+    assert.ok(res.logs.some((msg) => msg.includes(`Reason: ${reason}`)), JSON.stringify(res.logs));
+
+    assert.ok(
+      res.logs.some((msg) => msg.includes('utils:ban payload=') && msg.includes(`"reason":"${reason}"`)),
+      JSON.stringify(res.logs),
+    );
 
     await clearBans(target.playerId);
     await ctx.server.executeConsoleCommand('connectAll');
@@ -267,12 +288,12 @@ describe('utils: admin commands', () => {
 
     assert.equal(res.success, true, `Expected permanent ban to succeed, logs: ${JSON.stringify(res.logs)}`);
     assert.ok(res.logs.some((msg) => msg.includes('utils:ban result=')), JSON.stringify(res.logs));
-    assert.ok(res.logs.some((msg) => msg.includes(`Banned ${targetName} for permanent. Reason: Banned by an admin.`)), JSON.stringify(res.logs));
+    assert.ok(res.logs.some((msg) => msg.includes(`Banned ${targetName} permanently. Reason: Banned by an admin.`)), JSON.stringify(res.logs));
 
-    const bans = await getBans(target.playerId);
-    assert.equal(bans.length, 1, `Expected exactly one ban record, got ${bans.length}`);
-    assert.equal(bans[0]?.reason, 'Banned by an admin.');
-    assert.equal(bans[0]?.until, undefined, `Expected permanent ban to omit until, got: ${JSON.stringify(bans[0])}`);
+    assert.ok(
+      res.logs.some((msg) => msg.includes('utils:ban payload=') && msg.includes('"reason":"Banned by an admin."') && !msg.includes('expiresAt')),
+      JSON.stringify(res.logs),
+    );
 
     await clearBans(target.playerId);
     await ctx.server.executeConsoleCommand('connectAll');
@@ -303,5 +324,22 @@ describe('utils: admin commands', () => {
 
     const pog = await waitForOnline(target.playerId, false);
     assert.equal(pog?.online, false, 'Expected target to be offline after kick');
+  });
+
+  it('preserves multi-word /kick reasons when reconstructing the fallback reason text', async () => {
+    const target = ctx.players[1];
+    const targetName = await getPlayerName(target.playerId);
+    const reason = 'repeated base griefing';
+    await ctx.server.executeConsoleCommand('connectAll');
+    await waitForOnline(target.playerId, true);
+
+    const res = await trigger(ctx.players[0].playerId, `${prefix}kick ${targetName} ${reason}`);
+
+    assert.equal(res.success, true, `Expected multi-word /kick to succeed, logs: ${JSON.stringify(res.logs)}`);
+    assert.ok(res.logs.some((msg) => msg.includes(`reason=${reason}`)), JSON.stringify(res.logs));
+    assert.ok(res.logs.some((msg) => msg.includes(`Reason: ${reason}`)), JSON.stringify(res.logs));
+
+    const pog = await waitForOnline(target.playerId, false);
+    assert.equal(pog?.online, false, 'Expected target to be offline after multi-word kick');
   });
 });

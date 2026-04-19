@@ -24,13 +24,11 @@ const MODULE_DIR = path.resolve(__dirname, '..');
 
 // NOTE: Tests in this suite run sequentially and share fund state within the suite.
 // player[0] has COMMUNITY_FUND_CONTRIBUTE permission; player[1] does NOT.
-// The threshold is 100 and tests are ordered so they don't interfere with each other:
-// 1. contribute 20 (fund=20, player0 has consumed 20)
-// 2. deny contribution when player lacks permission (player1, fund still 20)
-// 3. reject below minimum (player0, fund still 20)
-// 4. reject insufficient currency (player0, fund still 20)
-// 5. reject invalid amount 0 (player0, fund still 20)
-// 6. completion test: player0 contributes 100 (fund resets, cycle=1)
+// The threshold is 100 and later tests intentionally build on earlier state:
+// 1. contribute 20 (fund=20)
+// 2. permission/validation failures keep fund at 20
+// 3. concurrent 30+30 contributions exercise the post-update deduction failure path (fund ends at 50 or 80)
+// 4. the completion test reads the live total and contributes only what is needed to cross the threshold once
 
 describe('community-fund: fund-contribute command', () => {
   let client: Client;
@@ -90,6 +88,42 @@ describe('community-fund: fund-contribute command', () => {
     }
     await stopMockServer(ctx.server, client, ctx.gameServer.id);
   });
+
+  async function getPog(playerId: string) {
+    const result = await client.playerOnGameserver.playerOnGameServerControllerSearch({
+      filters: {
+        gameServerId: [ctx.gameServer.id],
+        playerId: [playerId],
+      },
+    });
+    return result.data.data[0];
+  }
+
+  async function waitForCommandEvents(after: Date, minimumCount: number) {
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      const result = await client.event.eventControllerSearch({
+        filters: {
+          eventName: [EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted],
+          gameserverId: [ctx.gameServer.id],
+        },
+        greaterThan: {
+          createdAt: after.toISOString(),
+        },
+        sortBy: 'createdAt',
+        sortDirection: 'desc',
+        limit: minimumCount + 5,
+      });
+
+      if (result.data.data.length >= minimumCount) {
+        return result.data.data;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+
+    throw new Error(`Timed out waiting for ${minimumCount} command-executed events`);
+  }
 
   it('should contribute currency to the fund and PM the player', async () => {
     const player = ctx.players[0]!;
@@ -257,20 +291,100 @@ describe('community-fund: fund-contribute command', () => {
       logMessages.some((msg) => msg.includes('positive whole number')),
       `Expected log to mention "positive whole number", got: ${JSON.stringify(logMessages)}`,
     );
+    assert.ok(
+      logMessages.some((msg) => msg.includes('Usage: /fund <amount>')),
+      `Expected log to mention the in-game command form, got: ${JSON.stringify(logMessages)}`,
+    );
+  });
+
+  it('should log and preserve the updated fund total when concurrent deductions race and one deduction fails', async () => {
+    const player = ctx.players[0]!;
+    const beforePog = await getPog(player.playerId);
+    assert.ok(beforePog, 'Expected player POG to exist before concurrent contribution test');
+
+    const currentCurrency = beforePog?.currency ?? 0;
+    if (currentCurrency > 30) {
+      await client.playerOnGameserver.playerOnGameServerControllerDeductCurrency(ctx.gameServer.id, player.playerId, {
+        currency: currentCurrency - 30,
+      });
+    } else if (currentCurrency < 30) {
+      await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(ctx.gameServer.id, player.playerId, {
+        currency: 30 - currentCurrency,
+      });
+    }
+
+    const before = new Date();
+    await Promise.all([
+      client.command.commandControllerTrigger(ctx.gameServer.id, {
+        msg: `${prefix}fund 30`,
+        playerId: player.playerId,
+      }),
+      client.command.commandControllerTrigger(ctx.gameServer.id, {
+        msg: `${prefix}fund 30`,
+        playerId: player.playerId,
+      }),
+    ]);
+
+    const events = await waitForCommandEvents(before, 2);
+    const fundEvents = events
+      .map((event) => event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } })
+      .map((meta) => ({
+        success: meta?.result?.success ?? false,
+        logs: (meta?.result?.logs ?? []).map((l) => l.msg),
+      }))
+      .filter((result) => result.logs.some((msg) => msg.includes('Fund contribution')) || result.logs.some((msg) => msg.includes('currency deduction encountered an issue')));
+
+    assert.equal(fundEvents.length, 2, `Expected both concurrent contributions to execute, got: ${JSON.stringify(fundEvents)}`);
+    assert.ok(fundEvents.every((result) => result.success), `Expected both contributions to return success, got: ${JSON.stringify(fundEvents)}`);
+    assert.ok(
+      fundEvents.some((result) => result.logs.some((msg) => msg.includes('currency deduction failed'))),
+      `Expected one contribution to hit the deduction recovery path, got: ${JSON.stringify(fundEvents)}`,
+    );
+
+    const afterPog = await getPog(player.playerId);
+    assert.ok(afterPog, 'Expected player POG to exist after concurrent contribution test');
+    assert.equal(afterPog?.currency, 0, `Expected only one 30-currency deduction to succeed, got: ${JSON.stringify(afterPog)}`);
+
+    const statusBefore = new Date();
+    await client.command.commandControllerTrigger(ctx.gameServer.id, {
+      msg: `${prefix}fundstatus`,
+      playerId: player.playerId,
+    });
+    const statusEvent = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: statusBefore,
+      timeout: 30000,
+    });
+    const statusMeta = statusEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const statusLogs = (statusMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.ok(
+      statusLogs.some((msg) => msg.includes('total=50') || msg.includes('total=80')),
+      `Expected the fund total to remain updated despite the failed deduction, got: ${JSON.stringify(statusLogs)}`,
+    );
   });
 
   it('should trigger completion when fund reaches threshold', async () => {
-    // Use player[0] who has COMMUNITY_FUND_CONTRIBUTE permission
     const player = ctx.players[0]!;
 
-    // Player[0] started with 500, contributed 20 in the first test, so has ~480 left
-    // Fund is currently at 20 from the first test
-    // Contributing 100 will push it to 120 >= 100 threshold, triggering completion
-    // Carryover: (20+100) - 100 = 20
+    const totalVariable = await client.variable.variableControllerSearch({
+      filters: {
+        key: ['fund_total'],
+        gameServerId: [ctx.gameServer.id],
+        moduleId: [moduleId],
+      },
+    });
+    const currentTotal = totalVariable.data.data[0] ? JSON.parse(totalVariable.data.data[0].value) : 0;
+    const amountNeeded = Math.max(10, 100 - currentTotal);
+
+    await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(ctx.gameServer.id, player.playerId, {
+      currency: amountNeeded,
+    });
+
     const before = new Date();
 
     await client.command.commandControllerTrigger(ctx.gameServer.id, {
-      msg: `${prefix}fund 100`,
+      msg: `${prefix}fund ${amountNeeded}`,
       playerId: player.playerId,
     });
 
@@ -315,10 +429,9 @@ describe('community-fund: fund-contribute command', () => {
       statusLogs.some((msg) => msg.includes('cycle=1')),
       `Expected fundstatus to show cycle=1 after completion, got: ${JSON.stringify(statusLogs)}`,
     );
-    // Fund should be at carryover value: (20+100)-100 = 20
     assert.ok(
-      statusLogs.some((msg) => msg.includes('total=20')),
-      `Expected fundstatus to show total=20 (carryover), got: ${JSON.stringify(statusLogs)}`,
+      statusLogs.some((msg) => msg.includes('total=0')),
+      `Expected fundstatus to show total=0 after contributing the exact remaining amount, got: ${JSON.stringify(statusLogs)}`,
     );
   });
 });

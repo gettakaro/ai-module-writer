@@ -257,7 +257,16 @@ export async function cleanupTestGameServers(client: Client): Promise<void> {
     const servers = result.data.data.filter((gs) => gs.name.startsWith('test-'));
     if (servers.length === 0) break;
     for (const gs of servers) {
-      await client.gameserver.gameServerControllerRemove(gs.id);
+      try {
+        await client.gameserver.gameServerControllerRemove(gs.id);
+      } catch (err) {
+        const status = (err as { response?: { status?: number } })?.response?.status;
+        if (status === 404) {
+          console.error(`cleanupTestGameServers: server '${gs.id}' already disappeared during cleanup, skipping`);
+          continue;
+        }
+        throw err;
+      }
     }
   }
 }

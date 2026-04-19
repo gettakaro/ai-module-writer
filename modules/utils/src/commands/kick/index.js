@@ -5,6 +5,7 @@ import {
   isPlayerOnlineHere,
   normalizeReason,
   renderTemplate,
+  resolvePlayerOnGameServer,
   safeBroadcast,
   safePrivateMessage,
 } from './utils-helpers.js';
@@ -16,7 +17,12 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const target = args.player;
+  const targetNameInput = args.player;
+  if (!targetNameInput) {
+    throw new TakaroUserError('Usage: /kick <player> [reason]');
+  }
+
+  const target = await resolvePlayerOnGameServer(gameServerId, targetNameInput, { requireOnline: true });
   if (!target) {
     throw new TakaroUserError('That player is not currently online.');
   }
