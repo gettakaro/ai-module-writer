@@ -507,6 +507,7 @@ export async function resolvePlayerByName(name, gameServerId) {
     playerId: exact.id,
     player: exact,
     pog: pog ?? null,
+    isOnlineOnGameServer: Boolean(pog),
     gameServerId,
   };
 }
@@ -591,7 +592,10 @@ export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, pl
     message: `${prefix} ${playerName} won ${formatCurrency(net)} on ${game}!`,
   };
   const payload = {
-    eventName: 'casino-big-win',
+    // The real Takaro API currently validates eventName against the built-in event enum.
+    // Emit a standard event name and carry the custom semantic type in meta so downstream
+    // consumers and tests can still reliably detect casino big wins.
+    eventName: 'chat-message',
     gameserverId: gameServerId,
     moduleId,
     actingModuleId: moduleId,
@@ -623,7 +627,7 @@ export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, pl
   }
 }
 
-export async function placeBet({ gameServerId, moduleId, pog, player, config, game, amount, skipLock = false }) {
+export async function placeBet({ gameServerId, moduleId, pog, player, config, game, amount, skipLock = false, skipCooldown = false }) {
   const run = async () => {
     requirePlayPermission(pog);
     await assertNoLegacyCasinoModules(gameServerId, moduleId);
@@ -636,11 +640,13 @@ export async function placeBet({ gameServerId, moduleId, pog, player, config, ga
     const vipMultiplier = getVipMultiplier(vipTier);
     const betAmount = validateBetAmount(amount, config, vipTier);
 
-    const cooldown = await readJsonVariable(gameServerId, moduleId, KEY_COOLDOWN, player.id, null);
-    const cooldownUntil = cooldown?.until ? new Date(cooldown.until).getTime() : 0;
-    if (cooldownUntil > Date.now()) {
-      const seconds = Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 1000));
-      throw new TakaroUserError(`Slow down — you can bet again in ${seconds}s.`);
+    if (!skipCooldown) {
+      const cooldown = await readJsonVariable(gameServerId, moduleId, KEY_COOLDOWN, player.id, null);
+      const cooldownUntil = cooldown?.until ? new Date(cooldown.until).getTime() : 0;
+      if (cooldownUntil > Date.now()) {
+        const seconds = Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 1000));
+        throw new TakaroUserError(`Slow down — you can bet again in ${seconds}s.`);
+      }
     }
 
     const windowData = await getWindowData(gameServerId, moduleId, player.id, config);
@@ -1270,7 +1276,7 @@ export async function removePlayerFromReportDays(gameServerId, moduleId, playerI
         if (!playerRow) continue;
         current.totalWagered = Math.max(0, Number(current.totalWagered ?? 0) - Number(playerRow.wagered ?? 0));
         current.totalWon = Math.max(0, Number(current.totalWon ?? 0) - Number(playerRow.won ?? 0));
-        current.houseProfit = Number(current.houseProfit ?? 0) - Number(playerRow.net ?? 0);
+        current.houseProfit = Number(current.houseProfit ?? 0) - (Number(playerRow.wagered ?? 0) - Number(playerRow.won ?? 0));
         for (const [game, gameRow] of Object.entries(playerRow.perGame ?? {})) {
           const existing = current.perGame?.[game];
           if (!existing) continue;

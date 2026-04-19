@@ -92,6 +92,19 @@ describe('casino module', () => {
     return res.data.data[0] ?? null;
   }
 
+  async function listPlayerVariables(playerId: string, keyPrefix: string) {
+    const res = await client.variable.variableControllerSearch({
+      filters: {
+        gameServerId: [ctx.gameServer.id],
+        moduleId: [moduleId],
+        playerId: [playerId],
+      },
+      search: { key: [keyPrefix] },
+      limit: 100,
+    });
+    return res.data.data.filter((row) => row.key.startsWith(keyPrefix));
+  }
+
   async function updateVariable(key: string, playerId: string | undefined, mutator: (value: any) => any) {
     const row = await getVariable(key, playerId);
     assert.ok(row, `Expected variable ${key} to exist`);
@@ -975,5 +988,36 @@ describe('casino module', () => {
     const expireWindow = await triggerCronjob(expireWindowsCronjobId);
     assert.equal(expireWindow.success, true, `expected expire-windows success, logs=${JSON.stringify(expireWindow.logs)}`);
     assert.equal(await getVariable('casino_window:2000-01-01', player.playerId), null, 'expected old window deletion');
+  });
+
+  it('uses weekly cap windows and cleans up stale weekly rows', async () => {
+    const player = ctx.players[0]!;
+    const install = (await client.module.moduleInstallationsControllerGetModuleInstallation(moduleId, ctx.gameServer.id)).data.data;
+    await client.module.moduleInstallationsControllerUninstallModule(moduleId, ctx.gameServer.id);
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        ...(install.userConfig as any),
+        cooldownSeconds: 0,
+        capWindow: 'weekly',
+      },
+    });
+
+    const play = await triggerCommand(player.playerId, `${prefix}flip 5 heads`);
+    assert.equal(play.success, true, `expected weekly-window flip success, logs=${JSON.stringify(play.logs)}`);
+
+    const weeklyRows = await listPlayerVariables(player.playerId, 'casino_window:');
+    assert.ok(weeklyRows.some((row) => /casino_window:\d{4}-W\d{2}$/.test(row.key)), `expected weekly window key, got ${JSON.stringify(weeklyRows.map((row) => row.key))}`);
+
+    await client.variable.variableControllerCreate({
+      key: 'casino_window:1999-W01',
+      value: JSON.stringify({ wagered: 10, lost: 5, windowKey: '1999-W01' }),
+      gameServerId: ctx.gameServer.id,
+      moduleId,
+      playerId: player.playerId,
+    });
+
+    const expireWeekly = await triggerCronjob(expireWindowsCronjobId);
+    assert.equal(expireWeekly.success, true, `expected weekly expire-windows success, logs=${JSON.stringify(expireWeekly.logs)}`);
+    assert.equal(await getVariable('casino_window:1999-W01', player.playerId), null, 'expected stale weekly row deletion');
   });
 });

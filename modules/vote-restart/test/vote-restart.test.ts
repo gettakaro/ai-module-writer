@@ -565,6 +565,82 @@ describe('vote-restart recovery paths and locked thresholds', () => {
   });
 });
 
+describe('vote-restart immune initiator behavior', () => {
+  let client6: Client;
+  let ctx6: MockServerContext;
+  let moduleId6: string;
+  let versionId6: string;
+  let prefix6: string;
+  let initiatorImmuneRoleId6: string | undefined;
+
+  before(async () => {
+    client6 = await createClient();
+    ctx6 = await startMockServer(client6);
+
+    const mod = await pushModule(client6, MODULE_DIR);
+    moduleId6 = mod.id;
+    versionId6 = mod.latestVersion.id;
+
+    await installModule(client6, versionId6, ctx6.gameServer.id, {
+      userConfig: {
+        voteDuration: 120,
+        cooldownDuration: 60,
+        restartDelay: 30,
+        restartCommand: 'say restart-test',
+        passThreshold: 100,
+        minimumPlayers: 1,
+      },
+    });
+
+    prefix6 = await getCommandPrefix(client6, ctx6.gameServer.id);
+    initiatorImmuneRoleId6 = await assignPermissions(
+      client6,
+      ctx6.players[0].playerId,
+      ctx6.gameServer.id,
+      ['VOTE_RESTART_INITIATE', 'VOTE_RESTART_IMMUNE'],
+    );
+  });
+
+  after(async () => {
+    await cleanupRole(client6, initiatorImmuneRoleId6);
+    try {
+      await uninstallModule(client6, moduleId6, ctx6.gameServer.id);
+    } catch (err) {
+      console.error('Cleanup: failed to uninstall immune-initiator module:', err);
+    }
+    try {
+      await deleteModule(client6, moduleId6);
+    } catch (err) {
+      console.error('Cleanup: failed to delete immune-initiator module:', err);
+    }
+    await stopMockServer(ctx6.server, client6, ctx6.gameServer.id);
+  });
+
+  const { triggerCommand: triggerCommand6, getResult: getResult6 } = makeCommandHelpers(
+    () => client6,
+    () => ctx6.gameServer.id,
+    () => prefix6,
+  );
+
+  it('starts at 0 votes when the initiator is immune', async () => {
+    const start = getResult6(await triggerCommand6(ctx6.players[0].playerId, 'voterestart'));
+    assert.equal(start.success, true, `Expected immune initiator vote start to succeed, logs=${JSON.stringify(start.logs)}`);
+    assert.ok(start.logs.some((l) => l.includes('0/1') || l.includes('starts at 0')), `Expected immune-initiator broadcast wording, logs=${JSON.stringify(start.logs)}`);
+
+    const voteState = await client6.variable.variableControllerSearch({
+      filters: {
+        key: ['vr_vote_state'],
+        gameServerId: [ctx6.gameServer.id],
+        moduleId: [moduleId6],
+      },
+    });
+    assert.equal(voteState.data.data.length, 1, 'Expected vote state row for immune initiator');
+    const state = JSON.parse(voteState.data.data[0]!.value);
+    assert.deepEqual(state.voters, [], `Expected immune initiator not to auto-vote, state=${JSON.stringify(state)}`);
+    assert.equal(state.eligibleCountAtStart, 2, `Expected only non-immune players to count toward eligibility, state=${JSON.stringify(state)}`);
+  });
+});
+
 describe('vote-restart concurrent start locking', () => {
   let client5: Client;
   let ctx5: MockServerContext;

@@ -104,7 +104,7 @@ async function main() {
 
     if (action === 'double') {
       if (session.playerHand.length !== 2) throw new TakaroUserError('You can only double on your first decision.');
-      const extra = await placeBet({ gameServerId, moduleId: mod.moduleId, pog, player, config, game: 'blackjack', amount: session.stake, skipLock: true });
+      const extra = await placeBet({ gameServerId, moduleId: mod.moduleId, pog, player, config, game: 'blackjack', amount: session.stake, skipLock: true, skipCooldown: true });
       session.stake += extra.amount;
       session.doubled = true;
       session.playerHand.push(session.deck.pop());

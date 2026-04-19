@@ -1,4 +1,4 @@
-import { data, TakaroUserError } from '@takaro/helpers';
+import { data, TakaroUserError, checkPermission } from '@takaro/helpers';
 import { getDefaultConfig } from './casino-helpers.js';
 
 async function main() {
@@ -58,12 +58,18 @@ async function main() {
   if (config.games.duel) enabled.push('duel');
   if (config.games.race) enabled.push('race');
 
-  await pog.pm([
+  const lines = [
     '🎰 Casino games: ' + enabled.join(', '),
     `Min bet: ${config.minBet} | Base max bet: ${config.maxBet} | Window: ${config.capWindow}`,
-    'Commands: /casinostats, /casinotop <wager|won|winrate|roi|biggest>, /jackpot',
-    'Tip: /casino <game> shows focused help for one game.',
-  ].join('\n'));
+    'Player commands: /casinostats, /casinotop <wager|won|winrate|roi|biggest>, /jackpot',
+  ];
+
+  if (checkPermission(pog, 'CASINO_MANAGE')) {
+    lines.push('Admin commands: /casinoreport [days], /casinoban <player> [hours], /casinounban <player>, /casinoresetstats <player>, /setjackpot <amount>');
+  }
+
+  lines.push('Tip: /casino <game> shows focused help for one game.');
+  await pog.pm(lines.join('\n'));
 }
 
 await main();

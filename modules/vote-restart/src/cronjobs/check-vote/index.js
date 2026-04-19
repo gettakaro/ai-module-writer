@@ -85,6 +85,7 @@ async function main() {
       message: `[Vote Restart] The restart vote started by ${outcome.initiatorName} has expired. A new vote can be started in ${config.cooldownDuration}s.`,
       opts: {},
     });
+    console.log(`check-vote: expired notice sent for ${outcome.initiatorName}`);
     return;
   }
 
@@ -96,7 +97,12 @@ async function main() {
     return;
   }
 
-  console.log('check-vote: restart delay elapsed, executing restart');
+  console.log('check-vote: restart delay elapsed, clearing vote state before executing restart');
+
+  await withVoteLock(gameServerId, moduleId, async () => {
+    await deleteVoteState(gameServerId, moduleId);
+    await deleteRestartState(gameServerId, moduleId);
+  });
 
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
     message: '[Vote Restart] Restarting now!',
@@ -108,10 +114,6 @@ async function main() {
       command: config.restartCommand,
     });
     console.log('check-vote: restart command executed successfully');
-    await withVoteLock(gameServerId, moduleId, async () => {
-      await deleteVoteState(gameServerId, moduleId);
-      await deleteRestartState(gameServerId, moduleId);
-    });
   } catch (cmdErr) {
     console.error(`check-vote: failed to execute restart command "${config.restartCommand}": ${cmdErr}`);
     const cooldownUntil = new Date(Date.now() + config.cooldownDuration * 1000).toISOString();
