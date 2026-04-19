@@ -1,5 +1,5 @@
 import { data } from '@takaro/helpers';
-import { getConfig, playWordle } from './minigames-helpers.js';
+import { getConfig, playWordle, normalizeOptionalStringArg } from './minigames-helpers.js';
 
 async function main() {
   const { gameServerId, player, pog, module: mod, arguments: args } = data;
@@ -9,7 +9,7 @@ async function main() {
     player,
     pog,
     config: getConfig(mod),
-    guess: args.guess,
+    guess: normalizeOptionalStringArg(args.guess),
   });
 }
 

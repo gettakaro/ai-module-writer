@@ -10,12 +10,14 @@ async function main() {
   const wordle = await getWordleSession(gameServerId, moduleId, player.id);
   const hangman = await getHangmanSession(gameServerId, moduleId, player.id);
   const hotcold = await getHotColdSession(gameServerId, moduleId, player.id);
-  await pog.pm([
+  const message = [
     `🧩 Daily puzzles reset in ${formatCountdown(secondsUntilUtcMidnight())}`,
     `Wordle: ${puzzle.wordle ? (wordle.solved ? 'solved' : `${wordle.guesses.length}/6 guesses`) : 'not configured'}`,
     `Hangman: ${puzzle.hangman ? (hangman.solved ? 'solved' : `wrong ${hangman.wrongCount}/6`) : 'not configured'}`,
     `Hot/Cold: ${Number.isInteger(puzzle.hotcold) ? (hotcold.solved ? 'solved' : `${hotcold.guesses.length}/8 guesses`) : 'not ready'}`,
-  ].join('\n'));
+  ].join('\n');
+  await pog.pm(message);
+  console.log(`minigames: puzzle status=${message.replace(/\n/g, ' | ')}`);
 }
 
 await main();

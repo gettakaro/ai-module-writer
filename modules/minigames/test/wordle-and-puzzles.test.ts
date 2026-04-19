@@ -156,7 +156,10 @@ describe('minigames: daily puzzles and wordle scoring', () => {
   it('shows top-level help without requiring a game argument', async () => {
     const event = await triggerCommand(ctx.players[0].playerId, `${prefix}minigames`);
     const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
     assert.equal(meta?.result?.success, true, 'minigames help should succeed without args');
+    assert.ok(logs.some((msg) => msg.includes('minigames: help overview=')), `expected help overview log, got ${JSON.stringify(logs)}`);
+    assert.ok(logs.some((msg) => msg.includes('Daily puzzles: /wordle, /hangman, /hotcold, /puzzle')), `expected help content in logs, got ${JSON.stringify(logs)}`);
   });
 
   it('rejects play commands for players without MINIGAMES_PLAY', async () => {
@@ -241,15 +244,109 @@ describe('minigames: daily puzzles and wordle scoring', () => {
 
   it('shows puzzle and minigamestats without optional arguments', async () => {
     const puzzleEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}puzzle`);
-    const puzzleMeta = puzzleEvent.meta as { result?: { success?: boolean } };
+    const puzzleMeta = puzzleEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const puzzleLogs = (puzzleMeta?.result?.logs ?? []).map((l) => l.msg);
     assert.equal(puzzleMeta?.result?.success, true, 'puzzle should succeed without args');
+    assert.ok(puzzleLogs.some((msg) => msg.includes('minigames: puzzle status=')), `expected puzzle status log, got ${JSON.stringify(puzzleLogs)}`);
+    assert.ok(puzzleLogs.some((msg) => msg.includes('Wordle:')), `expected puzzle status content, got ${JSON.stringify(puzzleLogs)}`);
 
     const statsEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamestats`);
-    const statsMeta = statsEvent.meta as { result?: { success?: boolean } };
+    const statsMeta = statsEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const statsLogs = (statsMeta?.result?.logs ?? []).map((l) => l.msg);
     assert.equal(statsMeta?.result?.success, true, 'minigamestats should succeed without args');
+    assert.ok(statsLogs.some((msg) => msg.includes('minigames: stats player=')), `expected stats log, got ${JSON.stringify(statsLogs)}`);
+    assert.ok(statsLogs.some((msg) => msg.includes('Total points:')), `expected stats content in logs, got ${JSON.stringify(statsLogs)}`);
   });
 });
 
 function puzzleDate() {
   return new Date().toISOString().slice(0, 10);
 }
+
+describe('minigames: daily point cap enforcement', () => {
+  let client: Client;
+  let ctx: MockServerContext;
+  let moduleId: string;
+  let versionId: string;
+  let prefix: string;
+  let cronRolloverId: string;
+  let playRoleId: string | undefined;
+
+  before(async () => {
+    client = await createClient();
+    await cleanupTestModules(client);
+    await cleanupTestGameServers(client);
+    ctx = await startMockServer(client);
+
+    const mod = await pushModule(client, MODULE_DIR);
+    moduleId = mod.id;
+    versionId = mod.latestVersion.id;
+    cronRolloverId = mod.latestVersion.cronJobs.find((c) => c.name === 'rolloverDailyPuzzles')!.id;
+
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        dailyPointsCapPerPlayer: 50,
+        pointsWordleBase: 100,
+      },
+    });
+
+    prefix = await getCommandPrefix(client, ctx.gameServer.id);
+    playRoleId = await assignPermissions(client, ctx.players[0].playerId, ctx.gameServer.id, ['MINIGAMES_PLAY']);
+
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_WORDLE, { words: ['crane'] });
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_WORDLIST, { words: ['takaro'] });
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_TRIVIA, { questions: [{ question: '2+2?', answer: '4' }] });
+
+    const before = new Date();
+    await client.cronjob.cronJobControllerTrigger({ gameServerId: ctx.gameServer.id, cronjobId: cronRolloverId, moduleId });
+    await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CronjobExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_PUZZLE, { date: puzzleDate(), wordle: 'crane', hangman: 'takaro', hotcold: 321 });
+  });
+
+  after(async () => {
+    await cleanupRole(client, playRoleId);
+    try {
+      await uninstallModule(client, moduleId, ctx.gameServer.id);
+    } catch (err) {
+      console.error('Cleanup: failed to uninstall module:', err);
+    }
+    try {
+      await deleteModule(client, moduleId);
+    } catch (err) {
+      console.error('Cleanup: failed to delete module:', err);
+    }
+    await stopMockServer(ctx.server, client, ctx.gameServer.id);
+  });
+
+  async function triggerCommand(playerId: string, msg: string) {
+    const before = new Date();
+    await client.command.commandControllerTrigger(ctx.gameServer.id, { playerId, msg });
+    return waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+  }
+
+  it('clips awards to the remaining cap and then rejects further puzzle attempts that day', async () => {
+    const solveEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}wordle crane`);
+    const solveMeta = solveEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const solveLogs = (solveMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(solveMeta?.result?.success, true, `wordle solve should succeed, logs=${JSON.stringify(solveLogs)}`);
+
+    const stats = await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[0].playerId);
+    const window = await readVariable(client, ctx.gameServer.id, moduleId, KEY_WINDOW, ctx.players[0].playerId);
+    assert.equal(stats.totalPoints, 50, 'wordle reward should be clipped to the configured daily cap');
+    assert.equal(window.earned, 50, 'daily window should stop at the cap');
+
+    const deniedEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}hangman t`);
+    const deniedMeta = deniedEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(deniedMeta?.result?.success, false, 'further puzzle attempts should be rejected after cap exhaustion');
+  });
+});

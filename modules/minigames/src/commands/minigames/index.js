@@ -1,5 +1,5 @@
 import { data } from '@takaro/helpers';
-import { getConfig, requirePlayable } from './minigames-helpers.js';
+import { getConfig, requirePlayable, normalizeOptionalStringArg } from './minigames-helpers.js';
 
 async function main() {
   const { gameServerId, player, pog, module: mod, arguments: args } = data;
@@ -7,7 +7,7 @@ async function main() {
   const config = getConfig(mod);
   await requirePlayable({ gameServerId, moduleId, pog, playerId: player.id });
 
-  const game = String(args.game || '').trim().toLowerCase();
+  const game = normalizeOptionalStringArg(args.game).toLowerCase();
   const lines = {
     wordle: '🟩 /wordle [guess] — 6 guesses to solve the daily 5-letter word.',
     hangman: '🎪 /hangman [letterOrWord] — reveal the daily word before 6 wrong guesses.',
@@ -19,17 +19,21 @@ async function main() {
   };
 
   if (game) {
-    await pog.pm(lines[game] || `Unknown game "${game}". Try: wordle, hangman, hotcold, trivia, scramble, mathrace, reactionrace.`);
+    const message = lines[game] || `Unknown game "${game}". Try: wordle, hangman, hotcold, trivia, scramble, mathrace, reactionrace.`;
+    await pog.pm(message);
+    console.log(`minigames: help topic=${game} message=${message}`);
     return;
   }
 
-  await pog.pm([
+  const message = [
     '🎮 miniGames',
     'Daily puzzles: /wordle, /hangman, /hotcold, /puzzle',
     'Live rounds: /answer, reaction-race in raw chat',
     'Stats: /minigamestats [player], /minigamestop <points|wordle|hangman|streak>',
     `Live round cadence: every ~${config.liveRoundIntervalMinutes} min when enough players are online.`,
-  ].join('\n'));
+  ].join('\n');
+  await pog.pm(message);
+  console.log(`minigames: help overview=${message.replace(/\n/g, ' | ')}`);
 }
 
 await main();

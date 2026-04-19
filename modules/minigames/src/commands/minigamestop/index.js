@@ -19,7 +19,9 @@ async function main() {
   };
   const selected = map[category];
   if (!selected) throw new TakaroUserError('Category must be one of: points, wordle, hangman, streak.');
-  await pog.pm(renderLeaderboard(selected[0], selected[1]));
+  const message = renderLeaderboard(selected[0], selected[1]);
+  await pog.pm(message);
+  console.log(`minigames: leaderboard category=${category} summary=${message.replace(/\n/g, ' | ')}`);
 }
 
 await main();

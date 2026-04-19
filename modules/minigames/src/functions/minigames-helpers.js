@@ -235,6 +235,28 @@ export function requirePermissionOrThrow(pog, permission, message) {
   }
 }
 
+export function normalizeOptionalStringArg(value, sentinel = '__MINIGAMES_NONE__') {
+  const normalized = String(value ?? '').trim();
+  if (!normalized || normalized === sentinel) return '';
+  return normalized;
+}
+
+export function normalizeOptionalNumberArg(value, sentinel = 0) {
+  if (value === undefined || value === null || value === '' || value === sentinel || String(value) === String(sentinel)) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+export function requireTargetName(targetName, usage) {
+  const normalized = normalizeOptionalStringArg(targetName);
+  if (!normalized) {
+    throw new TakaroUserError(usage);
+  }
+  return normalized;
+}
+
 export async function getBanRecord(gameServerId, moduleId, playerId) {
   const record = await readJsonVariable(gameServerId, moduleId, BAN_KEY, null, playerId);
   if (!record) return null;
@@ -248,13 +270,13 @@ export async function getBanRecord(gameServerId, moduleId, playerId) {
 
 export async function requirePlayable({ gameServerId, moduleId, pog, playerId }) {
   requirePermissionOrThrow(pog, 'MINIGAMES_PLAY', 'You do not have permission to play mini-games.');
-  if (checkPermission(pog, 'MINIGAMES_BANNED')) {
-    throw new TakaroUserError('You are banned from mini-games.');
-  }
   const ban = await getBanRecord(gameServerId, moduleId, playerId);
   if (ban) {
     const until = ban.expiresAt ? ` until ${ban.expiresAt}` : '';
     throw new TakaroUserError(`You are banned from mini-games${until}.`);
+  }
+  if (checkPermission(pog, 'MINIGAMES_BANNED')) {
+    console.log(`minigames: ignoring stale MINIGAMES_BANNED marker for player=${playerId} because no active ban record exists`);
   }
 }
 
@@ -1285,9 +1307,34 @@ export function renderLeaderboard(title, entries) {
   return [title, ...entries.map((entry, idx) => `${idx + 1}. ${entry.name} — ${entry.value}`)].join('\n');
 }
 
-export async function findPlayerByName(name) {
-  const search = await takaro.player.playerControllerSearch({ search: { name: [name] } });
-  return search.data.data.find((player) => player.name.toLowerCase() === String(name).toLowerCase()) || null;
+export async function findPlayerOnGameServerByName(gameServerId, name) {
+  const wanted = String(name ?? '').trim().toLowerCase();
+  if (!wanted) return null;
+
+  let page = 0;
+  const limit = 100;
+  while (true) {
+    const res = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
+      filters: { gameServerId: [gameServerId] },
+      extend: ['player'],
+      page,
+      limit,
+    });
+    const batch = res.data.data;
+    const match = batch.find((entry) => String(entry.player?.name || '').trim().toLowerCase() === wanted);
+    if (match) {
+      return {
+        id: match.playerId,
+        name: match.player?.name || wanted,
+        pogId: match.id,
+        player: match.player || null,
+      };
+    }
+    if (batch.length < limit) break;
+    page += 1;
+  }
+
+  return null;
 }
 
 export function getBanMarkerRoleName(playerId) {
@@ -1330,8 +1377,9 @@ export async function removeBanMarkerRole(roleId) {
 }
 
 export async function banPlayer({ gameServerId, moduleId, targetName, hours }) {
-  const target = await findPlayerByName(targetName);
-  if (!target) throw new TakaroUserError(`Player "${targetName}" not found.`);
+  const resolvedTarget = requireTargetName(targetName, 'Usage: /minigamesban <player> [hours]');
+  const target = await findPlayerOnGameServerByName(gameServerId, resolvedTarget);
+  if (!target) throw new TakaroUserError(`Player "${resolvedTarget}" not found on this game server.`);
   const record = {};
   if (hours !== undefined && hours !== null && hours !== '') {
     const duration = Number(hours);
@@ -1345,8 +1393,9 @@ export async function banPlayer({ gameServerId, moduleId, targetName, hours }) {
 }
 
 export async function unbanPlayer({ gameServerId, moduleId, targetName }) {
-  const target = await findPlayerByName(targetName);
-  if (!target) throw new TakaroUserError(`Player "${targetName}" not found.`);
+  const resolvedTarget = requireTargetName(targetName, 'Usage: /minigamesunban <player>');
+  const target = await findPlayerOnGameServerByName(gameServerId, resolvedTarget);
+  if (!target) throw new TakaroUserError(`Player "${resolvedTarget}" not found on this game server.`);
   const existing = await readJsonVariable(gameServerId, moduleId, BAN_KEY, null, target.id);
   const removed = await deleteVariable(gameServerId, moduleId, BAN_KEY, target.id);
   await removeBanMarkerRole(existing?.roleId);
@@ -1355,8 +1404,9 @@ export async function unbanPlayer({ gameServerId, moduleId, targetName }) {
 }
 
 export async function resetPlayerStats({ gameServerId, moduleId, targetName }) {
-  const target = await findPlayerByName(targetName);
-  if (!target) throw new TakaroUserError(`Player "${targetName}" not found.`);
+  const resolvedTarget = requireTargetName(targetName, 'Usage: /minigamesresetstats <player>');
+  const target = await findPlayerOnGameServerByName(gameServerId, resolvedTarget);
+  if (!target) throw new TakaroUserError(`Player "${resolvedTarget}" not found on this game server.`);
   const removedStats = await deleteVariable(gameServerId, moduleId, STATS_KEY, target.id);
   await deleteVariable(gameServerId, moduleId, DAILY_HISTORY_KEY, target.id);
   await deleteVariable(gameServerId, moduleId, WINDOW_KEY, target.id);

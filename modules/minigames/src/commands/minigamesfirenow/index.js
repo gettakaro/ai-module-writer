@@ -1,5 +1,5 @@
 import { data, checkPermission, TakaroUserError } from '@takaro/helpers';
-import { getConfig, maybeFireLiveRound } from './minigames-helpers.js';
+import { getConfig, maybeFireLiveRound, normalizeOptionalStringArg } from './minigames-helpers.js';
 
 async function main() {
   const { gameServerId, pog, module: mod, arguments: args } = data;
@@ -8,7 +8,7 @@ async function main() {
     gameServerId,
     moduleId: mod.moduleId,
     config: getConfig(mod),
-    forcedGame: args.game ? String(args.game).trim().toLowerCase() : undefined,
+    forcedGame: normalizeOptionalStringArg(args.game).toLowerCase() || undefined,
     ignoreThresholds: true,
   });
   if (!round) {
