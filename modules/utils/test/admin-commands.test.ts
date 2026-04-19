@@ -198,7 +198,11 @@ describe('utils: admin commands', () => {
     const res = await trigger(ctx.players[0].playerId, `${prefix}givecurrency definitely-not-a-real-player-name 5`);
 
     assert.equal(res.success, false, 'Expected /givecurrency with an invalid player to fail');
-    assert.ok(res.logs.some((msg) => msg.includes('No player found with the name or ID')), JSON.stringify(res.logs));
+    assert.ok(
+      res.logs.some((msg) => msg.includes('Please specify a valid player.'))
+        || res.logs.some((msg) => msg.includes('No player found with the name or ID')),
+      JSON.stringify(res.logs),
+    );
     assert.ok(!res.logs.some((msg) => msg.includes('positive whole number')), JSON.stringify(res.logs));
   });
 
@@ -240,7 +244,11 @@ describe('utils: admin commands', () => {
     const res = await trigger(ctx.players[0].playerId, `${prefix}ban definitely-not-a-real-player-name 10m`);
 
     assert.equal(res.success, false, 'Expected /ban with an invalid player to fail');
-    assert.ok(res.logs.some((msg) => msg.includes('No player found with the name or ID')), JSON.stringify(res.logs));
+    assert.ok(
+      res.logs.some((msg) => msg.includes('Please specify a valid player.'))
+        || res.logs.some((msg) => msg.includes('No player found with the name or ID')),
+      JSON.stringify(res.logs),
+    );
   });
 
   it('rejects oversized /ban durations with the friendly validation message', async () => {

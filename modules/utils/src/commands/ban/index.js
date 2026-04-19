@@ -1,11 +1,11 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
   extractReason,
+  getCommandTargetPlayer,
   getPlayerName,
   normalizeReason,
   parseBanDurationToken,
   renderTemplate,
-  resolvePlayerNameTarget,
   safeBroadcast,
   safePrivateMessage,
 } from './utils-helpers.js';
@@ -17,11 +17,9 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  let target;
-  try {
-    target = await resolvePlayerNameTarget(args.player);
-  } catch (err) {
-    throw new TakaroUserError(err.message);
+  const target = getCommandTargetPlayer(args.player);
+  if (!target) {
+    throw new TakaroUserError('Please specify a valid player.');
   }
 
   if (target.playerId === player.id) {

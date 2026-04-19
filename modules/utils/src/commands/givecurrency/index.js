@@ -1,9 +1,9 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
-  getPlayerName,
+  getCommandTargetPlayer,
   getGameServerPogForPlayer,
+  getPlayerName,
   renderTemplate,
-  resolvePlayerNameTarget,
   safeBroadcast,
   safeDirectMessage,
   safePrivateMessage,
@@ -18,11 +18,9 @@ async function main() {
 
   const amount = args.amount;
 
-  let target;
-  try {
-    target = await resolvePlayerNameTarget(args.player);
-  } catch (err) {
-    throw new TakaroUserError(err.message);
+  const target = getCommandTargetPlayer(args.player);
+  if (!target) {
+    throw new TakaroUserError('Please specify a valid player.');
   }
 
   if (!Number.isInteger(amount) || amount <= 0) {

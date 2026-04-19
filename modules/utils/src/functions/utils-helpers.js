@@ -78,13 +78,15 @@ export function formatOnlinePlayersLine(players) {
 
 export function getCommandTargetPlayer(target) {
   if (!target || typeof target !== 'object') return null;
-  if (!target.playerId) return null;
+
+  const playerId = trimOrEmpty(target.playerId || target.id);
+  if (playerId === '') return null;
 
   return {
-    playerId: target.playerId,
-    name: trimOrEmpty(target.name) || 'Unknown Player',
-    gameId: target.gameId,
-    gameServerId: target.gameServerId,
+    playerId,
+    name: trimOrEmpty(target.name || target.playerName) || 'Unknown Player',
+    gameId: trimOrEmpty(target.gameId),
+    gameServerId: trimOrEmpty(target.gameServerId),
     online: target.online,
   };
 }
@@ -202,32 +204,6 @@ export async function getPlayerName(playerId, fallback) {
   }
 }
 
-export async function resolvePlayerNameTarget(targetName) {
-  const normalizedTargetName = trimOrEmpty(targetName);
-  if (normalizedTargetName === '' || normalizedTargetName === '?') {
-    throw new Error('Please specify a valid player.');
-  }
-
-  const result = await takaro.player.playerControllerSearch({
-    search: {
-      name: [normalizedTargetName],
-    },
-  });
-
-  const exactMatch = result.data.data.find(
-    (candidate) => trimOrEmpty(candidate.name).toLowerCase() === normalizedTargetName.toLowerCase(),
-  );
-
-  if (!exactMatch) {
-    throw new Error(`No player found with the name or ID "${normalizedTargetName}".`);
-  }
-
-  return {
-    playerId: exactMatch.id,
-    name: trimOrEmpty(exactMatch.name) || normalizedTargetName,
-  };
-}
-
 export async function getGameServerPogForPlayer(gameServerId, playerId, { onlineOnly = false } = {}) {
   const filters = {
     gameServerId: [gameServerId],
@@ -257,18 +233,6 @@ export async function getGameServerPogForPlayer(gameServerId, playerId, { online
 
 export async function getOnlinePogForPlayer(gameServerId, playerId) {
   return getGameServerPogForPlayer(gameServerId, playerId, { onlineOnly: true });
-}
-
-export async function resolveCurrentGameServerTarget(gameServerId, targetName) {
-  const target = await resolvePlayerNameTarget(targetName);
-  const pog = await getGameServerPogForPlayer(gameServerId, target.playerId);
-
-  return {
-    ...target,
-    gameId: pog?.gameId,
-    gameServerId: pog?.gameServerId,
-    online: Boolean(pog?.online),
-  };
 }
 
 export async function safeBroadcast(gameServerId, message) {

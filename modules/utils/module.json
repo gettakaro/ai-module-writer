@@ -1,5 +1,5 @@
 {
-  "name": "server-utils",
+  "name": "test-utils",
   "description": "Cross-game utility commands for server info, rules, moderation, and simple economy administration.",
   "version": "latest",
   "supportedGames": [
@@ -126,10 +126,9 @@
       "arguments": [
         {
           "name": "player",
-          "type": "string",
+          "type": "player",
           "helpText": "The player to kick",
-          "position": 0,
-          "defaultValue": "?"
+          "position": 0
         },
         {
           "name": "reason",
@@ -148,10 +147,9 @@
       "arguments": [
         {
           "name": "player",
-          "type": "string",
+          "type": "player",
           "helpText": "The player to ban",
-          "position": 0,
-          "defaultValue": "?"
+          "position": 0
         },
         {
           "name": "duration",
@@ -176,10 +174,9 @@
       "arguments": [
         {
           "name": "player",
-          "type": "string",
+          "type": "player",
           "helpText": "The player to receive currency",
-          "position": 0,
-          "defaultValue": "?"
+          "position": 0
         },
         {
           "name": "amount",

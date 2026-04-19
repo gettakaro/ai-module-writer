@@ -81,15 +81,22 @@ async function main() {
     }
   } catch (stateErr) {
     console.error(`Fund: failed to persist contribution state for player ${player.name} after deducting ${amount}. Attempting currency rollback. Error: ${stateErr}`);
+    let refunded = false;
     try {
       await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, pog.playerId, {
         currency: amount,
       });
+      refunded = true;
       console.log(`Fund: rolled back ${amount} currency to player ${player.name} after contribution-state failure.`);
     } catch (rollbackErr) {
       console.error(`Fund: CRITICAL rollback failure for player ${player.name} after contribution-state failure. Manual intervention required. Rollback error: ${rollbackErr}`);
     }
-    throw new TakaroUserError('Your contribution could not be recorded, so your currency was refunded. Please try again.');
+
+    if (refunded) {
+      throw new TakaroUserError('Your contribution could not be recorded, so your currency was refunded. Please try again.');
+    }
+
+    throw new TakaroUserError('Your contribution could not be recorded, and we could not confirm your refund. Please contact an admin immediately.');
   }
 
   if (thresholdReached) {
@@ -111,15 +118,20 @@ async function main() {
       }
     }
 
-    await pog.pm(
-      `You contributed ${amount} to the community fund. The community fund goal has been met! A new round begins. (Round #${newCycle})`,
-    );
+    const carryover = newTotal - threshold;
+    const carryoverMessage = carryover > 0
+      ? ` ${carryover} carried over into the new round.`
+      : '';
+    const playerMessage = `You contributed ${amount} to the community fund. The community fund goal has been met! A new round begins. (Round #${newCycle})${carryoverMessage}`;
+
+    console.log(playerMessage);
+    await pog.pm(playerMessage);
   } else {
     const percent = Math.floor((newTotal / threshold) * 100);
+    const playerMessage = `You contributed ${amount} to the community fund. Current total: ${newTotal}/${threshold} (${percent}%).`;
 
-    await pog.pm(
-      `You contributed ${amount} to the community fund. Current total: ${newTotal}/${threshold} (${percent}%).`,
-    );
+    console.log(playerMessage);
+    await pog.pm(playerMessage);
 
     if (config.broadcastContributions) {
       await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {

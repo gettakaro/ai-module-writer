@@ -37,6 +37,7 @@ describe('community-fund: fund-contribute command', () => {
   let versionId: string;
   let prefix: string;
   let contributeRoleId: string;
+  let extraContributeRoleId: string | undefined;
 
   before(async () => {
     client = await createClient();
@@ -76,6 +77,7 @@ describe('community-fund: fund-contribute command', () => {
 
   after(async () => {
     await cleanupRole(client, contributeRoleId);
+    await cleanupRole(client, extraContributeRoleId);
     try {
       await uninstallModule(client, moduleId, ctx.gameServer.id);
     } catch (err) {
@@ -123,6 +125,38 @@ describe('community-fund: fund-contribute command', () => {
     }
 
     throw new Error(`Timed out waiting for ${minimumCount} command-executed events`);
+  }
+
+  async function resetFundState() {
+    const vars = await client.variable.variableControllerSearch({
+      filters: {
+        gameServerId: [ctx.gameServer.id],
+        moduleId: [moduleId],
+        key: ['fund_total', 'fund_cycle', 'fund_last_completion'],
+      },
+      limit: 100,
+    });
+
+    await Promise.all(vars.data.data.map((variable) => client.variable.variableControllerDelete(variable.id)));
+  }
+
+  async function setCurrencyExact(playerId: string, desiredCurrency: number) {
+    const pog = await getPog(playerId);
+    assert.ok(pog, `Expected POG for player ${playerId}`);
+
+    const currentCurrency = pog?.currency ?? 0;
+    if (currentCurrency < desiredCurrency) {
+      await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(ctx.gameServer.id, playerId, {
+        currency: desiredCurrency - currentCurrency,
+      });
+      return;
+    }
+
+    if (currentCurrency > desiredCurrency) {
+      await client.playerOnGameserver.playerOnGameServerControllerDeductCurrency(ctx.gameServer.id, playerId, {
+        currency: currentCurrency - desiredCurrency,
+      });
+    }
   }
 
   it('should contribute currency to the fund and PM the player', async () => {
@@ -445,5 +479,141 @@ describe('community-fund: fund-contribute command', () => {
       statusLogs.some((msg) => msg.includes('total=0')),
       `Expected fundstatus to show total=0 after contributing the exact remaining amount, got: ${JSON.stringify(statusLogs)}`,
     );
+  });
+
+  it('should tell the contributor when excess contribution carries into the next round', async () => {
+    const player = ctx.players[0]!;
+    await resetFundState();
+    await setCurrencyExact(player.playerId, 125);
+
+    const before = new Date();
+    await client.command.commandControllerTrigger(ctx.gameServer.id, {
+      msg: `${prefix}fund 105`,
+      playerId: player.playerId,
+    });
+
+    const event = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(meta?.result?.success, true, 'Expected carryover contribution to succeed');
+
+    const logMessages = (meta?.result?.logs ?? []).map((l) => l.msg);
+    assert.ok(
+      logMessages.some((msg) => msg.includes('5 carried over into the new round.')),
+      `Expected completion message to mention the carryover amount, got: ${JSON.stringify(logMessages)}`,
+    );
+
+    const statusBefore = new Date();
+    await client.command.commandControllerTrigger(ctx.gameServer.id, {
+      msg: `${prefix}fundstatus`,
+      playerId: player.playerId,
+    });
+
+    const statusEvent = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: statusBefore,
+      timeout: 30000,
+    });
+
+    const statusMeta = statusEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(statusMeta?.result?.success, true, 'Expected fundstatus to succeed after carryover completion');
+
+    const statusLogs = (statusMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.ok(
+      statusLogs.some((msg) => msg.includes('total=5')),
+      `Expected carryover total=5 after a 105 contribution into a 100 threshold, got: ${JSON.stringify(statusLogs)}`,
+    );
+  });
+
+  it('should refund the player if fund state persistence fails after deduction', async () => {
+    const firstPlayer = ctx.players[0]!;
+    const secondPlayer = ctx.players[2]!;
+
+    extraContributeRoleId ??= await assignPermissions(
+      client,
+      secondPlayer.playerId,
+      ctx.gameServer.id,
+      ['COMMUNITY_FUND_CONTRIBUTE'],
+    );
+
+    let rollbackAttemptLogs: string[] | undefined;
+
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await resetFundState();
+      await setCurrencyExact(firstPlayer.playerId, 10);
+      await setCurrencyExact(secondPlayer.playerId, 10);
+
+      const before = new Date();
+      await Promise.all([
+        client.command.commandControllerTrigger(ctx.gameServer.id, {
+          msg: `${prefix}fund 10`,
+          playerId: firstPlayer.playerId,
+        }),
+        client.command.commandControllerTrigger(ctx.gameServer.id, {
+          msg: `${prefix}fund 10`,
+          playerId: secondPlayer.playerId,
+        }),
+      ]);
+
+      const events = await waitForCommandEvents(before, 2);
+      const fundEvents = events
+        .map((event) => event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } })
+        .map((meta) => ({
+          success: meta?.result?.success ?? false,
+          logs: (meta?.result?.logs ?? []).map((l) => l.msg),
+        }))
+        .filter((result) => result.logs.some((msg) => msg.includes('Fund contribution'))
+          || result.logs.some((msg) => msg.includes('rolled back'))
+          || result.logs.some((msg) => msg.includes('could not be recorded, so your currency was refunded')));
+
+      const rollbackEvent = fundEvents.find((result) => !result.success
+        && result.logs.some((msg) => msg.includes('could not be recorded, so your currency was refunded')));
+      const successCount = fundEvents.filter((result) => result.success).length;
+      if (!rollbackEvent || successCount !== 1) {
+        continue;
+      }
+
+      rollbackAttemptLogs = rollbackEvent.logs;
+
+      const firstPog = await getPog(firstPlayer.playerId);
+      const secondPog = await getPog(secondPlayer.playerId);
+      assert.ok(firstPog, 'Expected first player POG to exist after rollback race');
+      assert.ok(secondPog, 'Expected second player POG to exist after rollback race');
+
+      const currencies = [firstPog?.currency, secondPog?.currency].sort((a, b) => (a ?? 0) - (b ?? 0));
+      assert.deepEqual(
+        currencies,
+        [0, 10],
+        `Expected one deduction to stick and one player to be refunded, got: ${JSON.stringify({ firstPog, secondPog, fundEvents })}`,
+      );
+
+      const statusBefore = new Date();
+      await client.command.commandControllerTrigger(ctx.gameServer.id, {
+        msg: `${prefix}fundstatus`,
+        playerId: firstPlayer.playerId,
+      });
+      const statusEvent = await waitForEvent(client, {
+        eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+        gameserverId: ctx.gameServer.id,
+        after: statusBefore,
+        timeout: 30000,
+      });
+      const statusMeta = statusEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+      const statusLogs = (statusMeta?.result?.logs ?? []).map((l) => l.msg);
+      assert.ok(
+        statusLogs.some((msg) => msg.includes('total=10')),
+        `Expected failed post-deduction contribution not to advance fund state, got: ${JSON.stringify(statusLogs)}`,
+      );
+
+      return;
+    }
+
+    assert.fail(`Did not observe a real rollback-path event after repeated concurrent attempts. Last rollback logs: ${JSON.stringify(rollbackAttemptLogs)}`);
   });
 });
