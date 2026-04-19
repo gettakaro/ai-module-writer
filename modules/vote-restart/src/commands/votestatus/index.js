@@ -13,7 +13,7 @@ async function main() {
   const moduleId = mod.moduleId;
 
   const voteState = await getVoteState(gameServerId, moduleId);
-  const restartPending = voteState?.status === 'passed'
+  const restartPending = voteState?.status === 'passed' && !voteState?.executedAt
     ? voteState
     : await getRestartPending(gameServerId, moduleId);
 

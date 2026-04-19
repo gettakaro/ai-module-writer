@@ -40,7 +40,7 @@ async function main() {
 
   const voteState = await getVoteState(gameServerId, moduleId);
   const persistedRestartPending = await getRestartPending(gameServerId, moduleId);
-  const restartPending = persistedRestartPending || (voteState?.status === 'passed' ? voteState : null);
+  const restartPending = persistedRestartPending || (voteState?.status === 'passed' && !voteState.executedAt ? voteState : null);
 
   if (!voteState && !restartPending) {
     // No vote in progress — nothing to do
@@ -83,6 +83,7 @@ async function main() {
     if (effectiveVotes >= threshold) {
       voteState.status = 'passed';
       voteState.passedAt = new Date().toISOString();
+      voteState.restartPendingCreatedAt = voteState.passedAt;
       await Promise.all([
         setVoteState(gameServerId, moduleId, voteState),
         setRestartPending(gameServerId, moduleId, {
@@ -161,14 +162,24 @@ async function main() {
             command: restartCommand,
           });
           console.log('check-vote: restart command executed successfully');
-          await setRestartPending(gameServerId, moduleId, {
-            ...currentPending,
-            status: 'executed',
-            attemptedAt,
-            executedAt: new Date().toISOString(),
-            restartDelay: delay,
-            restartCommand,
-          });
+          const executedAt = new Date().toISOString();
+          await Promise.all([
+            setRestartPending(gameServerId, moduleId, {
+              ...currentPending,
+              status: 'executed',
+              attemptedAt,
+              executedAt,
+              restartDelay: delay,
+              restartCommand,
+            }),
+            voteState ? setVoteState(gameServerId, moduleId, {
+              ...voteState,
+              status: 'executed',
+              passedAt: voteState.passedAt || currentPending.passedAt,
+              restartPendingCreatedAt: voteState.restartPendingCreatedAt || currentPending.passedAt,
+              executedAt,
+            }) : Promise.resolve(),
+          ]);
           await cleanupRestartState(gameServerId, moduleId, 'successful restart execution');
         } catch (cmdErr) {
           console.error(`check-vote: failed to execute restart command "${restartCommand}": ${cmdErr}`);

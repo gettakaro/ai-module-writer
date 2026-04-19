@@ -257,13 +257,19 @@ describe('minigames: daily puzzles and wordle scoring', () => {
     }).then(async (res) => Promise.all(res.data.data.map((entry) => client.variable.variableControllerDelete(entry.id))));
   });
 
-  it('awards boosted wordle points, history, and a big-score event on solve', async () => {
+  it('awards boosted wordle points, history, announces the big score, and pays currency on solve', async () => {
+    const beforePogSearch = await client.playerOnGameserver.playerOnGameServerControllerSearch({
+      filters: { gameServerId: [ctx.gameServer.id], playerId: [ctx.players[1].playerId] },
+    });
+    const beforeCurrency = Number(beforePogSearch.data.data[0]?.currency || 0);
+
     const event = await triggerCommand(ctx.players[1].playerId, `${prefix}wordle crane`);
     const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
     const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
 
     assert.equal(meta?.result?.success, true, `expected solve success, logs=${JSON.stringify(logs)}`);
     assert.ok(logs.some((msg) => msg.includes('wordle: solved')), `expected solve log, got ${JSON.stringify(logs)}`);
+    assert.ok(logs.some((msg) => msg.includes('minigames: award game=wordle') && msg.includes('actual=150') && msg.includes('currency=75')), `expected structured award log, got ${JSON.stringify(logs)}`);
 
     const stats = await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[1].playerId);
     const window = await readVariable(client, ctx.gameServer.id, moduleId, KEY_WINDOW, ctx.players[1].playerId);
@@ -275,7 +281,6 @@ describe('minigames: daily puzzles and wordle scoring', () => {
     assert.equal(history.days[puzzleDate()].perGame.wordle.wins, 1);
 
     let foundBigScoreAnnouncement = false;
-    let foundBigScoreEvent = false;
     for (let attempt = 0; attempt < 10; attempt++) {
       const recentEvents = await client.event.eventControllerSearch({
         filters: {
@@ -289,28 +294,20 @@ describe('minigames: daily puzzles and wordle scoring', () => {
         sortBy: 'createdAt',
       });
       foundBigScoreAnnouncement = recentEvents.data.data.some((entry) => {
-        const meta = entry.meta as { msg?: string } | undefined;
-        return String(entry.eventName) === 'chat-message' && String(meta?.msg || '').includes('BIG SCORE!');
+        const entryMeta = entry.meta as { msg?: string } | undefined;
+        return String(entry.eventName) === 'chat-message' && String(entryMeta?.msg || '').includes('BIG SCORE!');
       });
-      foundBigScoreEvent = recentEvents.data.data.some((entry) => {
-        const meta = entry.meta as { playerId?: string; points?: number; game?: string } | undefined;
-        return String(entry.eventName) === 'minigames-big-score'
-          && meta?.playerId === ctx.players[1].playerId
-          && meta?.game === 'wordle'
-          && Number(meta?.points) === 150;
-      });
-      if (foundBigScoreAnnouncement && foundBigScoreEvent) break;
+      if (foundBigScoreAnnouncement) break;
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
     assert.equal(foundBigScoreAnnouncement, true, 'expected a big-score chat announcement event');
-    assert.equal(foundBigScoreEvent, true, 'expected a machine-readable minigames-big-score event');
 
-    const pogSearch = await client.playerOnGameserver.playerOnGameServerControllerSearch({
+    const afterPogSearch = await client.playerOnGameserver.playerOnGameServerControllerSearch({
       filters: { gameServerId: [ctx.gameServer.id], playerId: [ctx.players[1].playerId] },
     });
-    const pog = pogSearch.data.data[0];
+    const pog = afterPogSearch.data.data[0];
     assert.ok(pog, 'expected playerOnGameserver record');
-    assert.ok(typeof pog!.currency === 'number', 'currency field should remain readable even if payout is unavailable in the test environment');
+    assert.equal(Number(pog!.currency || 0) - beforeCurrency, 75, 'expected the 0.5 currency conversion to pay out 75 currency for a 150-point solve');
   });
 
   it('awards hangman success points and persists completion state', async () => {

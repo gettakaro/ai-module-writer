@@ -56,6 +56,7 @@ async function main() {
   if (effectiveVotes >= threshold) {
     voteState.status = 'passed';
     voteState.passedAt = new Date().toISOString();
+    voteState.restartPendingCreatedAt = voteState.passedAt;
     await Promise.all([
       setVoteState(gameServerId, moduleId, voteState),
       setRestartPending(gameServerId, moduleId, {

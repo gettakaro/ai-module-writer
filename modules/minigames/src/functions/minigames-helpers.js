@@ -69,13 +69,9 @@ export const DEFAULT_STATS = {
   },
 };
 
-const STARTER_WORDLE_WORDS = ['crane', 'slate', 'flint', 'pride', 'crown', 'spark', 'grape', 'stone', 'flame', 'track'];
-const STARTER_WORDLIST_WORDS = ['takaro', 'module', 'plugin', 'server', 'puzzle', 'winner', 'travel', 'garden', 'planet', 'rocket'];
-const STARTER_TRIVIA_QUESTIONS = [
-  { question: 'What color do you get when you mix red and yellow?', answer: 'orange', incorrectAnswers: ['purple', 'green', 'blue'], type: 'multiple' },
-  { question: 'How many days are in a leap year?', answer: '366', incorrectAnswers: ['365', '364', '360'], type: 'multiple' },
-  { question: 'True or false: The Pacific Ocean is larger than the Atlantic Ocean.', answer: 'true', incorrectAnswers: ['false'], type: 'boolean' },
-];
+const EMPTY_WORDLE_BANK = { words: [] };
+const EMPTY_WORDLIST_BANK = { words: [] };
+const EMPTY_TRIVIA_BANK = { questions: [] };
 
 export function getConfig(mod) {
   const raw = mod?.userConfig || {};
@@ -237,49 +233,77 @@ export function isExpiredLock(lockValue, ttlMs) {
 
 export async function acquireVariableLock({ gameServerId, moduleId, key, ttlMs, owner, retries = 2 }) {
   const token = `${owner || 'lock'}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const payload = JSON.stringify({ token, owner: owner || null, createdAt: new Date().toISOString() });
+
   for (let attempt = 0; attempt <= retries; attempt += 1) {
-    try {
-      await takaro.variable.variableControllerCreate({
-        key,
-        value: JSON.stringify({ token, owner: owner || null, createdAt: new Date().toISOString() }),
-        gameServerId,
-        moduleId,
-      });
-      return token;
-    } catch (err) {
-      const existing = await findVariable(gameServerId, moduleId, key, null);
-      if (!existing) {
-        continue;
-      }
+    const existing = await findVariable(gameServerId, moduleId, key, null);
+    if (existing) {
       try {
         const parsed = JSON.parse(existing.value || '{}');
         if (isExpiredLock(parsed, ttlMs)) {
           await takaro.variable.variableControllerDelete(existing.id);
           console.log(`minigames: reaped stale lock key=${key} owner=${parsed.owner || 'unknown'}`);
-          continue;
+        } else {
+          console.log(`minigames: lock busy key=${key} owner=${owner || 'unknown'}`);
+          return null;
         }
       } catch (parseErr) {
         console.error(`minigames: failed to parse lock ${key}, deleting corrupt value. Error: ${parseErr}`);
         await takaro.variable.variableControllerDelete(existing.id);
-        continue;
       }
-      console.log(`minigames: lock busy key=${key} owner=${owner || 'unknown'}. Error: ${err}`);
-      return null;
+      continue;
+    }
+
+    try {
+      await takaro.variable.variableControllerCreate({ key, value: payload, gameServerId, moduleId });
+    } catch (err) {
+      console.log(`minigames: lock create raced key=${key} owner=${owner || 'unknown'}. Error: ${err}`);
+      continue;
+    }
+
+    const matches = await findVariables(gameServerId, moduleId, key, null);
+    const mine = matches.find((entry) => {
+      try {
+        return JSON.parse(entry.value || '{}').token === token;
+      } catch {
+        return false;
+      }
+    });
+    const current = matches[0];
+    if (mine && current?.id === mine.id) {
+      await Promise.allSettled(matches.filter((entry) => entry.id !== mine.id).map((entry) => takaro.variable.variableControllerDelete(entry.id)));
+      return token;
+    }
+
+    if (mine) {
+      await takaro.variable.variableControllerDelete(mine.id);
     }
   }
+
+  console.log(`minigames: lock acquisition exhausted key=${key} owner=${owner || 'unknown'}`);
   return null;
 }
 
 export async function releaseVariableLock({ gameServerId, moduleId, key, token }) {
-  const existing = await findVariable(gameServerId, moduleId, key, null);
-  if (!existing) return;
-  try {
-    const value = JSON.parse(existing.value || '{}');
-    if (token && value.token && value.token !== token) return;
-  } catch (err) {
-    console.error(`minigames: failed to parse lock ${key} while releasing. Error: ${err}`);
+  const matches = await findVariables(gameServerId, moduleId, key, null);
+  if (matches.length === 0) return;
+
+  if (token) {
+    for (const existing of matches) {
+      try {
+        const value = JSON.parse(existing.value || '{}');
+        if (value.token === token) {
+          await takaro.variable.variableControllerDelete(existing.id);
+          return;
+        }
+      } catch (err) {
+        console.error(`minigames: failed to parse lock ${key} while releasing. Error: ${err}`);
+      }
+    }
+    return;
   }
-  await takaro.variable.variableControllerDelete(existing.id);
+
+  await takaro.variable.variableControllerDelete(matches[0].id);
 }
 
 export async function readJsonVariable(gameServerId, moduleId, key, fallback, playerId) {
@@ -537,16 +561,28 @@ export async function emitBigScoreEvent({ gameServerId, moduleId, playerId, play
   return false;
 }
 
-export async function awardPoints({ gameServerId, moduleId, pog, playerId, playerName, config, game, basePoints, context }) {
-  const awardLockKey = `${PLAYER_AWARD_LOCK_PREFIX}:${playerId}`;
-  const awardLockToken = await acquireVariableLock({
+export async function acquireAwardLock(gameServerId, moduleId, playerId) {
+  return acquireVariableLock({
     gameServerId,
     moduleId,
-    key: awardLockKey,
+    key: `${PLAYER_AWARD_LOCK_PREFIX}:${playerId}`,
     ttlMs: PLAYER_AWARD_LOCK_TTL_MS,
     owner: `award:${playerId}`,
     retries: 4,
   });
+}
+
+export async function releaseAwardLock(gameServerId, moduleId, playerId, token) {
+  await releaseVariableLock({
+    gameServerId,
+    moduleId,
+    key: `${PLAYER_AWARD_LOCK_PREFIX}:${playerId}`,
+    token,
+  });
+}
+
+export async function awardPoints({ gameServerId, moduleId, pog, playerId, playerName, config, game, basePoints, context, awardLockToken: providedAwardLockToken }) {
+  const awardLockToken = providedAwardLockToken || await acquireAwardLock(gameServerId, moduleId, playerId);
   if (!awardLockToken) {
     throw new Error(`Could not acquire award lock for player ${playerId}`);
   }
@@ -620,7 +656,9 @@ export async function awardPoints({ gameServerId, moduleId, pog, playerId, playe
       multiplier,
     };
   } finally {
-    await releaseVariableLock({ gameServerId, moduleId, key: awardLockKey, token: awardLockToken });
+    if (!providedAwardLockToken) {
+      await releaseAwardLock(gameServerId, moduleId, playerId, awardLockToken);
+    }
   }
 }
 
@@ -651,7 +689,7 @@ export async function getPuzzleToday(gameServerId, moduleId) {
 }
 
 export async function getWordleBank(gameServerId, moduleId) {
-  const content = await ensureContentVariable(gameServerId, moduleId, CONTENT_WORDLE_KEY, { words: STARTER_WORDLE_WORDS });
+  const content = await ensureContentVariable(gameServerId, moduleId, CONTENT_WORDLE_KEY, EMPTY_WORDLE_BANK);
   const words = Array.isArray(content.words)
     ? content.words.map((w) => String(w).trim().toLowerCase()).filter((w) => /^[a-z]{5}$/.test(w))
     : [];
@@ -659,7 +697,7 @@ export async function getWordleBank(gameServerId, moduleId) {
 }
 
 export async function getWordlistBank(gameServerId, moduleId) {
-  const content = await ensureContentVariable(gameServerId, moduleId, CONTENT_WORDLIST_KEY, { words: STARTER_WORDLIST_WORDS });
+  const content = await ensureContentVariable(gameServerId, moduleId, CONTENT_WORDLIST_KEY, EMPTY_WORDLIST_BANK);
   const words = Array.isArray(content.words)
     ? content.words.map((w) => String(w).trim().toLowerCase()).filter((w) => /^[a-z]{4,}$/.test(w))
     : [];
@@ -667,7 +705,7 @@ export async function getWordlistBank(gameServerId, moduleId) {
 }
 
 export async function getTriviaBank(gameServerId, moduleId) {
-  const content = await ensureContentVariable(gameServerId, moduleId, CONTENT_TRIVIA_KEY, { questions: STARTER_TRIVIA_QUESTIONS });
+  const content = await ensureContentVariable(gameServerId, moduleId, CONTENT_TRIVIA_KEY, EMPTY_TRIVIA_BANK);
   const questions = Array.isArray(content.questions) ? content.questions : [];
   return questions.map(normalizeTriviaQuestion).filter(Boolean);
 }
@@ -1149,30 +1187,38 @@ export async function claimActiveRound(gameServerId, moduleId, expectedRound) {
   if (!expectedRound || new Date(expectedRound.expiresAt).getTime() <= Date.now()) {
     return false;
   }
-  const existing = await findVariable(gameServerId, moduleId, ACTIVE_ROUND_KEY, null);
-  if (!existing) {
+
+  const matches = await findVariables(gameServerId, moduleId, ACTIVE_ROUND_KEY, null);
+  if (matches.length === 0) {
     return false;
   }
-  let currentRound;
-  try {
-    currentRound = JSON.parse(existing.value);
-  } catch (err) {
-    console.error(`minigames: failed to parse active round while claiming. Error: ${err}`);
+
+  const claimable = [];
+  for (const existing of matches) {
+    try {
+      const currentRound = JSON.parse(existing.value);
+      if (!sameRound(currentRound, expectedRound)) {
+        continue;
+      }
+      if (new Date(currentRound.expiresAt).getTime() <= Date.now()) {
+        continue;
+      }
+      claimable.push(existing.id);
+    } catch (err) {
+      console.error(`minigames: failed to parse active round while claiming. Error: ${err}`);
+    }
+  }
+
+  if (claimable.length === 0) {
     return false;
   }
-  if (!sameRound(currentRound, expectedRound)) {
-    return false;
+
+  const results = await Promise.allSettled(claimable.map((id) => takaro.variable.variableControllerDelete(id)));
+  const deleted = results.some((result) => result.status === 'fulfilled');
+  if (!deleted) {
+    console.log(`minigames: active round claim lost for ${expectedRound.game}`);
   }
-  if (new Date(currentRound.expiresAt).getTime() <= Date.now()) {
-    return false;
-  }
-  try {
-    await takaro.variable.variableControllerDelete(existing.id);
-    return true;
-  } catch (err) {
-    console.log(`minigames: active round claim lost for ${expectedRound.game}. Error: ${err}`);
-    return false;
-  }
+  return deleted;
 }
 
 export async function getOnlinePlayers(gameServerId) {
@@ -1193,11 +1239,35 @@ export async function getOnlinePlayers(gameServerId) {
   return all;
 }
 
+function resolveTriviaApiBaseUrl(rawBaseUrl) {
+  const defaultBaseUrl = 'https://opentdb.com/api.php';
+  const candidate = String(rawBaseUrl || defaultBaseUrl).trim();
+  if (!candidate) return defaultBaseUrl;
+
+  const match = candidate.match(/^(https?):\/\/([^/?#]+)([^?#]*)/i);
+  if (!match) {
+    console.log(`minigames: invalid trivia api base url ${candidate}; using default OpenTDB endpoint`);
+    return defaultBaseUrl;
+  }
+
+  const protocol = match[1].toLowerCase();
+  const hostname = match[2].toLowerCase().split(':')[0];
+  const path = match[3] || '/api.php';
+  const allowedHosts = new Set(['opentdb.com', 'www.opentdb.com']);
+  if (protocol !== 'https' || !allowedHosts.has(hostname)) {
+    console.log(`minigames: trivia api fetch failed, using fallback. Rejected base url host=${hostname} protocol=${protocol}`);
+    return null;
+  }
+
+  return `https://${hostname}${path || '/api.php'}`.replace(/\?$/, '');
+}
+
 export async function fetchTriviaQuestion(config) {
   if (config.triviaQuestionSource !== 'api') return null;
   const categories = Array.isArray(config.triviaApiCategory) ? config.triviaApiCategory.filter(Boolean) : [];
   const pickedCategory = categories.length > 0 ? pickRandom(categories) : 'any';
-  const baseUrl = String(config.triviaApiBaseUrl || 'https://opentdb.com/api.php').replace(/\?$/, '');
+  const baseUrl = resolveTriviaApiBaseUrl(config.triviaApiBaseUrl);
+  if (!baseUrl) return null;
   let url = `${baseUrl}?amount=1`;
   if (pickedCategory && pickedCategory !== 'any' && OPENTDB_CATEGORIES[pickedCategory]) {
     url += `&category=${OPENTDB_CATEGORIES[pickedCategory]}`;
@@ -1477,6 +1547,10 @@ export async function closeExpiredRound({ gameServerId, moduleId, reason = 'expi
     if (!currentRound || !sameRound(currentRound, round)) {
       return null;
     }
+    const claimed = await claimActiveRound(gameServerId, moduleId, currentRound);
+    if (!claimed) {
+      return null;
+    }
 
     const message = reason === 'skipped'
       ? `⏭️ ${getGameDisplayName(round.game)} was skipped by an admin.`
@@ -1485,7 +1559,6 @@ export async function closeExpiredRound({ gameServerId, moduleId, reason = 'expi
       message,
       opts: {},
     });
-    await clearActiveRound(gameServerId, moduleId);
     console.log(`minigames: live round closed game=${round.game} reason=${reason}`);
     return round;
   } finally {
@@ -1514,6 +1587,12 @@ export async function settleLiveRound({ gameServerId, moduleId, player, pog, con
     return false;
   }
 
+  const awardLockKey = `${PLAYER_AWARD_LOCK_PREFIX}:${player.id}`;
+  if ((await findVariables(gameServerId, moduleId, awardLockKey, null)).length > 0) {
+    console.log(`minigames: ${source} could not acquire award lock game=${round.game} player=${player.name}`);
+    return false;
+  }
+
   const liveRoundLockToken = await acquireLiveRoundLock(gameServerId, moduleId);
   if (!liveRoundLockToken) {
     console.log(`minigames: ${source} could not acquire live round lock game=${round.game} player=${player.name}`);
@@ -1530,6 +1609,11 @@ export async function settleLiveRound({ gameServerId, moduleId, player, pog, con
       console.log(`minigames: ${source} answer matched but round expired before settlement game=${round.game} player=${player.name}`);
       return false;
     }
+    const claimed = await claimActiveRound(gameServerId, moduleId, currentRound);
+    if (!claimed) {
+      console.log(`minigames: ${source} answer matched but round claim was lost game=${round.game} player=${player.name}`);
+      return false;
+    }
 
     const reward = await awardPoints({
       gameServerId,
@@ -1543,7 +1627,6 @@ export async function settleLiveRound({ gameServerId, moduleId, player, pog, con
       context: `${source} win`,
     });
 
-    await clearActiveRound(gameServerId, moduleId);
     await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
       message: `${gameEmoji(currentRound.game)} ${player.name} won ${getGameDisplayName(currentRound.game)}! +${reward.actualPoints} points${formatMultiplier(reward.multiplier)}. Answer: ${currentRound.answer}`,
       opts: {},
