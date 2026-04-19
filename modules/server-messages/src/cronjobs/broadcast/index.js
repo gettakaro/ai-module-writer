@@ -19,9 +19,14 @@ import {
 async function main() {
   const { gameServerId, module: mod } = data;
   const lock = await acquireExecutionLock(gameServerId, mod.moduleId);
-  const heartbeat = startExecutionLockHeartbeat(lock);
+  let heartbeat = {
+    beat: async () => {},
+    stop: async () => {},
+  };
+  let stopError = null;
 
   try {
+    heartbeat = startExecutionLockHeartbeat(lock);
     const order = normalizeOrder(mod.userConfig?.order);
     const messages = normalizeMessages(mod.userConfig?.messages);
     const fingerprint = buildConfigFingerprint(order, messages);
@@ -112,8 +117,17 @@ async function main() {
       `server-messages: broadcasted order=${order} index=${messageIndex} playerCount=${onlinePlayerCount} message=${renderedMessage}`,
     );
   } finally {
-    await heartbeat.stop();
+    try {
+      await heartbeat.stop();
+    } catch (err) {
+      stopError = err;
+    }
+
     await releaseExecutionLock(lock);
+
+    if (stopError) {
+      throw stopError;
+    }
   }
 }
 

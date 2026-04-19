@@ -5,9 +5,8 @@ export const SERVER_MESSAGES_LOCK_KEY = 'server_messages_lock';
 export const MAX_MESSAGE_WEIGHT = 100;
 export const MAX_MESSAGE_COUNT = 100;
 const LOCK_RETRY_DELAY_MS = 250;
-const LOCK_TIMEOUT_MS = 10000;
 const LOCK_TTL_MS = 30000;
-const LOCK_HEARTBEAT_INTERVAL_MS = Math.max(1000, Math.floor(LOCK_TTL_MS / 3));
+const LOCK_TIMEOUT_MS = LOCK_TTL_MS + 5000;
 const PLAYER_COUNT_PAGE_SIZE = 100;
 const MAX_PLAYER_COUNT_PAGES = 100;
 const SUPPORTED_PLACEHOLDERS = ['playerCount', 'serverName'];
@@ -214,11 +213,6 @@ async function refreshExecutionLock(lock, ttlMs) {
   });
 }
 
-function waitForDelay(delayMs) {
-  if (!(delayMs > 0)) return Promise.resolve();
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
-}
-
 export function startExecutionLockHeartbeat(lock, options = {}) {
   if (!lock?.id || !lock?.token) {
     return {
@@ -228,11 +222,7 @@ export function startExecutionLockHeartbeat(lock, options = {}) {
   }
 
   const ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : LOCK_TTL_MS;
-  const intervalMs = Number.isFinite(options.intervalMs)
-    ? Math.max(250, Math.floor(options.intervalMs))
-    : LOCK_HEARTBEAT_INTERVAL_MS;
   let stopped = false;
-  let timer = null;
   let inFlightBeat = Promise.resolve();
   let lastError = null;
 
@@ -242,37 +232,25 @@ export function startExecutionLockHeartbeat(lock, options = {}) {
 
     try {
       await refreshExecutionLock(lock, ttlMs);
+      console.log(`server-message-helpers: refreshed execution lock heartbeat at ${label}`);
     } catch (err) {
       lastError = new Error(`server-message-helpers: execution lock heartbeat failed at ${label}: ${err}`);
       throw lastError;
     }
   };
 
-  const scheduleNextBeat = () => {
-    if (stopped) return;
-
-    timer = setTimeout(() => {
-      inFlightBeat = beatOnce('interval').catch(() => {});
-      inFlightBeat.finally(() => {
-        scheduleNextBeat();
-      });
-    }, intervalMs);
-  };
-
-  scheduleNextBeat();
-
   return {
     beat: async (label = 'checkpoint') => {
-      await inFlightBeat;
-      await beatOnce(label);
+      inFlightBeat = inFlightBeat.then(() => beatOnce(label));
+      return inFlightBeat;
     },
     stop: async () => {
       stopped = true;
-      if (timer) {
-        clearTimeout(timer);
-        timer = null;
+      try {
+        await inFlightBeat;
+      } catch {
+        // Ignore: the original beat() caller already observed the error.
       }
-      await inFlightBeat;
     },
   };
 }
@@ -282,7 +260,7 @@ export async function acquireExecutionLock(gameServerId, moduleId, options = {})
   const retryDelayMs = Number.isFinite(options.retryDelayMs) ? options.retryDelayMs : LOCK_RETRY_DELAY_MS;
   const ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : LOCK_TTL_MS;
   const deadline = Date.now() + timeoutMs;
-  const maxAttempts = Math.max(1, Math.ceil(timeoutMs / Math.max(1, retryDelayMs)) * 4);
+  const maxAttempts = Math.max(25, Math.ceil(timeoutMs / Math.max(1, retryDelayMs)) * 4);
 
   for (let attempt = 0; Date.now() < deadline && attempt < maxAttempts; attempt++) {
     const token = createLockToken();
@@ -312,11 +290,6 @@ export async function acquireExecutionLock(gameServerId, moduleId, options = {})
         if (deleted) {
           console.warn(`server-message-helpers: cleared stale execution lock ${existingLock.id}`);
         }
-      }
-
-      const remainingMs = deadline - Date.now();
-      if (remainingMs > 0) {
-        await waitForDelay(Math.min(retryDelayMs, remainingMs));
       }
     }
   }

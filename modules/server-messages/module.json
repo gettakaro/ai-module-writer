@@ -44,9 +44,7 @@
         "description": "Broadcast order. Random uses a weighted shuffle bag."
       }
     },
-    "required": [
-      "messages"
-    ],
+    "required": [],
     "additionalProperties": false
   },
   "cronJobs": {

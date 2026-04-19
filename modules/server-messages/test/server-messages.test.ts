@@ -102,6 +102,24 @@ describe('server-messages: broadcast cronjob', () => {
     return getVariable(STATE_KEY);
   }
 
+  async function waitForVariable(
+    key: string,
+    predicate?: (variable: VariableOutputDTO) => boolean,
+    timeoutMs = 30000,
+  ): Promise<VariableOutputDTO> {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      const variable = await getVariable(key);
+      if (variable && (!predicate || predicate(variable))) {
+        return variable;
+      }
+      await wait(100);
+    }
+
+    throw new Error(`Timed out waiting for variable ${key}`);
+  }
+
   async function deleteStateVariable(): Promise<void> {
     const existing = await getStateVariable();
     if (existing) {
@@ -330,18 +348,30 @@ describe('server-messages: broadcast cronjob', () => {
     }
   });
 
-  it('succeeds quietly when messages is empty', async () => {
+  it('succeeds quietly when messages is empty or omitted', async () => {
     await reinstall({
       order: 'sequential',
       messages: [],
     });
 
-    const result = await triggerCronjobAndCollectMessages();
-    assert.equal(result.success, true, `Expected empty-message run to succeed, logs: ${JSON.stringify(result.logs)}`);
-    assert.deepEqual(result.chatMessages, []);
+    const explicitEmpty = await triggerCronjobAndCollectMessages();
+    assert.equal(explicitEmpty.success, true, `Expected empty-message run to succeed, logs: ${JSON.stringify(explicitEmpty.logs)}`);
+    assert.deepEqual(explicitEmpty.chatMessages, []);
     assert.ok(
-      result.logs.some((log) => log.includes('no messages configured')),
-      `Expected no-messages log, got: ${JSON.stringify(result.logs)}`,
+      explicitEmpty.logs.some((log) => log.includes('no messages configured')),
+      `Expected no-messages log, got: ${JSON.stringify(explicitEmpty.logs)}`,
+    );
+
+    await reinstall({
+      order: 'sequential',
+    });
+
+    const omittedMessages = await triggerCronjobAndCollectMessages();
+    assert.equal(omittedMessages.success, true, `Expected omitted-messages run to succeed, logs: ${JSON.stringify(omittedMessages.logs)}`);
+    assert.deepEqual(omittedMessages.chatMessages, []);
+    assert.ok(
+      omittedMessages.logs.some((log) => log.includes('no messages configured')),
+      `Expected no-messages log when messages is omitted, got: ${JSON.stringify(omittedMessages.logs)}`,
     );
   });
 
@@ -370,6 +400,40 @@ describe('server-messages: broadcast cronjob', () => {
       result.logs.some((log) => log.includes('left unknown placeholders unchanged') && log.includes('unknownToken')),
       `Expected unknown-placeholder warning log, got: ${JSON.stringify(result.logs)}`,
     );
+  });
+
+  it('leaves supported placeholders unchanged with a warning when runtime data is unavailable', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: 'Server={serverName}' }],
+    });
+
+    const originalName = ctx.gameServer.name;
+    await client.gameserver.gameServerControllerUpdate(ctx.gameServer.id, {
+      name: '',
+      connectionInfo: JSON.stringify(ctx.gameServer.connectionInfo),
+      type: ctx.gameServer.type,
+      enabled: ctx.gameServer.enabled,
+      reachable: ctx.gameServer.reachable,
+    });
+
+    try {
+      const result = await triggerCronjobAndCollectMessages();
+      assert.equal(result.success, true, `Expected unavailable-placeholder run to succeed, logs: ${JSON.stringify(result.logs)}`);
+      assert.deepEqual(result.chatMessages, ['Server={serverName}']);
+      assert.ok(
+        result.logs.some((log) => log.includes('left unavailable placeholders unchanged') && log.includes('serverName')),
+        `Expected unavailable-placeholder warning log, got: ${JSON.stringify(result.logs)}`,
+      );
+    } finally {
+      await client.gameserver.gameServerControllerUpdate(ctx.gameServer.id, {
+        name: originalName,
+        connectionInfo: JSON.stringify(ctx.gameServer.connectionInfo),
+        type: ctx.gameServer.type,
+        enabled: ctx.gameServer.enabled,
+        reachable: ctx.gameServer.reachable,
+      });
+    }
   });
 
   it('does not turn an unknown-placeholder-only message into a blank broadcast', async () => {
@@ -538,7 +602,7 @@ describe('server-messages: broadcast cronjob', () => {
     assert.equal(lockVariable, null, 'Expected stale execution lock to be cleared after broadcast completes');
   });
 
-  it('fails cleanly without broadcasting when another healthy execution lock stays active', async () => {
+  it('waits for a healthy execution lock to expire instead of failing early under contention', async () => {
     await reinstall({
       order: 'sequential',
       messages: [{ text: 'Alpha' }, { text: 'Beta' }],
@@ -551,32 +615,21 @@ describe('server-messages: broadcast cronjob', () => {
         acquiredAt: new Date().toISOString(),
         heartbeatAt: new Date().toISOString(),
       }),
-      expiresAt: new Date(Date.now() + 60000).toISOString(),
+      expiresAt: new Date(Date.now() + 2000).toISOString(),
       gameServerId: ctx.gameServer.id,
       moduleId,
     });
 
-    try {
-      const before = new Date();
-      const failed = await triggerCronjob();
-      assert.equal(failed.success, false, `Expected lock-contention run to fail, logs: ${JSON.stringify(failed.logs)}`);
-      assert.ok(
-        failed.logs.some((log) => log.includes('timed out acquiring execution lock')),
-        `Expected lock-timeout log, got: ${JSON.stringify(failed.logs)}`,
-      );
+    const before = new Date();
+    const result = await triggerCronjob();
+    assert.equal(result.success, true, `Expected lock-contention run to succeed after waiting, logs: ${JSON.stringify(result.logs)}`);
 
-      const chatMessages = await getChatMessages(before);
-      assert.deepEqual(chatMessages, [], `Expected no broadcast during lock contention, got ${JSON.stringify(chatMessages)}`);
-
-      const lockVariable = await getVariable(LOCK_KEY);
-      assert.ok(lockVariable, 'Expected active foreign execution lock to remain in place after timeout');
-      assert.match(lockVariable.value, /held-by-other-run/);
-    } finally {
-      const lockVariable = await getVariable(LOCK_KEY);
-      if (lockVariable) {
-        await client.variable.variableControllerDelete(lockVariable.id);
-      }
-    }
+    const chatMessages = await getChatMessages(before);
+    assert.deepEqual(chatMessages, ['Alpha'], `Expected broadcast after foreign lock expired, got ${JSON.stringify(chatMessages)}`);
+    assert.ok(
+      result.logs.some((log) => log.includes('cleared stale execution lock')),
+      `Expected stale-lock cleanup log after waiting for expiry, got: ${JSON.stringify(result.logs)}`,
+    );
   });
 
   it('accepts install-time configs that runtime normalization clamps', async () => {
@@ -644,6 +697,62 @@ describe('server-messages: broadcast cronjob', () => {
     assert.equal(state.sequentialIndex, 0, `Expected wrapped sequential index after two sends, got ${updated.value}`);
   });
 
+  it('refreshes the execution lock heartbeat at broadcast checkpoints', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: 'Heartbeat check' }],
+    });
+
+    const result = await triggerCronjobAndCollectMessages();
+    assert.equal(result.success, true, `Expected heartbeat run to succeed, logs: ${JSON.stringify(result.logs)}`);
+    assert.ok(
+      result.logs.some((log) => log.includes('refreshed execution lock heartbeat at before-broadcast')),
+      `Expected before-broadcast heartbeat refresh log, got: ${JSON.stringify(result.logs)}`,
+    );
+    assert.ok(
+      result.logs.some((log) => log.includes('refreshed execution lock heartbeat at before-state-persist')),
+      `Expected before-state-persist heartbeat refresh log, got: ${JSON.stringify(result.logs)}`,
+    );
+  });
+
+  it('fails cleanly when lock ownership changes before a heartbeat checkpoint', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: 'Ownership check' }],
+    });
+
+    const before = new Date();
+    const pendingRun = triggerCronjob();
+
+    const lock = await waitForVariable(LOCK_KEY, undefined, 5000);
+    const payload = JSON.parse(lock.value) as { acquiredAt?: string; heartbeatAt?: string };
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await client.variable.variableControllerUpdate(lock.id, {
+        value: JSON.stringify({
+          ...payload,
+          token: 'stolen-lock-token',
+        }),
+        expiresAt: lock.expiresAt,
+      });
+      await wait(100);
+    }
+
+    const failed = await pendingRun;
+    assert.equal(failed.success, false, `Expected ownership-loss run to fail, logs: ${JSON.stringify(failed.logs)}`);
+    assert.ok(
+      failed.logs.some((log) => log.includes('ownership changed during heartbeat')),
+      `Expected heartbeat ownership-loss log, got: ${JSON.stringify(failed.logs)}`,
+    );
+
+    const chatMessages = await getChatMessages(before);
+    assert.deepEqual(chatMessages, [], `Expected no broadcast after lock ownership loss, got ${JSON.stringify(chatMessages)}`);
+
+    const lockVariable = await getVariable(LOCK_KEY);
+    if (lockVariable) {
+      await client.variable.variableControllerDelete(lockVariable.id);
+    }
+  });
+
   it('does not advance persisted rotation state when broadcasting fails', async () => {
     await reinstall({
       order: 'sequential',
@@ -679,6 +788,7 @@ describe('server-messages: broadcast cronjob', () => {
   it('documents placeholder support, validation behavior, and bounded message lists in module.json', async () => {
     const moduleJson = JSON.parse(await fs.readFile(path.join(MODULE_DIR, 'module.json'), 'utf8')) as {
       config: {
+        required?: string[];
         properties: {
           messages: {
             description?: string;
@@ -697,6 +807,7 @@ describe('server-messages: broadcast cronjob', () => {
     assert.match(moduleJson.config.properties.messages.description ?? '', /\{playerCount\}.*\{serverName\}/);
     assert.match(moduleJson.config.properties.messages.description ?? '', /Unknown placeholders are left unchanged/);
     assert.match(moduleJson.config.properties.messages.description ?? '', /at least one non-whitespace character/);
+    assert.deepEqual(moduleJson.config.required ?? [], []);
     assert.equal(moduleJson.config.properties.messages.maxItems, 100);
     assert.equal(moduleJson.config.properties.messages.items.properties.text.pattern, '\\S');
     assert.match(moduleJson.config.properties.messages.items.properties.text.description ?? '', /Whitespace-only messages are rejected at install time/);
