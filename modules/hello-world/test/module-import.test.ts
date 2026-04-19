@@ -234,6 +234,14 @@ describe('module-import CLI', () => {
           reinstallCalls += 1;
         },
       },
+      variable: {
+        variableControllerSearch: async () => ({ data: { data: [], meta: { total: 0 } } }),
+      },
+      role: {
+        roleControllerGetPermissions: async () => ({ data: { data: [] } }),
+        roleControllerSearch: async () => ({ data: { data: [], meta: { total: 0 } } }),
+        roleControllerUpdate: async () => ({ data: { data: {} } }),
+      },
     } as unknown as Client;
 
     const imported = await importModuleExport(
@@ -298,6 +306,14 @@ describe('module-import CLI', () => {
           reinstalledGameServers.push(gameServerId);
         },
       },
+      variable: {
+        variableControllerSearch: async () => ({ data: { data: [], meta: { total: 0 } } }),
+      },
+      role: {
+        roleControllerGetPermissions: async () => ({ data: { data: [] } }),
+        roleControllerSearch: async () => ({ data: { data: [], meta: { total: 0 } } }),
+        roleControllerUpdate: async () => ({ data: { data: {} } }),
+      },
     } as unknown as Client;
 
     await importModuleExport(fakeClient, { name: MODULE_NAME, versions: [] } as any);
@@ -310,6 +326,177 @@ describe('module-import CLI', () => {
     assert.equal(reinstalledGameServers.length, 125, 'Expected every paginated installation to be restored');
     assert.equal(reinstalledGameServers[0], 'gs-1');
     assert.equal(reinstalledGameServers.at(-1), 'gs-125');
+  });
+
+  it('preserves module-scoped variables and role permission assignments across replacement imports', async () => {
+    const createdVariables: Array<{ moduleId?: string; key: string; value: string; gameServerId?: string }> = [];
+    const updatedRoles: Array<{ roleId: string; permissions: Array<{ permissionId: string; count?: number }> }> = [];
+    let searchCalls = 0;
+
+    const fakeClient = {
+      module: {
+        moduleControllerSearch: async () => {
+          searchCalls += 1;
+          if (searchCalls === 1) {
+            return { data: { data: [{ id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } }] } };
+          }
+          return { data: { data: [{ id: 'new-module', name: MODULE_NAME, latestVersion: { id: 'new-version' } }] } };
+        },
+        moduleInstallationsControllerGetInstalledModules: async () => ({
+          data: {
+            data: [{ gameserverId: 'gs-1', userConfig: { foo: 'bar' }, systemConfig: { cron: true } }],
+            meta: { total: 1 },
+          },
+        }),
+        moduleControllerExport: async () => ({ data: { data: { name: MODULE_NAME, versions: [] } } }),
+        moduleControllerRemove: async () => {},
+        moduleControllerImport: async () => {},
+        moduleInstallationsControllerInstallModule: async () => ({ data: { data: {} } }),
+      },
+      variable: {
+        variableControllerSearch: async ({ filters }: { filters?: Record<string, string[]> }) => {
+          if (filters?.moduleId?.[0] === 'old-module' && !filters.key) {
+            return {
+              data: {
+                data: [
+                  {
+                    id: 'old-var-1',
+                    key: 'server_messages_state',
+                    value: '{"sequentialIndex":1}',
+                    gameServerId: 'gs-1',
+                  },
+                ],
+                meta: { total: 1 },
+              },
+            };
+          }
+
+          return { data: { data: [], meta: { total: 0 } } };
+        },
+        variableControllerCreate: async (payload: { moduleId?: string; key: string; value: string; gameServerId?: string }) => {
+          createdVariables.push(payload);
+          return { data: { data: payload } };
+        },
+        variableControllerUpdate: async () => ({ data: { data: {} } }),
+      },
+      role: {
+        roleControllerGetPermissions: async () => ({
+          data: {
+            data: [
+              { id: 'old-perm', permission: 'HELLO_USE', module: { id: 'old-module', name: MODULE_NAME } },
+              { id: 'other-perm', permission: 'UNRELATED', module: { id: 'other-module', name: 'other' } },
+              { id: 'new-perm', permission: 'HELLO_USE', module: { id: 'new-module', name: MODULE_NAME } },
+            ],
+          },
+        }),
+        roleControllerSearch: async () => ({
+          data: {
+            data: [
+              {
+                id: 'role-1',
+                permissions: [
+                  { permissionId: 'old-perm', count: 3 },
+                  { permissionId: 'other-perm', count: 1 },
+                ],
+              },
+            ],
+            meta: { total: 1 },
+          },
+        }),
+        roleControllerUpdate: async (roleId: string, payload: { permissions?: Array<{ permissionId: string; count?: number }> }) => {
+          updatedRoles.push({ roleId, permissions: payload.permissions ?? [] });
+          return { data: { data: {} } };
+        },
+      },
+    } as unknown as Client;
+
+    await importModuleExport(fakeClient, { name: MODULE_NAME, versions: [] } as any);
+
+    assert.deepEqual(
+      createdVariables,
+      [
+        {
+          moduleId: 'new-module',
+          key: 'server_messages_state',
+          value: '{"sequentialIndex":1}',
+          gameServerId: 'gs-1',
+          playerId: undefined,
+          expiresAt: undefined,
+        },
+      ],
+      'Expected module-scoped runtime variables to migrate to the replacement module id',
+    );
+    assert.deepEqual(
+      updatedRoles,
+      [
+        {
+          roleId: 'role-1',
+          permissions: [
+            { permissionId: 'new-perm', count: 3 },
+            { permissionId: 'other-perm', count: 1 },
+          ],
+        },
+      ],
+      'Expected roles to be rebound from deleted permission ids to the replacement module permissions',
+    );
+  });
+
+  it('reinstalls prior installations again when a replacement import rolls back', async () => {
+    const reinstalledVersionIds: string[] = [];
+    let searchCalls = 0;
+    let importCalls = 0;
+
+    const fakeClient = {
+      module: {
+        moduleControllerSearch: async () => {
+          searchCalls += 1;
+          if (searchCalls === 1) {
+            return { data: { data: [{ id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } }] } };
+          }
+          if (searchCalls === 2) {
+            return { data: { data: [{ id: 'failed-replacement', name: MODULE_NAME, latestVersion: { id: 'new-version' } }] } };
+          }
+          return { data: { data: [{ id: 'restored-module', name: MODULE_NAME, latestVersion: { id: 'restored-version' } }] } };
+        },
+        moduleInstallationsControllerGetInstalledModules: async () => ({
+          data: {
+            data: [{ gameserverId: 'gs-1', userConfig: { foo: 'bar' }, systemConfig: { cron: true } }],
+            meta: { total: 1 },
+          },
+        }),
+        moduleControllerExport: async () => ({ data: { data: { name: MODULE_NAME, versions: [] } } }),
+        moduleControllerRemove: async () => {},
+        moduleControllerImport: async () => {
+          importCalls += 1;
+          if (importCalls === 1) {
+            throw new Error('boom');
+          }
+        },
+        moduleInstallationsControllerInstallModule: async ({ versionId }: { versionId: string }) => {
+          reinstalledVersionIds.push(versionId);
+          return { data: { data: {} } };
+        },
+      },
+      variable: {
+        variableControllerSearch: async () => ({ data: { data: [], meta: { total: 0 } } }),
+      },
+      role: {
+        roleControllerGetPermissions: async () => ({ data: { data: [] } }),
+        roleControllerSearch: async () => ({ data: { data: [], meta: { total: 0 } } }),
+        roleControllerUpdate: async () => ({ data: { data: {} } }),
+      },
+    } as unknown as Client;
+
+    await assert.rejects(
+      importModuleExport(fakeClient, { name: MODULE_NAME, versions: [] } as any),
+      /previous module was restored|Import of/i,
+    );
+
+    assert.deepEqual(
+      reinstalledVersionIds,
+      ['restored-version'],
+      'Expected rollback to reinstall the previously-installed game servers onto the restored module version',
+    );
   });
 
   it('push script preserves nested cronjobs, functions, and config schema for richer modules', async () => {

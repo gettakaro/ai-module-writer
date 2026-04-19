@@ -20,6 +20,11 @@ import {
   uninstallModule,
 } from '../../../test/helpers/modules.js';
 import { MockServerContext, startMockServer, stopMockServer } from '../../../test/helpers/mock-server.js';
+import {
+  buildConfigFingerprint,
+  normalizeMessages,
+  SERVER_MESSAGES_DELIVERY_RECEIPT_KEY,
+} from '../src/functions/server-message-helpers.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -631,15 +636,22 @@ describe('server-messages: broadcast cronjob', () => {
       moduleId,
     });
 
+    const startedAt = Date.now();
     const before = new Date();
     const result = await triggerCronjob();
+    const elapsedMs = Date.now() - startedAt;
     assert.equal(result.success, true, `Expected lock-contention run to succeed after waiting, logs: ${JSON.stringify(result.logs)}`);
 
     const chatMessages = await getChatMessages(before);
     assert.deepEqual(chatMessages, ['Alpha'], `Expected broadcast after foreign lock expired, got ${JSON.stringify(chatMessages)}`);
     assert.ok(
-      result.logs.some((log) => log.includes('cleared stale execution lock')),
-      `Expected stale-lock cleanup log after waiting for expiry, got: ${JSON.stringify(result.logs)}`,
+      elapsedMs >= 1500,
+      `Expected cronjob to wait for the healthy lock to expire before broadcasting, but it finished in ${elapsedMs}ms. Logs: ${JSON.stringify(result.logs)}`,
+    );
+    assert.ok(
+      result.logs.some((log) => log.includes('cleared stale execution lock'))
+        || result.logs.some((log) => log.includes('refreshed execution lock heartbeat at before-broadcast')),
+      `Expected evidence that the run waited out the foreign lock and then acquired its own lock, got: ${JSON.stringify(result.logs)}`,
     );
   });
 
@@ -817,6 +829,49 @@ describe('server-messages: broadcast cronjob', () => {
     const retried = await triggerCronjobAndCollectMessages();
     assert.equal(retried.success, true, `Expected retry after restoring server availability to succeed, logs: ${JSON.stringify(retried.logs)}`);
     assert.deepEqual(retried.chatMessages, ['Fail Second']);
+  });
+
+  it('recovers persisted next-state from a delivery receipt without rebroadcasting', async () => {
+    const messages = [{ text: 'Receipt First' }, { text: 'Receipt Second' }];
+    const order = 'sequential';
+    await reinstall({
+      order,
+      messages,
+    });
+
+    const fingerprint = buildConfigFingerprint(order, normalizeMessages(messages));
+    await client.variable.variableControllerCreate({
+      key: SERVER_MESSAGES_DELIVERY_RECEIPT_KEY,
+      value: JSON.stringify({
+        fingerprint,
+        nextState: {
+          fingerprint,
+          sequentialIndex: 1,
+          bag: [],
+          cursor: 0,
+        },
+        messageIndex: 0,
+        renderedMessage: 'Receipt First',
+        sentAt: new Date().toISOString(),
+      }),
+      gameServerId: ctx.gameServer.id,
+      moduleId,
+    });
+
+    const result = await triggerCronjobAndCollectMessages();
+    assert.equal(result.success, true, `Expected receipt-recovery run to succeed, logs: ${JSON.stringify(result.logs)}`);
+    assert.deepEqual(result.chatMessages, [], `Expected receipt recovery to avoid duplicate rebroadcasts, got ${JSON.stringify(result.chatMessages)}`);
+    assert.ok(
+      result.logs.some((log) => log.includes('recovered rotation state from prior successful broadcast without rebroadcasting')),
+      `Expected receipt recovery log, got: ${JSON.stringify(result.logs)}`,
+    );
+
+    const stateVariable = await getStateVariable();
+    assert.ok(stateVariable, 'Expected receipt recovery to persist the next state');
+    assert.equal(JSON.parse(stateVariable.value).sequentialIndex, 1, `Expected recovered next state to be written, got ${stateVariable.value}`);
+
+    const receiptVariable = await getVariable(SERVER_MESSAGES_DELIVERY_RECEIPT_KEY);
+    assert.equal(receiptVariable, null, 'Expected delivery receipt to be cleared after successful recovery');
   });
 
   it('removes the execution lock after a failed broadcast send attempt', async () => {
