@@ -5,6 +5,7 @@ import {
   getReferralStats,
   getPlayerName,
   ensureReferralCode,
+  resetDailyCounterIfNeeded,
 } from './referral-helpers.js';
 
 async function main() {
@@ -21,13 +22,14 @@ async function main() {
   ]);
 
   const ensuredCode = codeInfo ?? await ensureReferralCode(gameServerId, mod.moduleId, pog.playerId);
+  const normalizedStats = resetDailyCounterIfNeeded(stats);
   const referrerName = link?.referrerId ? await getPlayerName(link.referrerId) : null;
-  const pendingCount = Math.max(0, stats.referralsTotal - stats.referralsPaid);
+  const pendingCount = Math.max(0, normalizedStats.referralsTotal - normalizedStats.referralsPaid);
 
   const lines = [
     `Referral code: ${ensuredCode.code}`,
-    `Referrals: total=${stats.referralsTotal}, paid=${stats.referralsPaid}, pending=${pendingCount}, today=${stats.referralsToday}`,
-    `Earnings: currency=${stats.currencyEarned}, items=${stats.itemsEarned}`,
+    `Referrals: total=${normalizedStats.referralsTotal}, paid=${normalizedStats.referralsPaid}, pending=${pendingCount}, today=${normalizedStats.referralsToday}`,
+    `Earnings: currency=${normalizedStats.currencyEarned}, items=${normalizedStats.itemsEarned}`,
     `Your referrer: ${referrerName ? referrerName : 'none'}`,
   ];
 

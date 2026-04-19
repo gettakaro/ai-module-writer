@@ -96,7 +96,7 @@
     {
       "permission": "REFERRAL_USE",
       "friendlyName": "Use referral system",
-      "description": "Allows a player to use /refcode, /referral, /refstats, and /reftop.",
+      "description": "Allows a player to use the refcode, referral, refstats, and reftop commands.",
       "canHaveCount": false
     },
     {
@@ -116,14 +116,14 @@
     "refcode": {
       "trigger": "refcode",
       "description": "Show or generate your referral code.",
-      "helpText": "Shows your personal referral code. Share it with invited players so they can use /referral <code>.",
+      "helpText": "Shows your personal referral code. Share it with invited players so they can use your server command prefix followed by referral <code>.",
       "function": "src/commands/refcode/index.js",
       "arguments": []
     },
     "referral": {
       "trigger": "referral",
       "description": "Claim another player's referral code.",
-      "helpText": "Usage: /referral <code> — link yourself to the player who invited you and claim your welcome bonus.",
+      "helpText": "Usage: referral <code> — use your server command prefix before the trigger, then link yourself to the player who invited you and claim your welcome bonus.",
       "function": "src/commands/referral/index.js",
       "arguments": [
         {
@@ -152,7 +152,7 @@
     "reflink": {
       "trigger": "reflink",
       "description": "Admin: manually link a referee to a referrer and pay immediately.",
-      "helpText": "Usage: /reflink <referee> <referrer> — creates a paid referral link immediately.",
+      "helpText": "Usage: reflink <referee> <referrer> — use your server command prefix before the trigger, then create a paid referral link immediately.",
       "function": "src/commands/reflink/index.js",
       "arguments": [
         {
@@ -172,7 +172,7 @@
     "refunlink": {
       "trigger": "refunlink",
       "description": "Admin: remove an existing referral link.",
-      "helpText": "Usage: /refunlink <referee> — removes a referral link and rolls back referral stats.",
+      "helpText": "Usage: refunlink <referee> — use your server command prefix before the trigger, then remove a referral link and roll back any recoverable rewards and stats.",
       "function": "src/commands/refunlink/index.js",
       "arguments": [
         {

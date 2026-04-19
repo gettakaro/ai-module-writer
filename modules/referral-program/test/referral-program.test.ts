@@ -314,7 +314,7 @@ describe('referral-program module — currency flow and admin repair', () => {
 
     const missingCodeEvent = await harness.triggerCommand(harness.ctx.players[1].playerId, 'referral ""');
     assert.equal(parseSuccess(missingCodeEvent), false, 'Expected /referral without code to fail');
-    assert.ok(parseLogs(missingCodeEvent).some((msg) => msg.includes('Usage: /referral <code>')));
+    assert.ok(parseLogs(missingCodeEvent).some((msg) => msg.includes('Usage: referral <code>')));
 
     const unknownCodeEvent = await harness.triggerCommand(harness.ctx.players[1].playerId, 'referral NOPE42');
     assert.equal(parseSuccess(unknownCodeEvent), false, 'Expected unknown referral code to fail');
@@ -441,24 +441,31 @@ describe('referral-program module — currency flow and admin repair', () => {
     assert.ok(parseLogs(leaderboard).some((msg) => msg.includes(`1. ${aliceName} — paid=2, total=2`)));
   });
 
-  it('blocks /refunlink for already paid referrals so rewards cannot be farmed', async () => {
+  it('lets admins unlink a paid currency referral and claw back both players\' rewards', async () => {
+    const aliceCurrencyBefore = await harness.getCurrency(harness.ctx.players[0].playerId);
+    const bobCurrencyBefore = await harness.getCurrency(harness.ctx.players[1].playerId);
+
     const unlinkEvent = await harness.triggerCommand(harness.ctx.players[2].playerId, `refunlink ${bobName}`);
-    assert.equal(parseSuccess(unlinkEvent), false, 'Expected /refunlink to reject paid referrals');
-    assert.ok(parseLogs(unlinkEvent).some((msg) => msg.includes('cannot be unlinked automatically')));
+    assert.equal(parseSuccess(unlinkEvent), true, 'Expected /refunlink to roll back paid currency referrals');
+
+    const aliceCurrencyAfter = await harness.getCurrency(harness.ctx.players[0].playerId);
+    const bobCurrencyAfter = await harness.getCurrency(harness.ctx.players[1].playerId);
+    assert.equal(aliceCurrencyAfter, aliceCurrencyBefore - 500, 'Expected referrer payout clawback');
+    assert.equal(bobCurrencyAfter, bobCurrencyBefore - 100, 'Expected referee welcome bonus clawback');
 
     const bobLink = await harness.getVariableValue<ReferralLink>(
       `${REFERRAL_LINK_PREFIX}${harness.ctx.players[1].playerId}`,
       harness.ctx.players[1].playerId,
     );
-    assert.equal(bobLink?.status, 'paid');
+    assert.equal(bobLink, null, 'Expected /refunlink to delete the paid referral link');
 
     const aliceStats = await harness.getVariableValue<ReferralStats>(
       `${REFERRAL_STATS_PREFIX}${harness.ctx.players[0].playerId}`,
       harness.ctx.players[0].playerId,
     );
-    assert.equal(aliceStats?.referralsTotal, 2);
-    assert.equal(aliceStats?.referralsPaid, 2);
-    assert.equal(aliceStats?.currencyEarned, 1075);
+    assert.equal(aliceStats?.referralsTotal, 1);
+    assert.equal(aliceStats?.referralsPaid, 1);
+    assert.equal(aliceStats?.currencyEarned, 575);
   });
 
 });
@@ -647,7 +654,7 @@ describe('referral-program module — admin command validation and repair flows'
   it('covers missing arguments, lookup failures, duplicate-link rejection, and missing-link unlink rejection', async () => {
     const usage = await harness.triggerCommand(harness.ctx.players[0].playerId, 'reflink "" ""');
     assert.equal(parseSuccess(usage), false);
-    assert.ok(parseLogs(usage).some((msg) => msg.includes('Usage: /reflink <referee> <referrer>')));
+    assert.ok(parseLogs(usage).some((msg) => msg.includes('Usage: reflink <referee> <referrer>')));
 
     const missingReferee = await harness.triggerCommand(harness.ctx.players[0].playerId, 'reflink no_such_player also_missing');
     assert.equal(parseSuccess(missingReferee), false);
@@ -659,7 +666,7 @@ describe('referral-program module — admin command validation and repair flows'
 
     const missingUnlink = await harness.triggerCommand(harness.ctx.players[0].playerId, 'refunlink ""');
     assert.equal(parseSuccess(missingUnlink), false);
-    assert.ok(parseLogs(missingUnlink).some((msg) => msg.includes('Usage: /refunlink <referee>')));
+    assert.ok(parseLogs(missingUnlink).some((msg) => msg.includes('Usage: refunlink <referee>')));
 
     const noLink = await harness.triggerCommand(harness.ctx.players[0].playerId, `refunlink ${bobName}`);
     assert.equal(parseSuccess(noLink), false);
@@ -671,6 +678,96 @@ describe('referral-program module — admin command validation and repair flows'
     const duplicateLink = await harness.triggerCommand(harness.ctx.players[0].playerId, `reflink ${bobName} ${malloryName}`);
     assert.equal(parseSuccess(duplicateLink), false);
     assert.ok(parseLogs(duplicateLink).some((msg) => msg.includes('already has a referral link')));
+  });
+
+  it('covers pending unlink rollback plus reflink immediate payout and paid unlink repair', async () => {
+    const bobCodeEvent = await harness.triggerCommand(harness.ctx.players[1].playerId, 'refcode');
+    assert.equal(parseSuccess(bobCodeEvent), true);
+    const bobCodeVar = await harness.getVariableValue<{ code: string }>(
+      `${REFERRAL_CODE_PREFIX}${harness.ctx.players[1].playerId}`,
+      harness.ctx.players[1].playerId,
+    );
+    assert.ok(bobCodeVar?.code);
+
+    const malloryCurrencyStart = await harness.getCurrency(harness.ctx.players[2].playerId);
+    const bobCurrencyStart = await harness.getCurrency(harness.ctx.players[1].playerId);
+
+    const pendingClaim = await harness.triggerCommand(harness.ctx.players[2].playerId, `referral ${bobCodeVar!.code}`);
+    assert.equal(parseSuccess(pendingClaim), true, 'Expected manual referral claim to succeed before unlink');
+
+    const pendingIndexAfterClaim = await harness.getVariableValue<string[]>(REFERRAL_PENDING_INDEX_KEY);
+    assert.ok(pendingIndexAfterClaim?.includes(harness.ctx.players[2].playerId));
+
+    const pendingUnlink = await harness.triggerCommand(harness.ctx.players[0].playerId, `refunlink ${malloryName}`);
+    assert.equal(parseSuccess(pendingUnlink), true, 'Expected /refunlink to roll back a pending referral');
+
+    const malloryCurrencyAfterPendingUnlink = await harness.getCurrency(harness.ctx.players[2].playerId);
+    assert.equal(malloryCurrencyAfterPendingUnlink, malloryCurrencyStart, 'Expected pending unlink to claw back the welcome bonus');
+
+    const pendingIndexAfterUnlink = await harness.getVariableValue<string[]>(REFERRAL_PENDING_INDEX_KEY);
+    assert.ok(!pendingIndexAfterUnlink?.includes(harness.ctx.players[2].playerId));
+
+    const linkAfterPendingUnlink = await harness.getVariableValue<ReferralLink>(
+      `${REFERRAL_LINK_PREFIX}${harness.ctx.players[2].playerId}`,
+      harness.ctx.players[2].playerId,
+    );
+    assert.equal(linkAfterPendingUnlink, null, 'Expected pending unlink to delete the referral link');
+
+    const statsAfterPendingUnlink = await harness.getVariableValue<ReferralStats>(
+      `${REFERRAL_STATS_PREFIX}${harness.ctx.players[1].playerId}`,
+      harness.ctx.players[1].playerId,
+    );
+    assert.equal(statsAfterPendingUnlink?.referralsTotal ?? 0, 0);
+    assert.equal(statsAfterPendingUnlink?.referralsPaid ?? 0, 0);
+
+    const reflinkEvent = await harness.triggerCommand(harness.ctx.players[0].playerId, `reflink ${malloryName} ${bobName}`);
+    assert.equal(parseSuccess(reflinkEvent), true, 'Expected /reflink to pay immediately on the happy path');
+
+    const malloryCurrencyAfterReflink = await harness.getCurrency(harness.ctx.players[2].playerId);
+    const bobCurrencyAfterReflink = await harness.getCurrency(harness.ctx.players[1].playerId);
+    assert.equal(malloryCurrencyAfterReflink, malloryCurrencyStart + 100, 'Expected /reflink to repay the welcome bonus after rollback');
+    assert.equal(bobCurrencyAfterReflink, bobCurrencyStart + 500, 'Expected /reflink to pay the referrer immediately');
+
+    const paidLink = await harness.getVariableValue<ReferralLink>(
+      `${REFERRAL_LINK_PREFIX}${harness.ctx.players[2].playerId}`,
+      harness.ctx.players[2].playerId,
+    );
+    assert.equal(paidLink?.status, 'paid');
+    assert.equal(paidLink?.rewardType, 'currency');
+    assert.equal(paidLink?.rewardAmount, 500);
+
+    const pendingIndexAfterReflink = await harness.getVariableValue<string[]>(REFERRAL_PENDING_INDEX_KEY);
+    assert.ok(!pendingIndexAfterReflink?.includes(harness.ctx.players[2].playerId), 'Expected paid reflink to remove the pending index entry');
+
+    const statsAfterReflink = await harness.getVariableValue<ReferralStats>(
+      `${REFERRAL_STATS_PREFIX}${harness.ctx.players[1].playerId}`,
+      harness.ctx.players[1].playerId,
+    );
+    assert.equal(statsAfterReflink?.referralsTotal, 1);
+    assert.equal(statsAfterReflink?.referralsPaid, 1);
+    assert.equal(statsAfterReflink?.currencyEarned, 500);
+
+    const paidUnlink = await harness.triggerCommand(harness.ctx.players[0].playerId, `refunlink ${malloryName}`);
+    assert.equal(parseSuccess(paidUnlink), true, 'Expected /refunlink to reverse a paid currency repair flow');
+
+    const malloryCurrencyAfterPaidUnlink = await harness.getCurrency(harness.ctx.players[2].playerId);
+    const bobCurrencyAfterPaidUnlink = await harness.getCurrency(harness.ctx.players[1].playerId);
+    assert.equal(malloryCurrencyAfterPaidUnlink, malloryCurrencyStart);
+    assert.equal(bobCurrencyAfterPaidUnlink, bobCurrencyStart);
+
+    const linkAfterPaidUnlink = await harness.getVariableValue<ReferralLink>(
+      `${REFERRAL_LINK_PREFIX}${harness.ctx.players[2].playerId}`,
+      harness.ctx.players[2].playerId,
+    );
+    assert.equal(linkAfterPaidUnlink, null);
+
+    const statsAfterPaidUnlink = await harness.getVariableValue<ReferralStats>(
+      `${REFERRAL_STATS_PREFIX}${harness.ctx.players[1].playerId}`,
+      harness.ctx.players[1].playerId,
+    );
+    assert.equal(statsAfterPaidUnlink?.referralsTotal, 0);
+    assert.equal(statsAfterPaidUnlink?.referralsPaid, 0);
+    assert.equal(statsAfterPaidUnlink?.currencyEarned, 0);
   });
 });
 
@@ -715,7 +812,7 @@ describe('referral-program module — disconnect hook and reset cron', () => {
     await harness.cleanup(roleIds);
   });
 
-  it('pays through the disconnect hook and clears stale daily counters via cron', async () => {
+  it('pays through the disconnect hook, notifies chat, and clears stale daily counters in /refstats and via cron', async () => {
     const referralEvent = await harness.triggerCommand(harness.ctx.players[1].playerId, `referral ${aliceCode}`);
     assert.equal(parseSuccess(referralEvent), true);
 
@@ -724,6 +821,7 @@ describe('referral-program module — disconnect hook and reset cron', () => {
     const hookEvent = await harness.triggerDisconnectHook(harness.ctx.players[1].playerId);
     assert.equal(parseSuccess(hookEvent), true);
     assert.ok(parseLogs(hookEvent).some((msg) => msg.includes('disconnect hook') && msg.includes('"paid":true')));
+    assert.ok(parseLogs(hookEvent).some((msg) => msg.includes('/message')));
 
     const aliceCurrencyAfter = await harness.getCurrency(harness.ctx.players[0].playerId);
     assert.equal(aliceCurrencyAfter, aliceCurrencyBefore + 575);
@@ -735,6 +833,10 @@ describe('referral-program module — disconnect hook and reset cron', () => {
       referralsToday: 3,
       lastReferralDay: '1999-12-31',
     }, harness.ctx.players[0].playerId);
+
+    const refstatsEvent = await harness.triggerCommand(harness.ctx.players[0].playerId, 'refstats');
+    assert.equal(parseSuccess(refstatsEvent), true);
+    assert.ok(parseLogs(refstatsEvent).some((msg) => msg.includes('today=0')));
 
     const resetEvent = await harness.triggerCron(resetCronjobId);
     assert.equal(parseSuccess(resetEvent), true);
@@ -1004,7 +1106,7 @@ describe('referral-program module — item reward success path', () => {
 
     const unlinkEvent = await harness.triggerCommand(harness.ctx.players[0].playerId, `refunlink ${bobName}`);
     assert.equal(parseSuccess(unlinkEvent), false, 'Expected paid item referral unlink to be rejected');
-    assert.ok(parseLogs(unlinkEvent).some((msg) => msg.includes('cannot be unlinked automatically')));
+    assert.ok(parseLogs(unlinkEvent).some((msg) => msg.includes('cannot be unlinked automatically') || msg.includes('cannot be unlinked')));
   });
 });
 

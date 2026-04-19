@@ -36,12 +36,12 @@ async function main() {
 
   const code = String(args.code || '').trim().toUpperCase();
   if (!code) {
-    throw new TakaroUserError('Usage: /referral <code> — provide a referral code from the player who invited you.');
+    throw new TakaroUserError('Usage: referral <code> — use your server command prefix before the trigger.');
   }
 
   const existingLink = await getReferralLink(gameServerId, moduleId, pog.playerId);
   if (existingLink) {
-    throw new TakaroUserError('You already have a referral link on this server. An admin can use /refunlink if this needs to be corrected.');
+    throw new TakaroUserError('You already have a referral link on this server. An admin can use refunlink if this needs to be corrected.');
   }
 
   const lookup = await getReferralCodeLookup(gameServerId, moduleId, code);

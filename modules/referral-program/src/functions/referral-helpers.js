@@ -172,17 +172,48 @@ function makeCode() {
 
 export async function ensureReferralCode(gameServerId, moduleId, playerId) {
   const existing = await getReferralCode(gameServerId, moduleId, playerId);
-  if (existing?.code) return existing;
+  if (existing?.code) {
+    const lookupKey = getReferralCodeLookupKey(existing.code);
+    const lookup = await findVariable(gameServerId, moduleId, lookupKey);
+    if (!lookup) {
+      try {
+        await createVariable(gameServerId, moduleId, lookupKey, { playerId });
+      } catch (err) {
+        if (!looksLikeDuplicateVariableError(err)) throw err;
+      }
+    }
+    return existing;
+  }
 
   for (let attempt = 0; attempt < 25; attempt++) {
     const code = makeCode();
-    const lookup = await getReferralCodeLookup(gameServerId, moduleId, code);
-    if (lookup?.playerId) continue;
-
     const payload = { code, createdAt: new Date().toISOString() };
-    await writeVariable(gameServerId, moduleId, getReferralCodeKey(playerId), payload, playerId);
-    await writeVariable(gameServerId, moduleId, getReferralCodeLookupKey(code), { playerId });
-    return payload;
+    const lookupKey = getReferralCodeLookupKey(code);
+
+    try {
+      await createVariable(gameServerId, moduleId, lookupKey, { playerId });
+    } catch (err) {
+      if (looksLikeDuplicateVariableError(err)) continue;
+      throw err;
+    }
+
+    try {
+      await createVariable(gameServerId, moduleId, getReferralCodeKey(playerId), payload, playerId);
+      return payload;
+    } catch (err) {
+      if (looksLikeDuplicateVariableError(err)) {
+        const settled = await getReferralCode(gameServerId, moduleId, playerId);
+        if (settled?.code) {
+          if (settled.code !== code) {
+            await deleteVariable(gameServerId, moduleId, lookupKey);
+          }
+          return settled;
+        }
+      }
+
+      await deleteVariable(gameServerId, moduleId, lookupKey);
+      throw err;
+    }
   }
 
   throw new Error('Failed to generate a unique referral code after 25 attempts.');
@@ -263,7 +294,7 @@ export async function listStatsEntries(gameServerId, moduleId) {
   return entries;
 }
 
-export async function findPlayerByName(name) {
+export async function findPlayerByName(gameServerId, name) {
   const targetName = String(name || '').trim();
   if (!targetName) return null;
 
@@ -272,7 +303,19 @@ export async function findPlayerByName(name) {
     limit: 25,
   });
 
-  return result.data.data.find((player) => player.name.toLowerCase() === targetName.toLowerCase()) ?? null;
+  const exactMatches = result.data.data.filter((player) => player.name.toLowerCase() === targetName.toLowerCase());
+  if (!exactMatches.length) return null;
+
+  const pogSearch = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
+    filters: {
+      gameServerId: [gameServerId],
+      playerId: exactMatches.map((player) => player.id),
+    },
+    limit: exactMatches.length,
+  });
+
+  const playerIdsOnServer = new Set(pogSearch.data.data.map((pog) => pog.playerId));
+  return exactMatches.find((player) => playerIdsOnServer.has(player.id)) ?? exactMatches[0] ?? null;
 }
 
 export async function getPlayerName(playerId) {
@@ -329,10 +372,21 @@ export function getVipMultiplier(pog) {
 export async function changeCurrency(gameServerId, playerId, amount) {
   const normalized = Math.trunc(Number(amount) || 0);
   if (!normalized) return 0;
-  await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, playerId, {
-    currency: normalized,
+
+  if (normalized > 0) {
+    await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, playerId, {
+      currency: normalized,
+    });
+    return normalized;
+  }
+
+  const pog = await getPog(gameServerId, playerId);
+  const currentCurrency = Math.max(0, Math.floor(Number(pog?.currency) || 0));
+  const nextCurrency = Math.max(0, currentCurrency + normalized);
+  await takaro.playerOnGameserver.playerOnGameServerControllerSetCurrency(gameServerId, playerId, {
+    currency: nextCurrency,
   });
-  return normalized;
+  return nextCurrency - currentCurrency;
 }
 
 export async function awardCurrency(gameServerId, playerId, amount) {
@@ -470,23 +524,75 @@ export async function rollbackWelcomeBonus(gameServerId, refereeId, amount) {
   return changeCurrency(gameServerId, refereeId, -normalized);
 }
 
+export async function rollbackReferrerReward(gameServerId, referrerId, link) {
+  if (!referrerId || !link || link.status !== 'paid') {
+    return { rolledBack: false, skipped: true, reason: 'not-paid' };
+  }
+
+  const reward = deserializePreparedReward(link);
+  if (!reward) {
+    return { rolledBack: false, skipped: true, reason: 'missing-reward' };
+  }
+
+  if (reward.rewardType === 'currency') {
+    const amount = Math.max(0, Math.floor(Number(reward.amount) || 0));
+    if (amount > 0) {
+      await changeCurrency(gameServerId, referrerId, -amount);
+    }
+    return { rolledBack: amount > 0, rewardType: 'currency', amount };
+  }
+
+  return {
+    rolledBack: false,
+    skipped: true,
+    rewardType: 'item',
+    amount: Math.max(1, Math.floor(Number(reward.amount) || 1)),
+    item: reward.item,
+    quality: reward.quality,
+    reason: 'item-rewards-cannot-be-clawed-back-automatically',
+  };
+}
+
 export async function adjustReferrerStatsForLink(gameServerId, moduleId, referrerId, link, direction = -1) {
   if (!referrerId || !link) return null;
 
   const stats = await getReferralStats(gameServerId, moduleId, referrerId);
   const normalizedDirection = direction >= 0 ? 1 : -1;
   const rewardAmount = Math.max(0, Math.floor(Number(link.rewardAmount) || 0));
+  const linkedDay = typeof link.linkedAt === 'string' ? link.linkedAt.slice(0, 10) : null;
 
   const nextStats = {
     ...stats,
     referralsTotal: Math.max(0, stats.referralsTotal + (link.status === 'rejected' ? 0 : normalizedDirection)),
     referralsPaid: Math.max(0, stats.referralsPaid + (link.status === 'paid' ? normalizedDirection : 0)),
+    referralsToday: Math.max(0, stats.referralsToday + (normalizedDirection < 0 && linkedDay && stats.lastReferralDay === linkedDay ? normalizedDirection : 0)),
     currencyEarned: Math.max(0, stats.currencyEarned + (link.status === 'paid' && link.rewardType === 'currency' ? normalizedDirection * rewardAmount : 0)),
     itemsEarned: Math.max(0, stats.itemsEarned + (link.status === 'paid' && link.rewardType === 'item' ? normalizedDirection * rewardAmount : 0)),
   };
 
   await setReferralStats(gameServerId, moduleId, referrerId, nextStats);
   return nextStats;
+}
+
+function describeReward(reward) {
+  if (!reward) return 'a referral reward';
+  if (reward.rewardType === 'currency') {
+    return `${Math.max(0, Math.floor(Number(reward.amount) || 0))} currency`;
+  }
+  return `${Math.max(1, Math.floor(Number(reward.amount) || 1))}x ${reward.item}${reward.quality ? ` (${reward.quality})` : ''}`;
+}
+
+async function notifyReferralPayout(gameServerId, referrerId, refereeId, reward) {
+  try {
+    const [referrerName, refereeName] = await Promise.all([
+      getPlayerName(referrerId),
+      getPlayerName(refereeId),
+    ]);
+    const message = `[Referral] ${referrerName} earned ${describeReward(reward)} because ${refereeName} completed their referral playtime.`;
+    await takaro.gameserver.gameServerControllerSendMessage(gameServerId, { message });
+  } catch (err) {
+    console.error(`referral-program: failed to send payout notification for referrer=${referrerId}, referee=${refereeId}: ${err}`);
+  }
 }
 
 export async function applyPaidReferral({
@@ -580,6 +686,7 @@ export async function applyPaidReferral({
 
     await setReferralLink(gameServerId, moduleId, refereeId, updatedLink);
     await removePendingReferee(gameServerId, moduleId, refereeId);
+    await notifyReferralPayout(gameServerId, referrerId, refereeId, reward);
 
     console.log(
       `referral-program: paid referrer=${referrerId} for referee=${refereeId}, rewardType=${reward.rewardType}, amount=${reward.amount ?? 0}, vipTier=${multiplierInfo.tier}, reason=${reason}`,

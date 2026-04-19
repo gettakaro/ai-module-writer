@@ -27,12 +27,12 @@ async function main() {
   const refereeName = String(args.referee || '').trim();
   const referrerName = String(args.referrer || '').trim();
   if (!refereeName || !referrerName) {
-    throw new TakaroUserError('Usage: /reflink <referee> <referrer>');
+    throw new TakaroUserError('Usage: reflink <referee> <referrer> (use your server command prefix before the trigger).');
   }
 
   const [referee, referrer] = await Promise.all([
-    findPlayerByName(refereeName),
-    findPlayerByName(referrerName),
+    findPlayerByName(gameServerId, refereeName),
+    findPlayerByName(gameServerId, referrerName),
   ]);
 
   if (!referee) throw new TakaroUserError(`Referee "${refereeName}" not found.`);
@@ -43,7 +43,7 @@ async function main() {
 
   const existingLink = await getReferralLink(gameServerId, moduleId, referee.id);
   if (existingLink) {
-    throw new TakaroUserError(`Player "${referee.name}" already has a referral link. Use /refunlink first if you need to replace it.`);
+    throw new TakaroUserError(`Player "${referee.name}" already has a referral link. Use refunlink first if you need to replace it.`);
   }
 
   const config = getNormalizedConfig(mod);
