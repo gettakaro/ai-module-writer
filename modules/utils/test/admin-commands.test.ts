@@ -1,6 +1,8 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'path';
+import os from 'os';
+import { cp, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { Client, EventSearchInputAllowedFiltersEventNameEnum } from '@takaro/apiclient';
 import { createClient } from '../../../test/helpers/client.js';
@@ -21,7 +23,7 @@ import {
   UTILS_DEBUG_FORCE_BAN_API_FAILURE_KEY,
   UTILS_DEBUG_FORCE_GIVECURRENCY_API_FAILURE_KEY,
   UTILS_DEBUG_FORCE_KICK_API_FAILURE_KEY,
-} from '../src/functions/utils-helpers.js';
+} from '../src/functions/utils-debug-keys.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -512,5 +514,59 @@ describe('utils: admin commands', () => {
     assert.equal(res.success, false, 'Expected forced /kick API failure to be translated');
     assert.ok(res.logs.some((msg) => msg.includes('utils:kick failed')), JSON.stringify(res.logs));
     assert.ok(res.logs.some((msg) => msg.includes('could not be kicked right now')), JSON.stringify(res.logs));
+  });
+});
+
+describe('test helper: pushModule rollback', () => {
+  let client: Client;
+  let restoredModuleId: string | undefined;
+  let tempModuleDir: string | undefined;
+
+  before(async () => {
+    client = await createClient();
+    await cleanupTestModules(client);
+  });
+
+  after(async () => {
+    if (restoredModuleId) {
+      await deleteModule(client, restoredModuleId);
+    }
+    if (tempModuleDir) {
+      await rm(tempModuleDir, { recursive: true, force: true });
+    }
+  });
+
+  it('restores the previous module when a replacement import fails', async () => {
+    const original = await pushModule(client, MODULE_DIR);
+    restoredModuleId = original.id;
+
+    const originalSearch = await client.module.moduleControllerSearch({
+      filters: { name: ['test-utils'] },
+    });
+    const originalRecord = originalSearch.data.data.find((module) => module.name === 'test-utils') as (Record<string, any> | undefined);
+    assert.ok(originalRecord, `Expected original test-utils module, got: ${JSON.stringify(originalSearch.data.data)}`);
+
+    tempModuleDir = await mkdtemp(path.join(os.tmpdir(), 'test-utils-rollback-'));
+    await cp(MODULE_DIR, tempModuleDir, { recursive: true });
+
+    const moduleJsonPath = path.join(tempModuleDir, 'module.json');
+    const moduleJson = JSON.parse(await readFile(moduleJsonPath, 'utf8')) as Record<string, any>;
+    moduleJson.description = 'BROKEN replacement that should never survive rollback';
+    moduleJson.commands.kick.arguments[0].type = 'definitely-not-a-valid-argument-type';
+    await writeFile(moduleJsonPath, `${JSON.stringify(moduleJson, null, 2)}\n`);
+
+    await assert.rejects(
+      pushModule(client, tempModuleDir),
+      /previous module was restored|failed/i,
+    );
+
+    const searchResult = await client.module.moduleControllerSearch({
+      filters: { name: ['test-utils'] },
+    });
+    const restored = searchResult.data.data.find((module) => module.name === 'test-utils') as (Record<string, any> | undefined);
+
+    assert.ok(restored, `Expected restored test-utils module, got: ${JSON.stringify(searchResult.data.data)}`);
+    assert.equal(restored.description, originalRecord.description, 'Expected rollback to restore the original module metadata');
+    restoredModuleId = restored.id;
   });
 });

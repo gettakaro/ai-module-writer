@@ -1,5 +1,5 @@
 {
-  "name": "utils",
+  "name": "test-utils",
   "description": "Cross-game utility commands for server info, rules, moderation, and simple economy administration.",
   "version": "latest",
   "supportedGames": [
@@ -126,8 +126,8 @@
       "arguments": [
         {
           "name": "player",
-          "type": "string",
-          "helpText": "The player name or Takaro player ID to kick",
+          "type": "player",
+          "helpText": "The player to kick",
           "position": 0
         },
         {
@@ -147,8 +147,8 @@
       "arguments": [
         {
           "name": "player",
-          "type": "string",
-          "helpText": "The player name or Takaro player ID to ban",
+          "type": "player",
+          "helpText": "The player to ban",
           "position": 0
         },
         {
@@ -174,8 +174,8 @@
       "arguments": [
         {
           "name": "player",
-          "type": "string",
-          "helpText": "The online player name or Takaro player ID who should receive currency",
+          "type": "player",
+          "helpText": "The player who should receive currency",
           "position": 0
         },
         {

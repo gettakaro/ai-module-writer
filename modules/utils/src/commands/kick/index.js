@@ -4,11 +4,11 @@ import {
   consumeUtilsDebugFlag,
   extractReason,
   getCommandArgumentTokens,
+  getOnlinePogForPlayer,
   getPlayerName,
-  isPlayerOnlineHere,
   normalizeReason,
   renderTemplate,
-  resolveOnlinePlayerArgument,
+  requireResolvedPlayerArgument,
   safeBroadcast,
   safePrivateMessage,
 } from './utils-helpers.js';
@@ -20,17 +20,18 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const target = await resolveOnlinePlayerArgument(gameServerId, args.player);
+  const target = requireResolvedPlayerArgument(args.player);
   if (!target) {
     throw new TakaroUserError('Please specify a valid player.');
   }
 
-  if (!isPlayerOnlineHere(target, gameServerId)) {
-    throw new TakaroUserError('That player is not currently online.');
-  }
-
   if (target.playerId === player.id) {
     throw new TakaroUserError('You cannot use this command on yourself.');
+  }
+
+  const targetPog = await getOnlinePogForPlayer(gameServerId, target.playerId);
+  if (!targetPog?.online) {
+    throw new TakaroUserError('That player is not currently online.');
   }
 
   const [adminName, targetName] = await Promise.all([
@@ -45,7 +46,7 @@ async function main() {
       throw new Error('Debug-forced kick API failure');
     }
 
-    await takaro.gameserver.gameServerControllerKickPlayer(gameServerId, target.playerId, {
+    await takaro.gameserver.gameServerControllerKickPlayer(targetPog.gameServerId || gameServerId, target.playerId, {
       reason,
     });
   } catch (err) {

@@ -2,7 +2,12 @@ import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers'
 import {
   acquireFundStateLock,
   FUND_STATE_LOCK_KEY,
+  FUND_TOTAL_KEY,
+  FUND_CYCLE_KEY,
+  FUND_LAST_COMPLETION_KEY,
+  getFundCycle,
   getFundTotal,
+  getFundVariable,
   setFundTotal,
   setFundVariable,
   incrementFundCycle,
@@ -54,6 +59,10 @@ async function main() {
   }
 
   let currentTotal;
+  let currentCycle;
+  let previousTotalVariable;
+  let previousCycleVariable;
+  let previousCompletionVariable;
   let newTotal;
   let newCycle;
   let thresholdReached = false;
@@ -85,7 +94,11 @@ async function main() {
       }
 
       await assertFundStateLock(gameServerId, moduleId, lockOwner);
+      previousTotalVariable = await getFundVariable(gameServerId, moduleId, FUND_TOTAL_KEY);
+      previousCycleVariable = await getFundVariable(gameServerId, moduleId, FUND_CYCLE_KEY);
+      previousCompletionVariable = await getFundVariable(gameServerId, moduleId, FUND_LAST_COMPLETION_KEY);
       currentTotal = await getFundTotal(gameServerId, moduleId);
+      currentCycle = await getFundCycle(gameServerId, moduleId);
       newTotal = currentTotal + amount;
 
       console.log(`Fund contribution: player=${player.name}, amount=${amount}, previousTotal=${currentTotal}, newTotal=${newTotal}, threshold=${threshold}`);
@@ -119,6 +132,38 @@ async function main() {
       }
 
       if (refunded) {
+        try {
+          await assertFundStateLock(gameServerId, moduleId, lockOwner);
+          if (previousTotalVariable) {
+            await setFundVariable(gameServerId, moduleId, FUND_TOTAL_KEY, JSON.parse(previousTotalVariable.value));
+          } else {
+            const currentTotalVariable = await getFundVariable(gameServerId, moduleId, FUND_TOTAL_KEY);
+            if (currentTotalVariable) {
+              await takaro.variable.variableControllerDelete(currentTotalVariable.id);
+            }
+          }
+
+          if (previousCycleVariable) {
+            await setFundVariable(gameServerId, moduleId, FUND_CYCLE_KEY, JSON.parse(previousCycleVariable.value));
+          } else {
+            const currentCycleVariable = await getFundVariable(gameServerId, moduleId, FUND_CYCLE_KEY);
+            if (currentCycleVariable) {
+              await takaro.variable.variableControllerDelete(currentCycleVariable.id);
+            }
+          }
+
+          if (previousCompletionVariable) {
+            await setFundVariable(gameServerId, moduleId, FUND_LAST_COMPLETION_KEY, JSON.parse(previousCompletionVariable.value));
+          } else {
+            const currentCompletionVariable = await getFundVariable(gameServerId, moduleId, FUND_LAST_COMPLETION_KEY);
+            if (currentCompletionVariable) {
+              await takaro.variable.variableControllerDelete(currentCompletionVariable.id);
+            }
+          }
+        } catch (restoreErr) {
+          console.error(`Fund: failed to restore shared state after refunding player ${player.name}. Manual inspection recommended. Error: ${restoreErr}`);
+        }
+
         throw new TakaroUserError('Your contribution could not be recorded, so your currency was refunded. Please try again.');
       }
 
@@ -145,8 +190,14 @@ async function main() {
 
   if (thresholdReached) {
     const completionMsg = config.completionMessage.replace('{threshold}', String(threshold));
+    const carryover = newTotal - threshold;
+    const nextRound = newCycle + 1;
+    const carryoverMessage = carryover > 0
+      ? ` ${carryover} currency carried over into Round #${nextRound}.`
+      : ` Round #${nextRound} is now active.`;
+    const completionBroadcast = `${completionMsg} Completed round #${newCycle}; starting Round #${nextRound}.${carryover > 0 ? ` ${carryover} currency carried over.` : ''}`;
     await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-      message: completionMsg,
+      message: completionBroadcast,
       opts: {},
     });
 
@@ -162,11 +213,6 @@ async function main() {
       }
     }
 
-    const carryover = newTotal - threshold;
-    const nextRound = newCycle + 1;
-    const carryoverMessage = carryover > 0
-      ? ` ${carryover} currency carried over into Round #${nextRound}.`
-      : '';
     const playerMessage = `You contributed ${amount} to the community fund. The community fund goal has been met! Completed round #${newCycle}; now starting Round #${nextRound}.${carryoverMessage}`;
 
     console.log(playerMessage);

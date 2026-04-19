@@ -6,7 +6,7 @@ import {
   getPlayerName,
   isEconomyEnabled,
   renderTemplate,
-  resolveOnlinePlayerArgument,
+  requireResolvedPlayerArgument,
   safeBroadcast,
   safeDirectMessage,
   safePrivateMessage,
@@ -21,7 +21,7 @@ async function main() {
 
   const amount = args.amount;
 
-  const target = await resolveOnlinePlayerArgument(gameServerId, args.player);
+  const target = requireResolvedPlayerArgument(args.player);
   if (!target) {
     throw new TakaroUserError('Please specify a valid player.');
   }

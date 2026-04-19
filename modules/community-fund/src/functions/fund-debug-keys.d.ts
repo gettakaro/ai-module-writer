@@ -1,0 +1,3 @@
+export const FUND_DEBUG_FORCE_STATE_WRITE_FAILURE_KEY: string;
+export const FUND_DEBUG_FORCE_REFUND_FAILURE_KEY: string;
+export const FUND_DEBUG_REPLACE_LOCK_OWNER_KEY: string;

@@ -1,13 +1,16 @@
 import { takaro } from '@takaro/helpers';
 
+export {
+  FUND_DEBUG_FORCE_STATE_WRITE_FAILURE_KEY,
+  FUND_DEBUG_FORCE_REFUND_FAILURE_KEY,
+  FUND_DEBUG_REPLACE_LOCK_OWNER_KEY,
+} from './fund-debug-keys.js';
+
 export const FUND_TOTAL_KEY = 'fund_total';
 // Internally called 'cycle' in storage keys; displayed as 'Round' to players.
 export const FUND_CYCLE_KEY = 'fund_cycle';
 export const FUND_LAST_COMPLETION_KEY = 'fund_last_completion';
 export const FUND_STATE_LOCK_KEY = 'fund_state_lock';
-export const FUND_DEBUG_FORCE_STATE_WRITE_FAILURE_KEY = '__debug_force_state_write_failure_after_deduct';
-export const FUND_DEBUG_FORCE_REFUND_FAILURE_KEY = '__debug_force_refund_failure_after_state_write_failure';
-export const FUND_DEBUG_REPLACE_LOCK_OWNER_KEY = '__debug_replace_lock_owner_before_release';
 
 function isConflictError(err) {
   const status = err?.response?.status ?? err?.status;

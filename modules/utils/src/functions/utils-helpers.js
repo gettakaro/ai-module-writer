@@ -1,8 +1,10 @@
 import { takaro } from '@takaro/helpers';
 
-export const UTILS_DEBUG_FORCE_GIVECURRENCY_API_FAILURE_KEY = '__debug_force_givecurrency_api_failure';
-export const UTILS_DEBUG_FORCE_KICK_API_FAILURE_KEY = '__debug_force_kick_api_failure';
-export const UTILS_DEBUG_FORCE_BAN_API_FAILURE_KEY = '__debug_force_ban_api_failure';
+export {
+  UTILS_DEBUG_FORCE_GIVECURRENCY_API_FAILURE_KEY,
+  UTILS_DEBUG_FORCE_KICK_API_FAILURE_KEY,
+  UTILS_DEBUG_FORCE_BAN_API_FAILURE_KEY,
+} from './utils-debug-keys.js';
 
 export function isBlank(value) {
   return value === undefined || value === null || String(value).trim() === '';
@@ -147,90 +149,6 @@ export function requireResolvedPlayerArgument(target) {
   return {
     ...resolved,
     online: target?.online,
-  };
-}
-
-async function searchPlayersByFilters(filters) {
-  const result = await takaro.player.playerControllerSearch({
-    filters,
-    limit: 10,
-  });
-  return result.data.data ?? [];
-}
-
-async function searchPlayersByName(token) {
-  const result = await takaro.player.playerControllerSearch({
-    search: { name: [token] },
-    limit: 10,
-  });
-  return result.data.data ?? [];
-}
-
-function toResolvedPlayer(player) {
-  const normalized = getCommandTargetPlayer(player);
-  if (!normalized) return null;
-  return {
-    ...normalized,
-    online: player?.online,
-  };
-}
-
-export async function resolvePlayerArgument(targetInput) {
-  const token = trimOrEmpty(targetInput);
-  if (token === '') return null;
-
-  const exactMatches = collapsePlayersById([
-    ...(await searchPlayersByFilters({ id: [token] })),
-    ...(await searchPlayersByFilters({ name: [token] })),
-  ]);
-
-  if (exactMatches.length === 1) {
-    return toResolvedPlayer(exactMatches[0]);
-  }
-
-  if (exactMatches.length > 1) {
-    const caseInsensitive = exactMatches.filter((player) => trimOrEmpty(player.name).toLowerCase() === token.toLowerCase());
-    if (caseInsensitive.length === 1) {
-      return toResolvedPlayer(caseInsensitive[0]);
-    }
-
-    console.warn(`utils-helpers: ambiguous player lookup for token '${token}' matched ${exactMatches.length} players`);
-    return null;
-  }
-
-  const fuzzyMatches = collapsePlayersById(await searchPlayersByName(token));
-  const exactNameMatches = fuzzyMatches.filter((player) => trimOrEmpty(player.name).toLowerCase() === token.toLowerCase());
-  if (exactNameMatches.length === 1) {
-    return toResolvedPlayer(exactNameMatches[0]);
-  }
-
-  if (fuzzyMatches.length === 1 && trimOrEmpty(fuzzyMatches[0].name) === token) {
-    return toResolvedPlayer(fuzzyMatches[0]);
-  }
-
-  return null;
-}
-
-export async function resolveOnlinePlayerArgument(gameServerId, targetInput) {
-  const resolved = await resolvePlayerArgument(targetInput);
-  if (!resolved) return null;
-
-  const onlinePog = await getOnlinePogForPlayer(gameServerId, resolved.playerId);
-  if (!onlinePog) {
-    return {
-      ...resolved,
-      gameServerId,
-      gameId: '',
-      online: false,
-    };
-  }
-
-  return {
-    playerId: resolved.playerId,
-    name: resolved.name,
-    gameId: trimOrEmpty(onlinePog.gameId),
-    gameServerId: trimOrEmpty(onlinePog.gameServerId) || gameServerId,
-    online: true,
   };
 }
 

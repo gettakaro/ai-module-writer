@@ -1,5 +1,5 @@
 import { describe, it, before, after } from 'node:test';
-import { FUND_DEBUG_FORCE_REFUND_FAILURE_KEY } from '../src/functions/fund-helpers.js';
+import { FUND_DEBUG_FORCE_REFUND_FAILURE_KEY } from '../src/functions/fund-debug-keys.js';
 import assert from 'node:assert/strict';
 import path from 'path';
 import { fileURLToPath } from 'url';

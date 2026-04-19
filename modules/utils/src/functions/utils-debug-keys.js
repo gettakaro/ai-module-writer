@@ -1,0 +1,3 @@
+export const UTILS_DEBUG_FORCE_GIVECURRENCY_API_FAILURE_KEY = '__debug_force_givecurrency_api_failure';
+export const UTILS_DEBUG_FORCE_KICK_API_FAILURE_KEY = '__debug_force_kick_api_failure';
+export const UTILS_DEBUG_FORCE_BAN_API_FAILURE_KEY = '__debug_force_ban_api_failure';
