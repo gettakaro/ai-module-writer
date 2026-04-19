@@ -143,11 +143,25 @@ export function shuffle(items) {
   return copy;
 }
 
-export async function findVariable(gameServerId, moduleId, key, playerId) {
+export function compareVariableRecency(left, right) {
+  const leftTimestamp = new Date(left?.updatedAt || left?.createdAt || 0).getTime();
+  const rightTimestamp = new Date(right?.updatedAt || right?.createdAt || 0).getTime();
+  if (leftTimestamp !== rightTimestamp) {
+    return rightTimestamp - leftTimestamp;
+  }
+  return String(right?.id || '').localeCompare(String(left?.id || ''));
+}
+
+export async function findVariables(gameServerId, moduleId, key, playerId) {
   const filters = { key: [key], gameServerId: [gameServerId], moduleId: [moduleId] };
   if (playerId) filters.playerId = [playerId];
-  const res = await takaro.variable.variableControllerSearch({ filters });
-  return res.data.data[0] || null;
+  const res = await takaro.variable.variableControllerSearch({ filters, limit: 100 });
+  return [...res.data.data].sort(compareVariableRecency);
+}
+
+export async function findVariable(gameServerId, moduleId, key, playerId) {
+  const matches = await findVariables(gameServerId, moduleId, key, playerId);
+  return matches[0] || null;
 }
 
 export async function listVariablesByKey(gameServerId, moduleId, key) {
@@ -175,12 +189,21 @@ export async function listVariablesByKey(gameServerId, moduleId, key) {
 }
 
 export async function writeVariable(gameServerId, moduleId, key, value, playerId) {
-  const existing = await findVariable(gameServerId, moduleId, key, playerId);
+  const existingMatches = await findVariables(gameServerId, moduleId, key, playerId);
   const payload = JSON.stringify(value);
-  if (existing) {
-    await takaro.variable.variableControllerUpdate(existing.id, { value: payload });
-    return existing.id;
+  const [primary, ...duplicates] = existingMatches;
+
+  if (primary) {
+    try {
+      await takaro.variable.variableControllerUpdate(primary.id, { value: payload });
+      await Promise.allSettled(duplicates.map((entry) => takaro.variable.variableControllerDelete(entry.id)));
+      return primary.id;
+    } catch (err) {
+      console.error(`minigames: failed to update variable key=${key} primary=${primary.id}. Recreating. Error: ${err}`);
+      await Promise.allSettled(existingMatches.map((entry) => takaro.variable.variableControllerDelete(entry.id)));
+    }
   }
+
   const createData = { key, value: payload, gameServerId, moduleId };
   if (playerId) createData.playerId = playerId;
   const created = await takaro.variable.variableControllerCreate(createData);
@@ -188,12 +211,12 @@ export async function writeVariable(gameServerId, moduleId, key, value, playerId
 }
 
 export async function deleteVariable(gameServerId, moduleId, key, playerId) {
-  const existing = await findVariable(gameServerId, moduleId, key, playerId);
-  if (existing) {
-    await takaro.variable.variableControllerDelete(existing.id);
-    return true;
+  const existingMatches = await findVariables(gameServerId, moduleId, key, playerId);
+  if (existingMatches.length === 0) {
+    return false;
   }
-  return false;
+  await Promise.allSettled(existingMatches.map((entry) => takaro.variable.variableControllerDelete(entry.id)));
+  return true;
 }
 
 export function isExpiredLock(lockValue, ttlMs) {
@@ -250,14 +273,19 @@ export async function releaseVariableLock({ gameServerId, moduleId, key, token }
 }
 
 export async function readJsonVariable(gameServerId, moduleId, key, fallback, playerId) {
-  const variable = await findVariable(gameServerId, moduleId, key, playerId);
-  if (!variable) return clone(fallback);
-  try {
-    return JSON.parse(variable.value);
-  } catch (err) {
-    console.error(`minigames: failed to parse ${key} (${playerId || 'global'}), using fallback. Error: ${err}`);
-    return clone(fallback);
+  const variables = await findVariables(gameServerId, moduleId, key, playerId);
+  if (variables.length === 0) return clone(fallback);
+
+  for (const variable of variables) {
+    try {
+      return JSON.parse(variable.value);
+    } catch (err) {
+      console.error(`minigames: failed to parse ${key} (${playerId || 'global'}) from variable ${variable.id}, deleting corrupt duplicate. Error: ${err}`);
+      await Promise.allSettled([takaro.variable.variableControllerDelete(variable.id)]);
+    }
   }
+
+  return clone(fallback);
 }
 
 export function clone(value) {
@@ -461,8 +489,8 @@ export async function emitBigScoreEvent({ gameServerId, moduleId, playerId, play
   const payload = {
     eventName: BIG_SCORE_EVENT_NAME,
     gameserverId: gameServerId,
+    gameServerId,
     moduleId,
-    actingModuleId: moduleId,
     playerId,
     meta: {
       playerId,
@@ -474,23 +502,38 @@ export async function emitBigScoreEvent({ gameServerId, moduleId, playerId, play
     },
   };
 
-  try {
-    if (takaro.event?.eventControllerCreate) {
-      await takaro.event.eventControllerCreate(payload);
-      console.log(`minigames: emitted ${BIG_SCORE_EVENT_NAME} player=${playerName} game=${game} points=${points}`);
+  const attempts = [
+    async () => takaro.axios?.post?.('/event', payload),
+    async () => takaro.event?.eventControllerCreate?.({
+      eventName: payload.eventName,
+      gameserverId: payload.gameserverId,
+      moduleId: payload.moduleId,
+      playerId: payload.playerId,
+      meta: payload.meta,
+    }),
+    async () => takaro.axios?.post?.('/event', {
+      eventName: payload.eventName,
+      gameserverId: payload.gameserverId,
+      moduleId: payload.moduleId,
+      playerId: payload.playerId,
+      meta: payload.meta,
+    }),
+  ];
+
+  for (const [index, attempt] of attempts.entries()) {
+    try {
+      if (!attempt) continue;
+      const result = await attempt();
+      if (result === undefined) continue;
+      console.log(`minigames: emitted ${BIG_SCORE_EVENT_NAME} player=${playerName} game=${game} points=${points} attempt=${index + 1}`);
       return true;
+    } catch (err) {
+      console.error(`minigames: big score emit attempt=${index + 1} failed for ${playerName}. Error: ${err}`);
     }
-    if (takaro.axios?.post) {
-      await takaro.axios.post('/event', payload);
-      console.log(`minigames: emitted ${BIG_SCORE_EVENT_NAME} via axios fallback player=${playerName} game=${game} points=${points}`);
-      return true;
-    }
-    console.error(`minigames: could not emit ${BIG_SCORE_EVENT_NAME}; no event client available`);
-    return false;
-  } catch (err) {
-    console.error(`minigames: failed to emit ${BIG_SCORE_EVENT_NAME} for ${playerName}. Error: ${err}`);
-    return false;
   }
+
+  console.error(`minigames: could not emit ${BIG_SCORE_EVENT_NAME} for ${playerName}; all emit attempts failed`);
+  return false;
 }
 
 export async function awardPoints({ gameServerId, moduleId, pog, playerId, playerName, config, game, basePoints, context }) {
@@ -513,9 +556,6 @@ export async function awardPoints({ gameServerId, moduleId, pog, playerId, playe
     const boostedPoints = Math.round(basePoints * multiplier);
     const actualPoints = remainingToday === Infinity ? boostedPoints : Math.max(0, Math.min(boostedPoints, remainingToday));
 
-    const nextWindow = { date: window.date, earned: window.earned + actualPoints };
-    await writeVariable(gameServerId, moduleId, WINDOW_KEY, nextWindow, playerId);
-
     const stats = await getPlayerStats(gameServerId, moduleId, playerId);
     stats.gamesPlayed += 1;
     stats.totalPoints += actualPoints;
@@ -525,10 +565,14 @@ export async function awardPoints({ gameServerId, moduleId, pog, playerId, playe
     if (actualPoints >= (stats.biggestScore?.points || 0)) {
       stats.biggestScore = { points: actualPoints, game, at: new Date().toISOString() };
     }
+
     await Promise.all([
       setPlayerStats(gameServerId, moduleId, playerId, stats),
       recordDailySummary({ gameServerId, moduleId, playerId, game, points: actualPoints, plays: 1, wins: 1 }),
     ]);
+
+    const nextWindow = { date: window.date, earned: window.earned + actualPoints };
+    await writeVariable(gameServerId, moduleId, WINDOW_KEY, nextWindow, playerId);
 
     let currencyPaid = 0;
     const rate = Number(config.pointsToCurrencyRate) || 0;
@@ -1421,7 +1465,7 @@ export function getGameDisplayName(game) {
 
 export async function handleAnswerCommand({ gameServerId, moduleId, player, pog, config, response }) {
   await requirePlayable({ gameServerId, moduleId, pog, playerId: player.id });
-  if (!response || !String(response).trim()) throw new TakaroUserError('Usage: /answer <response>');
+  if (!response || !String(response).trim()) throw new TakaroUserError('Usage: /answer <response...>');
   const round = await getActiveRound(gameServerId, moduleId);
   if (!round) throw new TakaroUserError('There is no active live round right now.');
   if (round.game === 'reactionrace') throw new TakaroUserError('This round is chat-only — type the token directly in chat.');
@@ -1560,15 +1604,35 @@ export async function findPlayerByName(name, gameServerId) {
   try {
     const playerSearch = await takaro.player.playerControllerSearch({
       search: { name: [wanted] },
+      limit: 100,
     });
     const found = playerSearch.data.data.find((entry) => String(entry.name || '').trim().toLowerCase() === wanted.toLowerCase());
-    if (!found) return null;
-    return {
-      id: found.id,
-      name: found.name || wanted,
-      pogId: null,
-      player: found,
-    };
+    if (found) {
+      return {
+        id: found.id,
+        name: found.name || wanted,
+        pogId: null,
+        player: found,
+      };
+    }
+
+    let page = 0;
+    while (page < 10) {
+      const pageSearch = await takaro.player.playerControllerSearch({ page, limit: 100 });
+      const exact = pageSearch.data.data.find((entry) => String(entry.name || '').trim().toLowerCase() === wanted.toLowerCase());
+      if (exact) {
+        return {
+          id: exact.id,
+          name: exact.name || wanted,
+          pogId: null,
+          player: exact,
+        };
+      }
+      if (pageSearch.data.data.length < 100) break;
+      page += 1;
+    }
+
+    return null;
   } catch (err) {
     console.error(`minigames: failed to resolve player by name=${wanted}. Error: ${err}`);
     return null;
@@ -1720,6 +1784,7 @@ export async function expireBans(gameServerId, moduleId) {
     } catch (err) {
       console.error(`minigames: expireBans deleting invalid ban ${variable.id}. Error: ${err}`);
       await takaro.variable.variableControllerDelete(variable.id);
+      await removeBanMarkerRole({ playerId: variable.playerId, gameServerId });
       removed += 1;
     }
   }

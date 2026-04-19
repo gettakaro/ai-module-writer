@@ -12,7 +12,9 @@ async function main() {
   if (requestedPlayer) {
     const found = await findPlayerByName(requestedPlayer, gameServerId);
     if (!found) {
-      await pog.pm(`Player "${requestedPlayer}" not found.`);
+      const message = `Player "${requestedPlayer}" not found.`;
+      await pog.pm(message);
+      console.log(`minigames: stats lookup failed target=${requestedPlayer} message=${message}`);
       return;
     }
     targetId = found.id;

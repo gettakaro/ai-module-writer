@@ -495,6 +495,25 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
     assert.ok(resetLogs.some((msg) => msg.includes('Usage: /minigamesresetstats <player>')), `expected reset usage log, got ${JSON.stringify(resetLogs)}`);
   });
 
+  it('accepts multi-word /answer responses for trivia rounds', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE, {
+      game: 'trivia',
+      prompt: 'Which city never sleeps?',
+      answer: 'New York',
+      answerType: 'text',
+      displayedOptions: ['New York', 'Boston'],
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    });
+
+    const event = await triggerCommand(ctx.players[1].playerId, `${prefix}answer New York`);
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(meta?.result?.success, true, `multi-word answer should succeed, logs=${JSON.stringify(logs)}`);
+    assert.ok(logs.some((msg) => msg.includes('live round settled game=trivia')), `expected multi-word settlement log, got ${JSON.stringify(logs)}`);
+    assert.equal(await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE), null, 'multi-word trivia round should clear after settlement');
+  });
+
   it('settles trivia and mathrace rounds through /answer and logs read-only report output', async () => {
     await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE, null);
 
@@ -770,7 +789,15 @@ describe('minigames: trivia sources and live-round gating branches', () => {
     const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
     const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
     assert.equal(meta?.result?.success, true, 'disabled forced round command should still complete with feedback');
-    assert.ok(logs.some((msg) => msg.includes('cannot create forced round for disabled game=reactionrace')), `expected disabled-game log, got ${JSON.stringify(logs)}`);
+    assert.ok(logs.some((msg) => msg.includes('reactionrace is disabled on this server.')), `expected disabled-game guidance, got ${JSON.stringify(logs)}`);
+  });
+
+  it('refuses unknown forced round names with actionable guidance', async () => {
+    const event = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamesfirenow typooooo`);
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(meta?.result?.success, true, 'unknown forced round command should complete with feedback');
+    assert.ok(logs.some((msg) => msg.includes('Unknown live game "typooooo".')), `expected unknown-game guidance, got ${JSON.stringify(logs)}`);
   });
 
   it('returns no scramble round when the word bank is empty', async () => {

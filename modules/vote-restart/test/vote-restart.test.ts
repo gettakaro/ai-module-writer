@@ -89,6 +89,36 @@ function makeCronjobHelper(
   };
 }
 
+async function upsertVariable(client: Client, gameServerId: string, moduleId: string, key: string, value: unknown) {
+  const existing = await client.variable.variableControllerSearch({
+    filters: {
+      key: [key],
+      gameServerId: [gameServerId],
+      moduleId: [moduleId],
+    },
+  });
+  const record = existing.data.data[0];
+  const payload = JSON.stringify(value);
+  if (record) {
+    await client.variable.variableControllerUpdate(record.id, { value: payload });
+    return record.id;
+  }
+  const created = await client.variable.variableControllerCreate({ key, value: payload, gameServerId, moduleId });
+  return created.data.data.id;
+}
+
+async function readVariable(client: Client, gameServerId: string, moduleId: string, key: string) {
+  const existing = await client.variable.variableControllerSearch({
+    filters: {
+      key: [key],
+      gameServerId: [gameServerId],
+      moduleId: [moduleId],
+    },
+  });
+  const record = existing.data.data[0];
+  return record ? JSON.parse(record.value) : null;
+}
+
 // Test setup:
 //   voteDuration=120s, cooldownDuration=60s, restartDelay=0, passThreshold=51, minimumPlayers=2
 //
@@ -549,6 +579,221 @@ describe('vote-restart edge cases', () => {
 // We simulate this by injecting a vote state with 1 voter and using passThreshold=49
 // so that with 2 online eligible players, threshold=ceil(2*49/100)=1.
 // This validates the cronjob's dynamic threshold recalculation logic.
+
+describe('vote-restart recovery and hardening', () => {
+  let client4: Client;
+  let ctx4: MockServerContext;
+  let moduleId4: string;
+  let versionId4: string;
+  let prefix4: string;
+  let cronjobId4: string;
+
+  before(async () => {
+    client4 = await createClient();
+    ctx4 = await startMockServer(client4);
+
+    const mod = await pushModule(client4, MODULE_DIR);
+    moduleId4 = mod.id;
+    versionId4 = mod.latestVersion.id;
+    prefix4 = await getCommandPrefix(client4, ctx4.gameServer.id);
+
+    await installModule(client4, versionId4, ctx4.gameServer.id, {
+      userConfig: {
+        voteDuration: 120,
+        cooldownDuration: 60,
+        restartDelay: 0,
+        restartCommand: 'say restart-test',
+        passThreshold: 51,
+        minimumPlayers: 2,
+      },
+    });
+
+    const cronjob = mod.latestVersion.cronJobs[0];
+    if (!cronjob) throw new Error('Expected at least one cronjob in vote-restart module');
+    cronjobId4 = cronjob.id;
+  });
+
+  after(async () => {
+    try {
+      await uninstallModule(client4, moduleId4, ctx4.gameServer.id);
+    } catch (err) {
+      console.error('Cleanup: failed to uninstall recovery module:', err);
+    }
+    try {
+      await deleteModule(client4, moduleId4);
+    } catch (err) {
+      console.error('Cleanup: failed to delete recovery module:', err);
+    }
+    await stopMockServer(ctx4.server, client4, ctx4.gameServer.id);
+  });
+
+  const { triggerCommand: triggerCommand4, getResult: getResult4 } = makeCommandHelpers(
+    () => client4,
+    () => ctx4.gameServer.id,
+    () => prefix4,
+  );
+
+  const triggerCronjob4 = makeCronjobHelper(
+    () => client4,
+    () => ctx4.gameServer.id,
+    () => cronjobId4,
+    () => moduleId4,
+  );
+
+  it('recovers from restart-pending state even when vr_vote_state is missing', async () => {
+    await upsertVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_pending', {
+      status: 'passed',
+      passedAt: new Date(Date.now() - 30 * 1000).toISOString(),
+      initiatorName: 'RecoverableVote',
+      restartDelay: 0,
+      restartCommand: 'say restart-test',
+    });
+
+    const { success, logs } = await triggerCronjob4();
+    assert.equal(success, true, `Expected cronjob to succeed from restart-pending recovery, logs: ${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((l) => l.includes('restart command executed successfully')),
+      `Expected restart-pending recovery to execute the restart command, got: ${JSON.stringify(logs)}`,
+    );
+    assert.equal(await readVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_pending'), null, 'restart-pending should be cleared after recovery');
+  });
+
+  it('ignores malformed persisted vote state without crashing user-facing commands', async () => {
+    const existingVoteState = await client4.variable.variableControllerSearch({
+      filters: {
+        key: ['vr_vote_state'],
+        gameServerId: [ctx4.gameServer.id],
+        moduleId: [moduleId4],
+      },
+    });
+    if (existingVoteState.data.data[0]) {
+      await client4.variable.variableControllerUpdate(existingVoteState.data.data[0].id, { value: '{not-valid-json' });
+    } else {
+      await client4.variable.variableControllerCreate({
+        key: 'vr_vote_state',
+        value: '{not-valid-json',
+        gameServerId: ctx4.gameServer.id,
+        moduleId: moduleId4,
+      });
+    }
+    await upsertVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_pending', { passedAt: 'not-a-date' });
+
+    const event = await triggerCommand4(ctx4.players[0].playerId, 'votestatus');
+    const { success, logs } = getResult4(event);
+    assert.equal(success, true, `Expected votestatus to stay user-friendly with malformed persisted state, logs: ${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((l) => l.includes('No active restart vote') || l.includes('no active restart vote')),
+      `Expected malformed state to be ignored as no active vote, got: ${JSON.stringify(logs)}`,
+    );
+  });
+
+  it('does not re-execute a restart when restart-pending is already marked executing', async () => {
+    await upsertVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_vote_state', {
+      startedAt: new Date(Date.now() - 60 * 1000).toISOString(),
+      initiatorName: 'CleanupOnly',
+      voters: [ctx4.players[0].playerId],
+      status: 'passed',
+      passedAt: new Date(Date.now() - 30 * 1000).toISOString(),
+    });
+    await upsertVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_pending', {
+      status: 'executing',
+      passedAt: new Date(Date.now() - 30 * 1000).toISOString(),
+      attemptedAt: new Date(Date.now() - 20 * 1000).toISOString(),
+      initiatorName: 'CleanupOnly',
+      restartDelay: 0,
+      restartCommand: 'say restart-test',
+    });
+
+    const { success, logs } = await triggerCronjob4();
+    assert.equal(success, true, `Expected cleanup-only cronjob success, logs: ${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((l) => l.includes('restart already issued previously, retrying cleanup only')),
+      `Expected cleanup-only log branch, got: ${JSON.stringify(logs)}`,
+    );
+    assert.equal(await readVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_vote_state'), null, 'vote state should be cleaned up after executing marker');
+    assert.equal(await readVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_pending'), null, 'restart-pending should be cleaned up after executing marker');
+  });
+});
+
+describe('vote-restart restart-command failure cleanup', () => {
+  let client5: Client;
+  let ctx5: MockServerContext;
+  let moduleId5: string;
+  let versionId5: string;
+  let cronjobId5: string;
+
+  before(async () => {
+    client5 = await createClient();
+    ctx5 = await startMockServer(client5);
+
+    const mod = await pushModule(client5, MODULE_DIR);
+    moduleId5 = mod.id;
+    versionId5 = mod.latestVersion.id;
+
+    await installModule(client5, versionId5, ctx5.gameServer.id, {
+      userConfig: {
+        voteDuration: 120,
+        cooldownDuration: 60,
+        restartDelay: 0,
+        restartCommand: '',
+        passThreshold: 51,
+        minimumPlayers: 2,
+      },
+    });
+
+    const cronjob = mod.latestVersion.cronJobs[0];
+    if (!cronjob) throw new Error('Expected at least one cronjob in vote-restart module');
+    cronjobId5 = cronjob.id;
+  });
+
+  after(async () => {
+    try {
+      await uninstallModule(client5, moduleId5, ctx5.gameServer.id);
+    } catch (err) {
+      console.error('Cleanup: failed to uninstall failure-path module:', err);
+    }
+    try {
+      await deleteModule(client5, moduleId5);
+    } catch (err) {
+      console.error('Cleanup: failed to delete failure-path module:', err);
+    }
+    await stopMockServer(ctx5.server, client5, ctx5.gameServer.id);
+  });
+
+  const triggerCronjob5 = makeCronjobHelper(
+    () => client5,
+    () => ctx5.gameServer.id,
+    () => cronjobId5,
+    () => moduleId5,
+  );
+
+  it('cleans up state and sets cooldown when the restart command fails', async () => {
+    await upsertVariable(client5, ctx5.gameServer.id, moduleId5, 'vr_vote_state', {
+      startedAt: new Date(Date.now() - 60 * 1000).toISOString(),
+      initiatorName: 'BadRestart',
+      voters: [ctx5.players[0].playerId],
+      status: 'passed',
+      passedAt: new Date(Date.now() - 30 * 1000).toISOString(),
+    });
+    await upsertVariable(client5, ctx5.gameServer.id, moduleId5, 'vr_restart_pending', {
+      status: 'passed',
+      passedAt: new Date(Date.now() - 30 * 1000).toISOString(),
+      initiatorName: 'BadRestart',
+      restartDelay: 0,
+      restartCommand: '',
+    });
+
+    const { success, logs } = await triggerCronjob5();
+    assert.equal(success, true, `Expected cronjob to handle restart-command failures internally, logs: ${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((l) => l.includes('failed to execute restart command')),
+      `Expected restart-command failure log, got: ${JSON.stringify(logs)}`,
+    );
+    assert.equal(await readVariable(client5, ctx5.gameServer.id, moduleId5, 'vr_vote_state'), null, 'vote state should be cleared after restart-command failure');
+    assert.equal(await readVariable(client5, ctx5.gameServer.id, moduleId5, 'vr_restart_pending'), null, 'restart-pending should be cleared after restart-command failure');
+    assert.ok(await readVariable(client5, ctx5.gameServer.id, moduleId5, 'vr_cooldown_until'), 'cooldown should be set after restart-command failure');
+  });
+});
 
 describe('vote-restart dynamic threshold recalculation', () => {
   let client3: Client;

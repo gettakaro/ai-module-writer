@@ -85,6 +85,21 @@ async function main() {
     const restartCommand = restartPending.restartCommand || config.restartCommand;
     const elapsedSincePassed = (Date.now() - new Date(restartPending.passedAt).getTime()) / 1000;
 
+    if (restartPending.status === 'executing') {
+      console.log('check-vote: restart already issued previously, retrying cleanup only');
+      try {
+        await deleteRestartPending(gameServerId, moduleId);
+      } catch (err) {
+        console.error('check-vote: failed to clean up restartPending after previously issued restart', err);
+      }
+      try {
+        await deleteVoteState(gameServerId, moduleId);
+      } catch (err) {
+        console.error('check-vote: failed to clean up voteState after previously issued restart', err);
+      }
+      return;
+    }
+
     if (elapsedSincePassed >= delay) {
       console.log(`check-vote: restart delay elapsed (${Math.floor(elapsedSincePassed)}s), executing restart`);
 
@@ -93,19 +108,32 @@ async function main() {
         opts: {},
       });
 
+      await setRestartPending(gameServerId, moduleId, {
+        ...restartPending,
+        status: 'executing',
+        attemptedAt: new Date().toISOString(),
+        restartDelay: delay,
+        restartCommand,
+      });
+
       try {
         await takaro.gameserver.gameServerControllerExecuteCommand(gameServerId, {
           command: restartCommand,
         });
         console.log('check-vote: restart command executed successfully');
-        await Promise.all([
-          deleteVoteState(gameServerId, moduleId),
-          deleteRestartPending(gameServerId, moduleId),
-        ]);
+        try {
+          await deleteRestartPending(gameServerId, moduleId);
+        } catch (err) {
+          console.error('check-vote: restart executed but failed to delete restartPending', err);
+        }
+        try {
+          await deleteVoteState(gameServerId, moduleId);
+        } catch (err) {
+          console.error('check-vote: restart executed but failed to delete voteState', err);
+        }
       } catch (cmdErr) {
         console.error(`check-vote: failed to execute restart command "${restartCommand}": ${cmdErr}`);
 
-        // Clean up vote state and set cooldown so the vote doesn't retry forever
         const cooldownUntil = new Date(Date.now() + config.cooldownDuration * 1000).toISOString();
         try {
           await setCooldownUntil(gameServerId, moduleId, cooldownUntil);

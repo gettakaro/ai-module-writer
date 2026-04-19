@@ -113,10 +113,14 @@
     "answer": {
       "trigger": "answer",
       "description": "Answer the active live round.",
-      "helpText": "Usage: /answer <response>",
+      "helpText": "Usage: /answer <response...>",
       "function": "src/commands/answer/index.js",
       "arguments": [
-        { "name": "response", "type": "string", "helpText": "Your answer", "position": 0 }
+        { "name": "response", "type": "string", "helpText": "The first word of your answer", "position": 0 },
+        { "name": "response2", "type": "string", "helpText": "Optional second word for multi-word answers", "position": 1, "defaultValue": "__MINIGAMES_NONE__" },
+        { "name": "response3", "type": "string", "helpText": "Optional third word for multi-word answers", "position": 2, "defaultValue": "__MINIGAMES_NONE__" },
+        { "name": "response4", "type": "string", "helpText": "Optional fourth word for multi-word answers", "position": 3, "defaultValue": "__MINIGAMES_NONE__" },
+        { "name": "response5", "type": "string", "helpText": "Optional fifth word for multi-word answers", "position": 4, "defaultValue": "__MINIGAMES_NONE__" }
       ]
     },
     "minigamestats": {
