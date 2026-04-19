@@ -1,5 +1,5 @@
 {
-  "name": "test-minigames",
+  "name": "miniGames",
   "description": "Unified mini-games module with daily puzzles and live chat rounds.",
   "version": "latest",
   "supportedGames": ["all"],
@@ -80,7 +80,7 @@
       "helpText": "Usage: /minigames [game]",
       "function": "src/commands/minigames/index.js",
       "arguments": [
-        { "name": "game", "type": "string", "helpText": "Optional game name", "position": 0 }
+        { "name": "game", "type": "string", "helpText": "Optional game name", "position": 0, "defaultValue": "" }
       ]
     },
     "wordle": {
@@ -89,7 +89,7 @@
       "helpText": "Usage: /wordle [guess]",
       "function": "src/commands/wordle/index.js",
       "arguments": [
-        { "name": "guess", "type": "string", "helpText": "Your 5-letter guess", "position": 0 }
+        { "name": "guess", "type": "string", "helpText": "Your 5-letter guess", "position": 0, "defaultValue": "" }
       ]
     },
     "hangman": {
@@ -98,7 +98,7 @@
       "helpText": "Usage: /hangman [letterOrWord]",
       "function": "src/commands/hangman/index.js",
       "arguments": [
-        { "name": "letterOrWord", "type": "string", "helpText": "A letter or solve attempt", "position": 0 }
+        { "name": "letterOrWord", "type": "string", "helpText": "A letter or solve attempt", "position": 0, "defaultValue": "" }
       ]
     },
     "hotcold": {
@@ -107,7 +107,7 @@
       "helpText": "Usage: /hotcold [number]",
       "function": "src/commands/hotcold/index.js",
       "arguments": [
-        { "name": "number", "type": "number", "helpText": "Guess from 1 to 1000", "position": 0 }
+        { "name": "number", "type": "number", "helpText": "Guess from 1 to 1000", "position": 0, "defaultValue": "" }
       ]
     },
     "answer": {
@@ -125,7 +125,7 @@
       "helpText": "Usage: /minigamestats [player]",
       "function": "src/commands/minigamestats/index.js",
       "arguments": [
-        { "name": "player", "type": "string", "helpText": "Optional player name", "position": 0 }
+        { "name": "player", "type": "string", "helpText": "Optional player name", "position": 0, "defaultValue": "" }
       ]
     },
     "minigamestop": {
@@ -151,7 +151,7 @@
       "function": "src/commands/minigamesban/index.js",
       "arguments": [
         { "name": "player", "type": "string", "helpText": "Player name", "position": 0 },
-        { "name": "hours", "type": "number", "helpText": "Optional duration in hours", "position": 1 }
+        { "name": "hours", "type": "number", "helpText": "Optional duration in hours", "position": 1, "defaultValue": "" }
       ]
     },
     "minigamesunban": {
@@ -185,7 +185,7 @@
       "helpText": "Usage: /minigamesfirenow [game]",
       "function": "src/commands/minigamesfirenow/index.js",
       "arguments": [
-        { "name": "game", "type": "string", "helpText": "Optional game to force", "position": 0 }
+        { "name": "game", "type": "string", "helpText": "Optional game to force", "position": 0, "defaultValue": "" }
       ]
     },
     "minigamesreport": {

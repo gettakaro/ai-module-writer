@@ -10,6 +10,7 @@ export const LEADERBOARD_KEY = 'minigames_leaderboard_cache';
 export const WARNINGS_KEY = 'minigames_admin_warned_empty_bank';
 export const STATS_KEY = 'minigames_stats';
 export const WINDOW_KEY = 'minigames_window';
+export const DAILY_HISTORY_KEY = 'minigames_daily_history';
 export const BAN_KEY = 'minigames_ban';
 export const WORDLE_SESSION_KEY = 'minigames_session_wordle';
 export const HANGMAN_SESSION_KEY = 'minigames_session_hangman';
@@ -103,6 +104,18 @@ export function secondsUntilUtcMidnight() {
   return Math.max(0, Math.ceil((next.getTime() - now.getTime()) / 1000));
 }
 
+export function formatCountdown(totalSeconds) {
+  const seconds = Math.max(0, Number(totalSeconds) || 0);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  const parts = [];
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
+  if (remainingSeconds > 0 || parts.length === 0) parts.push(`${remainingSeconds}s`);
+  return parts.join(' ');
+}
+
 export function normalizeText(value) {
   return String(value ?? '')
     .trim()
@@ -192,6 +205,15 @@ export function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+export function createEmptyDailySummary(date = getTodayUtcDate()) {
+  return {
+    date,
+    totalPoints: 0,
+    gamesPlayed: 0,
+    perGame: Object.fromEntries(Object.keys(DEFAULT_STATS.perGame).map((game) => [game, { points: 0, plays: 0, wins: 0 }])),
+  };
+}
+
 export async function ensureContentVariable(gameServerId, moduleId, key, fallback) {
   const variable = await findVariable(gameServerId, moduleId, key);
   if (!variable) {
@@ -218,6 +240,7 @@ export async function getBanRecord(gameServerId, moduleId, playerId) {
   if (!record) return null;
   if (record.expiresAt && new Date(record.expiresAt).getTime() <= Date.now()) {
     await deleteVariable(gameServerId, moduleId, BAN_KEY, playerId);
+    await removeBanMarkerRole(record.roleId);
     return null;
   }
   return record;
@@ -278,6 +301,44 @@ export async function setPlayerStats(gameServerId, moduleId, playerId, stats) {
   await writeVariable(gameServerId, moduleId, STATS_KEY, stats, playerId);
 }
 
+export async function getPlayerDailyHistory(gameServerId, moduleId, playerId) {
+  const history = await readJsonVariable(gameServerId, moduleId, DAILY_HISTORY_KEY, { days: {} }, playerId);
+  if (!history || typeof history !== 'object' || typeof history.days !== 'object' || Array.isArray(history.days)) {
+    return { days: {} };
+  }
+  return history;
+}
+
+export async function recordDailySummary({ gameServerId, moduleId, playerId, game, points = 0, plays = 0, wins = 0, date = getTodayUtcDate() }) {
+  const history = await getPlayerDailyHistory(gameServerId, moduleId, playerId);
+  const existing = history.days?.[date] || createEmptyDailySummary(date);
+  const summary = {
+    ...createEmptyDailySummary(date),
+    ...existing,
+    perGame: { ...createEmptyDailySummary(date).perGame, ...(existing.perGame || {}) },
+  };
+  summary.totalPoints += Number(points) || 0;
+  summary.gamesPlayed += Number(plays) || 0;
+  summary.perGame[game] = {
+    points: (Number(summary.perGame[game]?.points) || 0) + (Number(points) || 0),
+    plays: (Number(summary.perGame[game]?.plays) || 0) + (Number(plays) || 0),
+    wins: (Number(summary.perGame[game]?.wins) || 0) + (Number(wins) || 0),
+  };
+  history.days = history.days || {};
+  history.days[date] = summary;
+
+  const cutoff = new Date(`${date}T00:00:00.000Z`);
+  cutoff.setUTCDate(cutoff.getUTCDate() - 90);
+  for (const key of Object.keys(history.days)) {
+    if (new Date(`${key}T00:00:00.000Z`).getTime() < cutoff.getTime()) {
+      delete history.days[key];
+    }
+  }
+
+  await writeVariable(gameServerId, moduleId, DAILY_HISTORY_KEY, history, playerId);
+  return summary;
+}
+
 export function getBoostMultiplier(pog) {
   const permission = checkPermission(pog, 'MINIGAMES_BOOST');
   const tier = permission && Number(permission.count) > 0 ? Math.min(Number(permission.count), 4) : 0;
@@ -302,7 +363,10 @@ export async function awardPoints({ gameServerId, moduleId, pog, playerId, playe
   if (actualPoints >= (stats.biggestScore?.points || 0)) {
     stats.biggestScore = { points: actualPoints, game, at: new Date().toISOString() };
   }
-  await setPlayerStats(gameServerId, moduleId, playerId, stats);
+  await Promise.all([
+    setPlayerStats(gameServerId, moduleId, playerId, stats),
+    recordDailySummary({ gameServerId, moduleId, playerId, game, points: actualPoints, plays: 1, wins: 1 }),
+  ]);
 
   let currencyPaid = 0;
   const rate = Number(config.pointsToCurrencyRate) || 0;
@@ -322,10 +386,24 @@ export async function awardPoints({ gameServerId, moduleId, pog, playerId, playe
 
   if (actualPoints >= (Number(config.bigScoreThreshold) || 500)) {
     try {
-      await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-        message: `🏆 BIG SCORE! ${playerName} earned ${actualPoints} points in ${game}${context ? ` (${context})` : ''}.`,
-        opts: {},
-      });
+      await Promise.all([
+        takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
+          message: `🏆 BIG SCORE! ${playerName} earned ${actualPoints} points in ${game}${context ? ` (${context})` : ''}.`,
+          opts: {},
+        }),
+        takaro.event?.eventControllerCreate?.({
+          eventName: 'minigames-big-score',
+          moduleId,
+          gameserverId: gameServerId,
+          playerId,
+          meta: {
+            playerName,
+            game,
+            points: actualPoints,
+            context: context || null,
+          },
+        }),
+      ]);
     } catch (err) {
       console.error(`minigames: failed to broadcast big score for ${playerName}. Error: ${err}`);
     }
@@ -407,8 +485,13 @@ export async function warnEmptyBanks(gameServerId, moduleId, keys) {
   if (freshKeys.length === 0) return;
   effective.keys.push(...freshKeys);
   await writeVariable(gameServerId, moduleId, WARNINGS_KEY, effective);
+  const descriptions = {
+    [CONTENT_WORDLE_KEY]: 'Wordle words (Variables → minigames_content_wordle.words)',
+    [CONTENT_WORDLIST_KEY]: 'Hangman/Scramble word list (Variables → minigames_content_wordlist.words)',
+    [CONTENT_TRIVIA_KEY]: 'custom trivia questions (Variables → minigames_content_trivia.questions)',
+  };
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-    message: `⚠️ miniGames needs content in variable(s): ${freshKeys.join(', ')}`,
+    message: `⚠️ miniGames is missing content: ${freshKeys.map((key) => descriptions[key] || key).join('; ')}. An admin needs to seed the module Variables tab before those games can run.`,
     opts: {},
   });
 }
@@ -551,7 +634,10 @@ export async function playWordle({ gameServerId, moduleId, player, pog, config, 
       best: stats.streaks.wordle.best || 0,
       lastSolvedDate: stats.streaks.wordle.lastSolvedDate || null,
     };
-    await setPlayerStats(gameServerId, moduleId, player.id, stats);
+    await Promise.all([
+      setPlayerStats(gameServerId, moduleId, player.id, stats),
+      recordDailySummary({ gameServerId, moduleId, playerId: player.id, game: 'wordle', plays: 1, wins: 0, points: 0 }),
+    ]);
     await writeVariable(gameServerId, moduleId, WORDLE_SESSION_KEY, session, player.id);
     await pog.pm(`🟩 ${feedback} Out of guesses — today's word was ${puzzle.wordle.toUpperCase()}.`);
     console.log(`wordle: failed player=${player.name} answer=${puzzle.wordle}`);
@@ -633,7 +719,10 @@ export async function playHangman({ gameServerId, moduleId, player, pog, config,
     const stats = await getPlayerStats(gameServerId, moduleId, player.id);
     stats.gamesPlayed += 1;
     stats.perGame.hangman.plays += 1;
-    await setPlayerStats(gameServerId, moduleId, player.id, stats);
+    await Promise.all([
+      setPlayerStats(gameServerId, moduleId, player.id, stats),
+      recordDailySummary({ gameServerId, moduleId, playerId: player.id, game: 'hangman', plays: 1, wins: 0, points: 0 }),
+    ]);
     await writeVariable(gameServerId, moduleId, HANGMAN_SESSION_KEY, session, player.id);
     await pog.pm(`🎪 Game over — the word was ${puzzle.hangman.toUpperCase()}.`);
     console.log(`hangman: failed player=${player.name} answer=${puzzle.hangman}`);
@@ -709,7 +798,10 @@ export async function playHotCold({ gameServerId, moduleId, player, pog, config,
     const stats = await getPlayerStats(gameServerId, moduleId, player.id);
     stats.gamesPlayed += 1;
     stats.perGame.hotcold.plays += 1;
-    await setPlayerStats(gameServerId, moduleId, player.id, stats);
+    await Promise.all([
+      setPlayerStats(gameServerId, moduleId, player.id, stats),
+      recordDailySummary({ gameServerId, moduleId, playerId: player.id, game: 'hotcold', plays: 1, wins: 0, points: 0 }),
+    ]);
     await writeVariable(gameServerId, moduleId, HOTCOLD_SESSION_KEY, session, player.id);
     await pog.pm(`🌡️ ${description} Out of guesses — the number was ${puzzle.hotcold}.`);
     console.log(`hotcold: failed player=${player.name} secret=${puzzle.hotcold}`);
@@ -721,10 +813,18 @@ export async function playHotCold({ gameServerId, moduleId, player, pog, config,
   console.log(`hotcold: guess player=${player.name} guess=${guess} description=${description}`);
 }
 
-export async function getActiveRound(gameServerId, moduleId) {
+export async function getStoredActiveRound(gameServerId, moduleId) {
   const round = await readJsonVariable(gameServerId, moduleId, ACTIVE_ROUND_KEY, null, null);
+  if (!round || !round.expiresAt || !round.game) return null;
+  return round;
+}
+
+export async function getActiveRound(gameServerId, moduleId) {
+  const round = await getStoredActiveRound(gameServerId, moduleId);
   if (!round) return null;
-  if (!round.expiresAt || !round.game) return null;
+  if (new Date(round.expiresAt).getTime() <= Date.now()) {
+    return null;
+  }
   return round;
 }
 
@@ -733,7 +833,46 @@ export async function setActiveRound(gameServerId, moduleId, round) {
 }
 
 export async function clearActiveRound(gameServerId, moduleId) {
-  await deleteVariable(gameServerId, moduleId, ACTIVE_ROUND_KEY, null);
+  return deleteVariable(gameServerId, moduleId, ACTIVE_ROUND_KEY, null);
+}
+
+export function sameRound(left, right) {
+  return Boolean(left && right)
+    && left.game === right.game
+    && left.startedAt === right.startedAt
+    && left.expiresAt === right.expiresAt
+    && String(left.answer) === String(right.answer)
+    && String(left.prompt) === String(right.prompt);
+}
+
+export async function claimActiveRound(gameServerId, moduleId, expectedRound) {
+  if (!expectedRound || new Date(expectedRound.expiresAt).getTime() <= Date.now()) {
+    return false;
+  }
+  const existing = await findVariable(gameServerId, moduleId, ACTIVE_ROUND_KEY, null);
+  if (!existing) {
+    return false;
+  }
+  let currentRound;
+  try {
+    currentRound = JSON.parse(existing.value);
+  } catch (err) {
+    console.error(`minigames: failed to parse active round while claiming. Error: ${err}`);
+    return false;
+  }
+  if (!sameRound(currentRound, expectedRound)) {
+    return false;
+  }
+  if (new Date(currentRound.expiresAt).getTime() <= Date.now()) {
+    return false;
+  }
+  try {
+    await takaro.variable.variableControllerDelete(existing.id);
+    return true;
+  } catch (err) {
+    console.log(`minigames: active round claim lost for ${expectedRound.game}. Error: ${err}`);
+    return false;
+  }
 }
 
 export async function getOnlinePlayers(gameServerId) {
@@ -864,6 +1003,10 @@ export function buildMathRound() {
 export async function createLiveRound({ gameServerId, moduleId, config, forcedGame }) {
   const enabledGames = ['trivia', 'scramble', 'mathrace', 'reactionrace'].filter((game) => config.games[game]);
   if (enabledGames.length === 0) return null;
+  if (forcedGame && !enabledGames.includes(forcedGame)) {
+    console.log(`minigames: cannot create forced round for disabled game=${forcedGame}`);
+    return null;
+  }
 
   const game = forcedGame || pickRandom(enabledGames);
   const expiresAt = new Date(Date.now() + (Number(config.liveRoundAnswerWindowSec) || 60) * 1000).toISOString();
@@ -955,10 +1098,14 @@ export async function announceRound(gameServerId, round, config) {
 }
 
 export async function maybeFireLiveRound({ gameServerId, moduleId, config, forcedGame, ignoreThresholds = false }) {
-  const active = await getActiveRound(gameServerId, moduleId);
-  if (active) {
-    console.log(`minigames: fire skipped because round ${active.game} is already active`);
-    return null;
+  const stored = await getStoredActiveRound(gameServerId, moduleId);
+  if (stored) {
+    if (new Date(stored.expiresAt).getTime() > Date.now()) {
+      console.log(`minigames: fire skipped because round ${stored.game} is already active`);
+      return null;
+    }
+    await clearActiveRound(gameServerId, moduleId);
+    console.log(`minigames: cleared stale expired round ${stored.game} before firing a new one`);
   }
 
   if (!ignoreThresholds) {
@@ -989,7 +1136,7 @@ export async function maybeFireLiveRound({ gameServerId, moduleId, config, force
 }
 
 export async function closeExpiredRound({ gameServerId, moduleId, reason = 'expired' }) {
-  const round = await getActiveRound(gameServerId, moduleId);
+  const round = await getStoredActiveRound(gameServerId, moduleId);
   if (!round) return null;
   if (reason === 'expired' && new Date(round.expiresAt).getTime() > Date.now()) {
     return null;
@@ -1013,10 +1160,20 @@ export function getLiveRoundPoints(config, game) {
 
 export async function settleLiveRound({ gameServerId, moduleId, player, pog, config, round, response, source = 'command' }) {
   await requirePlayable({ gameServerId, moduleId, pog, playerId: player.id });
+  if (!round || new Date(round.expiresAt).getTime() <= Date.now()) {
+    console.log(`minigames: ${source} ignored because round is expired or missing`);
+    return false;
+  }
   const normalizedResponse = normalizeText(response);
   const normalizedAnswer = normalizeText(round.answer);
   if (normalizedResponse !== normalizedAnswer) {
     console.log(`minigames: ${source} incorrect game=${round.game} player=${player.name} response=${response}`);
+    return false;
+  }
+
+  const claimed = await claimActiveRound(gameServerId, moduleId, round);
+  if (!claimed) {
+    console.log(`minigames: ${source} answer matched but round was already settled or replaced game=${round.game} player=${player.name}`);
     return false;
   }
 
@@ -1031,7 +1188,6 @@ export async function settleLiveRound({ gameServerId, moduleId, player, pog, con
     basePoints: getLiveRoundPoints(config, round.game),
     context: `${source} win`,
   });
-  await clearActiveRound(gameServerId, moduleId);
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
     message: `${gameEmoji(round.game)} ${player.name} won ${round.game}! +${reward.actualPoints} points${formatMultiplier(reward.multiplier)}. Answer: ${round.answer}`,
     opts: {},
@@ -1134,6 +1290,45 @@ export async function findPlayerByName(name) {
   return search.data.data.find((player) => player.name.toLowerCase() === String(name).toLowerCase()) || null;
 }
 
+export function getBanMarkerRoleName(playerId) {
+  return `mgb-${String(playerId).replace(/-/g, '').slice(0, 12)}`;
+}
+
+export async function ensureBanMarkerPermissionRole(playerId, gameServerId) {
+  try {
+    const roleName = getBanMarkerRoleName(playerId);
+    const roles = await takaro.role.roleControllerSearch({ search: { name: [roleName] } });
+    let role = roles.data.data.find((entry) => entry.name === roleName) || null;
+    if (!role) {
+      const allPermissions = await takaro.role.roleControllerGetPermissions();
+      const bannedPermission = allPermissions.data.data.find((entry) => entry.permission === 'MINIGAMES_BANNED');
+      if (!bannedPermission) {
+        console.error(`minigames: MINIGAMES_BANNED permission not found while creating ban marker for ${playerId}`);
+        return null;
+      }
+      const created = await takaro.role.roleControllerCreate({
+        name: roleName,
+        permissions: [{ permissionId: bannedPermission.id }],
+      });
+      role = created.data.data;
+    }
+    await takaro.player.playerControllerAssignRole(playerId, role.id, { gameServerId });
+    return role.id;
+  } catch (err) {
+    console.error(`minigames: failed to assign MINIGAMES_BANNED marker to ${playerId}. Error: ${err}`);
+    return null;
+  }
+}
+
+export async function removeBanMarkerRole(roleId) {
+  if (!roleId) return;
+  try {
+    await takaro.role.roleControllerRemove(roleId);
+  } catch (err) {
+    console.error(`minigames: failed to remove ban marker role ${roleId}. Error: ${err}`);
+  }
+}
+
 export async function banPlayer({ gameServerId, moduleId, targetName, hours }) {
   const target = await findPlayerByName(targetName);
   if (!target) throw new TakaroUserError(`Player "${targetName}" not found.`);
@@ -1143,15 +1338,18 @@ export async function banPlayer({ gameServerId, moduleId, targetName, hours }) {
     if (!Number.isFinite(duration) || duration <= 0) throw new TakaroUserError('Ban hours must be a positive number.');
     record.expiresAt = new Date(Date.now() + duration * 60 * 60 * 1000).toISOString();
   }
+  record.roleId = await ensureBanMarkerPermissionRole(target.id, gameServerId);
   await writeVariable(gameServerId, moduleId, BAN_KEY, record, target.id);
-  console.log(`minigames: banned player=${target.name} expiresAt=${record.expiresAt || 'never'}`);
+  console.log(`minigames: banned player=${target.name} expiresAt=${record.expiresAt || 'never'} roleId=${record.roleId || 'none'}`);
   return target;
 }
 
 export async function unbanPlayer({ gameServerId, moduleId, targetName }) {
   const target = await findPlayerByName(targetName);
   if (!target) throw new TakaroUserError(`Player "${targetName}" not found.`);
+  const existing = await readJsonVariable(gameServerId, moduleId, BAN_KEY, null, target.id);
   const removed = await deleteVariable(gameServerId, moduleId, BAN_KEY, target.id);
+  await removeBanMarkerRole(existing?.roleId);
   console.log(`minigames: unbanned player=${target.name} removed=${removed}`);
   return { target, removed };
 }
@@ -1160,6 +1358,7 @@ export async function resetPlayerStats({ gameServerId, moduleId, targetName }) {
   const target = await findPlayerByName(targetName);
   if (!target) throw new TakaroUserError(`Player "${targetName}" not found.`);
   const removedStats = await deleteVariable(gameServerId, moduleId, STATS_KEY, target.id);
+  await deleteVariable(gameServerId, moduleId, DAILY_HISTORY_KEY, target.id);
   await deleteVariable(gameServerId, moduleId, WINDOW_KEY, target.id);
   await deleteVariable(gameServerId, moduleId, WORDLE_SESSION_KEY, target.id);
   await deleteVariable(gameServerId, moduleId, HANGMAN_SESSION_KEY, target.id);
@@ -1197,6 +1396,7 @@ export async function expireBans(gameServerId, moduleId) {
       const value = JSON.parse(variable.value);
       if (value.expiresAt && new Date(value.expiresAt).getTime() <= Date.now()) {
         await takaro.variable.variableControllerDelete(variable.id);
+        await removeBanMarkerRole(value.roleId);
         removed += 1;
       }
     } catch (err) {
@@ -1210,21 +1410,58 @@ export async function expireBans(gameServerId, moduleId) {
 }
 
 export async function buildReport(gameServerId, moduleId, days) {
-  const allStats = await getAllStats(gameServerId, moduleId);
-  const totalPoints = allStats.reduce((sum, entry) => sum + entry.stats.totalPoints, 0);
-  const totalRounds = allStats.reduce((sum, entry) => sum + entry.stats.gamesPlayed, 0);
-  const perGame = Object.keys(DEFAULT_STATS.perGame).map((game) => {
-    const points = allStats.reduce((sum, entry) => sum + entry.stats.perGame[game].points, 0);
-    const wins = allStats.reduce((sum, entry) => sum + entry.stats.perGame[game].wins, 0);
-    return `${game}: ${points} pts / ${wins} wins`;
-  });
-  const top = [...allStats]
-    .sort((a, b) => b.stats.totalPoints - a.stats.totalPoints)
-    .slice(0, 5);
+  const safeDays = Math.max(1, Number(days) || 1);
+  const cutoff = new Date();
+  cutoff.setUTCHours(0, 0, 0, 0);
+  cutoff.setUTCDate(cutoff.getUTCDate() - (safeDays - 1));
+  const cutoffDate = cutoff.toISOString().slice(0, 10);
+
+  const historyVariables = await listVariablesByKey(gameServerId, moduleId, DAILY_HISTORY_KEY);
+  const playerTotals = [];
+  const aggregate = createEmptyDailySummary(getTodayUtcDate());
+
+  for (const variable of historyVariables) {
+    if (!variable.playerId) continue;
+    let history;
+    try {
+      history = JSON.parse(variable.value);
+    } catch (err) {
+      console.error(`minigames: failed to parse daily history for player ${variable.playerId}. Error: ${err}`);
+      continue;
+    }
+    const total = createEmptyDailySummary(getTodayUtcDate());
+    for (const [date, summary] of Object.entries(history.days || {})) {
+      if (date < cutoffDate) continue;
+      total.totalPoints += Number(summary.totalPoints) || 0;
+      total.gamesPlayed += Number(summary.gamesPlayed) || 0;
+      for (const game of Object.keys(DEFAULT_STATS.perGame)) {
+        total.perGame[game].points += Number(summary.perGame?.[game]?.points) || 0;
+        total.perGame[game].plays += Number(summary.perGame?.[game]?.plays) || 0;
+        total.perGame[game].wins += Number(summary.perGame?.[game]?.wins) || 0;
+      }
+    }
+    if (total.totalPoints <= 0 && total.gamesPlayed <= 0) continue;
+    playerTotals.push({ playerId: variable.playerId, total });
+    aggregate.totalPoints += total.totalPoints;
+    aggregate.gamesPlayed += total.gamesPlayed;
+    for (const game of Object.keys(DEFAULT_STATS.perGame)) {
+      aggregate.perGame[game].points += total.perGame[game].points;
+      aggregate.perGame[game].plays += total.perGame[game].plays;
+      aggregate.perGame[game].wins += total.perGame[game].wins;
+    }
+  }
+
+  const top = [...playerTotals].sort((a, b) => b.total.totalPoints - a.total.totalPoints).slice(0, 5);
   const topLines = [];
   for (let i = 0; i < top.length; i++) {
     const name = await getPlayerName(top[i].playerId);
-    topLines.push(`${i + 1}. ${name} — ${top[i].stats.totalPoints}`);
+    topLines.push(`${i + 1}. ${name} — ${top[i].total.totalPoints}`);
   }
-  return [`miniGames report (${days}d window hint)`, `Rounds: ${totalRounds}`, `Points awarded: ${totalPoints}`, 'Top 5:', ...(topLines.length > 0 ? topLines : ['No data yet.']), 'Per-game:', ...perGame].join('\n');
+
+  const perGame = Object.keys(DEFAULT_STATS.perGame).map((game) => {
+    const summary = aggregate.perGame[game];
+    return `${game}: ${summary.points} pts / ${summary.plays} plays / ${summary.wins} wins`;
+  });
+
+  return [`miniGames report (${safeDays}d window)`, `Rounds: ${aggregate.gamesPlayed}`, `Points awarded: ${aggregate.totalPoints}`, 'Top 5:', ...(topLines.length > 0 ? topLines : ['No data yet.']), 'Per-game:', ...perGame].join('\n');
 }

@@ -27,7 +27,7 @@ async function main() {
     '🎮 miniGames',
     'Daily puzzles: /wordle, /hangman, /hotcold, /puzzle',
     'Live rounds: /answer, reaction-race in raw chat',
-    'Stats: /minigamestats, /minigamestop',
+    'Stats: /minigamestats [player], /minigamestop <points|wordle|hangman|streak>',
     `Live round cadence: every ~${config.liveRoundIntervalMinutes} min when enough players are online.`,
   ].join('\n'));
 }

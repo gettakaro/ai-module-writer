@@ -29,6 +29,8 @@ const KEY_ACTIVE = 'minigames_active_round';
 const KEY_CACHE = 'minigames_leaderboard_cache';
 const KEY_BAN = 'minigames_ban';
 const KEY_STATS = 'minigames_stats';
+const KEY_WINDOW = 'minigames_window';
+const KEY_HISTORY = 'minigames_daily_history';
 
 async function upsertVariable(client: Client, gameServerId: string, moduleId: string, key: string, value: unknown, playerId?: string) {
   const res = await client.variable.variableControllerSearch({
@@ -69,6 +71,9 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
   let prefix: string;
   let refreshCronId: string;
   let closeCronId: string;
+  let fireCronId: string;
+  let expireWindowsCronId: string;
+  let expireBansCronId: string;
   let adminRoleId: string | undefined;
   let playerRoleId: string | undefined;
 
@@ -83,6 +88,9 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
     versionId = mod.latestVersion.id;
     refreshCronId = mod.latestVersion.cronJobs.find((c) => c.name === 'refreshLeaderboards')!.id;
     closeCronId = mod.latestVersion.cronJobs.find((c) => c.name === 'closeLiveRound')!.id;
+    fireCronId = mod.latestVersion.cronJobs.find((c) => c.name === 'fireLiveRound')!.id;
+    expireWindowsCronId = mod.latestVersion.cronJobs.find((c) => c.name === 'expireWindows')!.id;
+    expireBansCronId = mod.latestVersion.cronJobs.find((c) => c.name === 'expireBans')!.id;
 
     await installModule(client, versionId, ctx.gameServer.id, {
       userConfig: {
@@ -192,6 +200,12 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
     assert.equal(topMeta?.result?.success, true, 'minigamestop should succeed');
   });
 
+  it('denies admin-only commands to non-admin players', async () => {
+    const deniedEvent = await triggerCommand(ctx.players[1].playerId, `${prefix}minigamesban nope`);
+    const deniedMeta = deniedEvent.meta as { result?: { success?: boolean } };
+    assert.equal(deniedMeta?.result?.success, false, 'minigamesban should be denied without MINIGAMES_MANAGE');
+  });
+
   it('bans and unbans a player through admin commands', async () => {
     const playerRecord = await client.player.playerControllerGetOne(ctx.players[1].playerId);
     const targetName = playerRecord.data.data.name;
@@ -212,6 +226,131 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
 
     const clearedBan = await readVariable(client, ctx.gameServer.id, moduleId, KEY_BAN, ctx.players[1].playerId);
     assert.equal(clearedBan, null, 'ban variable should be removed after unban');
+  });
+
+  it('skips the active round through the admin command', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE, {
+      game: 'scramble',
+      prompt: 'KRAOTA',
+      answer: 'takaro',
+      answerType: 'text',
+      displayedOptions: [],
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    });
+
+    const skipEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamesskiproundnow`);
+    const skipMeta = skipEvent.meta as { result?: { success?: boolean } };
+    assert.equal(skipMeta?.result?.success, true, 'minigamesskiproundnow should succeed');
+    const cleared = await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE);
+    assert.equal(cleared, null, 'active round should be cleared after skip');
+  });
+
+  it('does not fire scheduled rounds below the online-player threshold', async () => {
+    await ctx.server.executeConsoleCommand('disconnectAll');
+    const event = await triggerCron(fireCronId);
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(meta?.result?.success, true, 'fireLiveRound cron should execute');
+    assert.ok(logs.some((msg) => msg.includes('fire skipped due to onlinePlayers=0')), `expected threshold skip log, got ${JSON.stringify(logs)}`);
+    const round = await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE);
+    assert.equal(round, null, 'no active round should be created below threshold');
+    await ctx.server.executeConsoleCommand('connectAll');
+  });
+
+  it('prevents answering an expired round even if cleanup has not run yet', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE, {
+      game: 'trivia',
+      prompt: 'Expired?',
+      answer: 'takaro',
+      answerType: 'text',
+      displayedOptions: ['takaro', 'other'],
+      startedAt: new Date(Date.now() - 120000).toISOString(),
+      expiresAt: new Date(Date.now() - 60000).toISOString(),
+    });
+
+    const event = await triggerCommand(ctx.players[1].playerId, `${prefix}answer takaro`);
+    const meta = event.meta as { result?: { success?: boolean } };
+    assert.equal(meta?.result?.success, false, 'expired round answers should fail');
+
+    const stats = await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[1].playerId);
+    assert.equal(stats.perGame.trivia.wins, 0, 'expired round should not award a trivia win');
+  });
+
+  it('resets player stats, windows, and daily history', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, {
+      totalPoints: 99,
+      gamesPlayed: 2,
+      biggestScore: { points: 99, game: 'scramble', at: new Date().toISOString() },
+      perGame: {
+        wordle: { points: 0, plays: 0, wins: 0 },
+        hangman: { points: 0, plays: 0, wins: 0 },
+        hotcold: { points: 0, plays: 0, wins: 0 },
+        trivia: { points: 0, plays: 0, wins: 0 },
+        scramble: { points: 99, plays: 2, wins: 2 },
+        mathrace: { points: 0, plays: 0, wins: 0 },
+        reactionrace: { points: 0, plays: 0, wins: 0 }
+      },
+      streaks: { wordle: { current: 0, best: 0, lastSolvedDate: null } }
+    }, ctx.players[1].playerId);
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_WINDOW, { date: today(), earned: 99 }, ctx.players[1].playerId);
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_HISTORY, {
+      days: {
+        [today()]: {
+          date: today(),
+          totalPoints: 99,
+          gamesPlayed: 2,
+          perGame: {
+            wordle: { points: 0, plays: 0, wins: 0 },
+            hangman: { points: 0, plays: 0, wins: 0 },
+            hotcold: { points: 0, plays: 0, wins: 0 },
+            trivia: { points: 0, plays: 0, wins: 0 },
+            scramble: { points: 99, plays: 2, wins: 2 },
+            mathrace: { points: 0, plays: 0, wins: 0 },
+            reactionrace: { points: 0, plays: 0, wins: 0 }
+          }
+        }
+      }
+    }, ctx.players[1].playerId);
+
+    const playerRecord = await client.player.playerControllerGetOne(ctx.players[1].playerId);
+    const resetEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamesresetstats ${playerRecord.data.data.name}`);
+    const resetMeta = resetEvent.meta as { result?: { success?: boolean } };
+    assert.equal(resetMeta?.result?.success, true, 'minigamesresetstats should succeed');
+    assert.equal(await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[1].playerId), null);
+    assert.equal(await readVariable(client, ctx.gameServer.id, moduleId, KEY_WINDOW, ctx.players[1].playerId), null);
+    assert.equal(await readVariable(client, ctx.gameServer.id, moduleId, KEY_HISTORY, ctx.players[1].playerId), null);
+  });
+
+  it('expires stale windows and temporary bans via cronjobs', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_WINDOW, { date: '2000-01-01', earned: 10 }, ctx.players[1].playerId);
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_BAN, { expiresAt: '2000-01-01T00:00:00.000Z' }, ctx.players[1].playerId);
+
+    const windowEvent = await triggerCron(expireWindowsCronId);
+    const windowMeta = windowEvent.meta as { result?: { success?: boolean } };
+    assert.equal(windowMeta?.result?.success, true, 'expireWindows should succeed');
+    assert.equal(await readVariable(client, ctx.gameServer.id, moduleId, KEY_WINDOW, ctx.players[1].playerId), null);
+
+    const banEvent = await triggerCron(expireBansCronId);
+    const banMeta = banEvent.meta as { result?: { success?: boolean } };
+    assert.equal(banMeta?.result?.success, true, 'expireBans should succeed');
+    assert.equal(await readVariable(client, ctx.gameServer.id, moduleId, KEY_BAN, ctx.players[1].playerId), null);
+  });
+
+  it('runs the disconnect hook when players leave', async () => {
+    const before = new Date();
+    await ctx.server.executeConsoleCommand('disconnectAll');
+    const event = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.HookExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(meta?.result?.success, true, 'disconnect hook should succeed');
+    assert.ok(logs.some((msg) => msg.includes('player disconnected')), `expected disconnect log, got ${JSON.stringify(logs)}`);
+    await ctx.server.executeConsoleCommand('connectAll');
   });
 
   it('closes an expired round via cronjob', async () => {
@@ -235,3 +374,7 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
     assert.equal(cleared, null, 'expired round should be removed');
   });
 });
+
+function today() {
+  return new Date().toISOString().slice(0, 10);
+}

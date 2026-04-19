@@ -12,7 +12,7 @@ async function main() {
     ignoreThresholds: true,
   });
   if (!round) {
-    await pog.pm('Could not fire a round right now. Check content banks or clear the active round first.');
+    await pog.pm('Could not fire a round right now. Check content banks, enabled games, or clear the active round first.');
     return;
   }
   await pog.pm(`🚀 Fired ${round.game}.`);

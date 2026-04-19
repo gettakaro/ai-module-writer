@@ -28,6 +28,7 @@ const KEY_TRIVIA = 'minigames_content_trivia';
 const KEY_PUZZLE = 'minigames_puzzle_today';
 const KEY_STATS = 'minigames_stats';
 const KEY_WINDOW = 'minigames_window';
+const KEY_HISTORY = 'minigames_daily_history';
 
 async function upsertVariable(client: Client, gameServerId: string, moduleId: string, key: string, value: unknown, playerId?: string) {
   const res = await client.variable.variableControllerSearch({
@@ -84,6 +85,7 @@ describe('minigames: daily puzzles and wordle scoring', () => {
     await installModule(client, versionId, ctx.gameServer.id, {
       userConfig: {
         pointsToCurrencyRate: 0.5,
+        bigScoreThreshold: 100,
         liveRoundIntervalMinutes: 5,
         minPlayersForLiveRound: 2,
       },
@@ -151,13 +153,25 @@ describe('minigames: daily puzzles and wordle scoring', () => {
     assert.ok(Number.isInteger(puzzle.hotcold));
   });
 
+  it('shows top-level help without requiring a game argument', async () => {
+    const event = await triggerCommand(ctx.players[0].playerId, `${prefix}minigames`);
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(meta?.result?.success, true, 'minigames help should succeed without args');
+  });
+
+  it('rejects play commands for players without MINIGAMES_PLAY', async () => {
+    const event = await triggerCommand(ctx.players[2].playerId, `${prefix}wordle crane`);
+    const meta = event.meta as { result?: { success?: boolean } };
+    assert.equal(meta?.result?.success, false, 'wordle should be denied without MINIGAMES_PLAY');
+  });
+
   it('rejects invalid wordle guesses not present in the bank', async () => {
     const event = await triggerCommand(ctx.players[0].playerId, `${prefix}wordle zzzzz`);
     const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
     assert.equal(meta?.result?.success, false, 'invalid word should fail');
   });
 
-  it('awards boosted wordle points and currency on solve', async () => {
+  it('awards boosted wordle points, history, and a big-score event on solve', async () => {
     const event = await triggerCommand(ctx.players[1].playerId, `${prefix}wordle crane`);
     const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
     const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
@@ -167,9 +181,25 @@ describe('minigames: daily puzzles and wordle scoring', () => {
 
     const stats = await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[1].playerId);
     const window = await readVariable(client, ctx.gameServer.id, moduleId, KEY_WINDOW, ctx.players[1].playerId);
+    const history = await readVariable(client, ctx.gameServer.id, moduleId, KEY_HISTORY, ctx.players[1].playerId);
     assert.equal(stats.totalPoints, 150, '100 base with boost count=2 should award 150');
     assert.equal(stats.perGame.wordle.wins, 1);
     assert.equal(window.earned, 150);
+    assert.equal(history.days[puzzleDate()].totalPoints, 150);
+    assert.equal(history.days[puzzleDate()].perGame.wordle.wins, 1);
+
+    const bigScoreEvents = await client.event.eventControllerSearch({
+      filters: {
+        eventName: ['minigames-big-score' as unknown as EventSearchInputAllowedFiltersEventNameEnum],
+        gameserverId: [ctx.gameServer.id],
+        moduleId: [moduleId],
+        playerId: [ctx.players[1].playerId],
+      },
+      limit: 5,
+      sortDirection: 'desc',
+      sortBy: 'createdAt',
+    });
+    assert.ok(bigScoreEvents.data.data.length >= 1, 'expected a minigames-big-score event');
 
     const pogSearch = await client.playerOnGameserver.playerOnGameServerControllerSearch({
       filters: { gameServerId: [ctx.gameServer.id], playerId: [ctx.players[1].playerId] },
@@ -178,4 +208,48 @@ describe('minigames: daily puzzles and wordle scoring', () => {
     assert.ok(pog, 'expected playerOnGameserver record');
     assert.ok(typeof pog!.currency === 'number', 'currency field should remain readable even if payout is unavailable in the test environment');
   });
+
+  it('tracks hangman failures in lifetime stats and daily history', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_PUZZLE, { date: puzzleDate(), wordle: 'crane', hangman: 'takaro', hotcold: 321 });
+    for (const guess of ['x', 'y', 'z', 'q', 'w', 'p']) {
+      const event = await triggerCommand(ctx.players[0].playerId, `${prefix}hangman ${guess}`);
+      const meta = event.meta as { result?: { success?: boolean } };
+      assert.equal(meta?.result?.success, true, `hangman guess ${guess} should execute`);
+    }
+    const stats = await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[0].playerId);
+    const history = await readVariable(client, ctx.gameServer.id, moduleId, KEY_HISTORY, ctx.players[0].playerId);
+    assert.equal(stats.perGame.hangman.plays, 1);
+    assert.equal(stats.perGame.hangman.wins, 0);
+    assert.equal(history.days[puzzleDate()].perGame.hangman.plays, 1);
+    assert.equal(history.days[puzzleDate()].perGame.hangman.wins, 0);
+  });
+
+  it('tracks hotcold failures in lifetime stats and daily history', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_PUZZLE, { date: puzzleDate(), wordle: 'crane', hangman: 'takaro', hotcold: 321 });
+    for (const guess of [1, 2, 3, 4, 5, 6, 7, 8]) {
+      const event = await triggerCommand(ctx.players[0].playerId, `${prefix}hotcold ${guess}`);
+      const meta = event.meta as { result?: { success?: boolean } };
+      assert.equal(meta?.result?.success, true, `hotcold guess ${guess} should execute`);
+    }
+    const stats = await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[0].playerId);
+    const history = await readVariable(client, ctx.gameServer.id, moduleId, KEY_HISTORY, ctx.players[0].playerId);
+    assert.equal(stats.perGame.hotcold.plays, 1);
+    assert.equal(stats.perGame.hotcold.wins, 0);
+    assert.equal(history.days[puzzleDate()].perGame.hotcold.plays, 1);
+    assert.equal(history.days[puzzleDate()].perGame.hotcold.wins, 0);
+  });
+
+  it('shows puzzle and minigamestats without optional arguments', async () => {
+    const puzzleEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}puzzle`);
+    const puzzleMeta = puzzleEvent.meta as { result?: { success?: boolean } };
+    assert.equal(puzzleMeta?.result?.success, true, 'puzzle should succeed without args');
+
+    const statsEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamestats`);
+    const statsMeta = statsEvent.meta as { result?: { success?: boolean } };
+    assert.equal(statsMeta?.result?.success, true, 'minigamestats should succeed without args');
+  });
 });
+
+function puzzleDate() {
+  return new Date().toISOString().slice(0, 10);
+}
