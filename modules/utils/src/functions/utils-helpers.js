@@ -71,7 +71,8 @@ export function formatOnlinePlayersLine(players) {
   }
 
   const visible = names.slice(0, 10);
-  const suffix = names.length > 10 ? ', ...' : '';
+  const hiddenCount = Math.max(0, names.length - visible.length);
+  const suffix = hiddenCount > 0 ? `, ... (+${hiddenCount} more)` : '';
   const noun = names.length === 1 ? 'player' : 'players';
   return `${names.length} ${noun} online: ${visible.join(', ')}${suffix}`;
 }
@@ -130,6 +131,97 @@ export function getCommandTargetPlayer(target) {
     gameId: trimOrEmpty(target.gameId),
     gameServerId: trimOrEmpty(target.gameServerId),
     online: target.online,
+  };
+}
+
+function isUuidLike(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(trimOrEmpty(value));
+}
+
+export async function findPlayerByToken(token) {
+  const normalized = trimOrEmpty(token);
+  if (normalized === '' || normalized === '?') return null;
+
+  if (isUuidLike(normalized)) {
+    try {
+      const byId = await takaro.player.playerControllerSearch({
+        filters: { id: [normalized] },
+        limit: 1,
+      });
+      const exactIdMatch = byId.data.data[0];
+      if (exactIdMatch) {
+        return {
+          playerId: exactIdMatch.id,
+          name: trimOrEmpty(exactIdMatch.name) || 'Unknown Player',
+        };
+      }
+    } catch (err) {
+      console.error(`utils-helpers: player lookup by id failed for ${normalized}: ${err}`);
+    }
+  }
+
+  const exactNameInputs = [normalized, normalized.toLowerCase()];
+  for (const name of exactNameInputs) {
+    try {
+      const byName = await takaro.player.playerControllerSearch({
+        filters: { name: [name] },
+        limit: 10,
+      });
+      const exactNameMatch = byName.data.data.find(
+        (player) => trimOrEmpty(player.name).toLowerCase() === normalized.toLowerCase(),
+      );
+      if (exactNameMatch) {
+        return {
+          playerId: exactNameMatch.id,
+          name: trimOrEmpty(exactNameMatch.name) || normalized,
+        };
+      }
+    } catch (err) {
+      console.error(`utils-helpers: player lookup by exact name failed for ${normalized}: ${err}`);
+    }
+  }
+
+  try {
+    const fuzzy = await takaro.player.playerControllerSearch({
+      search: { name: [normalized] },
+      limit: 10,
+    });
+    const exactNameMatch = fuzzy.data.data.find(
+      (player) => trimOrEmpty(player.name).toLowerCase() === normalized.toLowerCase(),
+    );
+    if (exactNameMatch) {
+      return {
+        playerId: exactNameMatch.id,
+        name: trimOrEmpty(exactNameMatch.name) || normalized,
+      };
+    }
+  } catch (err) {
+    console.error(`utils-helpers: player fuzzy lookup failed for ${normalized}: ${err}`);
+  }
+
+  return null;
+}
+
+export async function resolveCommandTargetPlayer(gameServerId, token, { requireOnline = false } = {}) {
+  const player = await findPlayerByToken(token);
+  if (!player) return null;
+
+  const pog = await getGameServerPogForPlayer(gameServerId, player.playerId);
+  if (requireOnline && !pog?.online) {
+    return {
+      ...player,
+      gameServerId,
+      online: false,
+      gameId: '',
+    };
+  }
+
+  return {
+    playerId: player.playerId,
+    name: player.name,
+    gameId: trimOrEmpty(pog?.gameId),
+    gameServerId: trimOrEmpty(pog?.gameServerId) || gameServerId,
+    online: pog?.online ?? false,
   };
 }
 
@@ -206,7 +298,7 @@ export async function fetchOnlinePlayers(gameServerId) {
       data: result.data.data,
       total: result.data.meta?.total,
     };
-  });
+  }, { limit: 5 });
 
   const uniquePlayers = collapsePlayersById(players);
   const namedPlayers = await Promise.all(uniquePlayers.map(async (player) => ({

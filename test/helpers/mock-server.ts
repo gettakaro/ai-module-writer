@@ -15,6 +15,10 @@ export interface MockServerContext {
   identityToken: string;
 }
 
+export interface StartMockServerOptions {
+  totalPlayers?: number;
+}
+
 async function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -33,7 +37,7 @@ async function retry<T>(fn: () => Promise<T>, maxAttempts: number, delayMs: numb
   throw new Error('Retry exhausted');
 }
 
-export async function startMockServer(client: Client): Promise<MockServerContext> {
+export async function startMockServer(client: Client, options: StartMockServerOptions = {}): Promise<MockServerContext> {
   const registrationToken = process.env['TAKARO_REGISTRATION_TOKEN'];
   const wsUrl = process.env['TAKARO_WS_URL'];
 
@@ -43,7 +47,7 @@ export async function startMockServer(client: Client): Promise<MockServerContext
   const identityToken = `test-${randomUUID()}`;
 
   const population = {
-    totalPlayers: 3,
+    totalPlayers: options.totalPlayers ?? 3,
   };
 
   const server = await getMockServer({

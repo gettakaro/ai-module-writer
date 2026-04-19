@@ -1,14 +1,15 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
   extractReason,
+  findPlayerByToken,
   getCommandArgumentTokens,
-  getCommandTargetPlayer,
   getPlayerName,
   normalizeReason,
   parseBanDurationToken,
   renderTemplate,
   safeBroadcast,
   safePrivateMessage,
+  trimOrEmpty,
 } from './utils-helpers.js';
 
 async function main() {
@@ -18,7 +19,8 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const target = getCommandTargetPlayer(args.player);
+  const targetToken = trimOrEmpty(args.player);
+  const target = await findPlayerByToken(targetToken);
   if (!target) {
     throw new TakaroUserError('Please specify a valid player that Takaro can resolve. Offline bans only work for players already known to Takaro.');
   }
@@ -36,8 +38,8 @@ async function main() {
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),
   ]);
-  const [targetToken] = getCommandArgumentTokens(chatMessage);
-  const reason = normalizeReason(extractReason(args.reason, chatMessage, [targetToken, args.duration]), 'Banned by an admin.');
+  const [typedTargetToken] = getCommandArgumentTokens(chatMessage);
+  const reason = normalizeReason(extractReason(args.reason, chatMessage, [typedTargetToken, args.duration]), 'Banned by an admin.');
 
   const payload = {
     gameServerId,

@@ -7,7 +7,10 @@ import {
   setFundVariable,
   incrementFundCycle,
   recordCompletion,
-  refreshFundStateLock,
+  assertFundStateLock,
+  consumeFundDebugFlag,
+  FUND_DEBUG_FORCE_STATE_WRITE_FAILURE_KEY,
+  FUND_DEBUG_REPLACE_LOCK_OWNER_KEY,
   releaseFundStateLock,
 } from './fund-helpers.js';
 
@@ -65,22 +68,22 @@ async function main() {
 
     // The fund state lock serializes contributions so each paid deposit sees the latest total.
     try {
-      await refreshFundStateLock(gameServerId, moduleId, lockOwner);
+      await assertFundStateLock(gameServerId, moduleId, lockOwner);
       await takaro.playerOnGameserver.playerOnGameServerControllerDeductCurrency(gameServerId, pog.playerId, {
         currency: amount,
       });
-      await refreshFundStateLock(gameServerId, moduleId, lockOwner);
+      await assertFundStateLock(gameServerId, moduleId, lockOwner);
     } catch (deductErr) {
       console.error(`Fund: currency deduction failed for player ${player.name} (amount=${amount}). Contribution aborted. Error: ${deductErr}`);
       throw new TakaroUserError('Your contribution could not be processed because your currency could not be deducted. Please try again.');
     }
 
     try {
-      if (config.debugForceStateWriteFailureAfterDeduct) {
+      if (await consumeFundDebugFlag(gameServerId, moduleId, FUND_DEBUG_FORCE_STATE_WRITE_FAILURE_KEY)) {
         throw new Error('Debug-forced contribution state failure after deduct');
       }
 
-      await refreshFundStateLock(gameServerId, moduleId, lockOwner);
+      await assertFundStateLock(gameServerId, moduleId, lockOwner);
       currentTotal = await getFundTotal(gameServerId, moduleId);
       newTotal = currentTotal + amount;
 
@@ -90,9 +93,9 @@ async function main() {
         thresholdReached = true;
         const carryover = newTotal - threshold;
         await setFundTotal(gameServerId, moduleId, carryover);
-        await refreshFundStateLock(gameServerId, moduleId, lockOwner);
+        await assertFundStateLock(gameServerId, moduleId, lockOwner);
         newCycle = await incrementFundCycle(gameServerId, moduleId);
-        await refreshFundStateLock(gameServerId, moduleId, lockOwner);
+        await assertFundStateLock(gameServerId, moduleId, lockOwner);
         await recordCompletion(gameServerId, moduleId, newCycle, player.name);
       } else {
         await setFundTotal(gameServerId, moduleId, newTotal);
@@ -117,7 +120,7 @@ async function main() {
       throw new TakaroUserError('Your contribution could not be recorded, and we could not confirm your refund. Please contact an admin immediately.');
     }
 
-    if (config.debugReplaceLockOwnerBeforeRelease) {
+    if (await consumeFundDebugFlag(gameServerId, moduleId, FUND_DEBUG_REPLACE_LOCK_OWNER_KEY)) {
       await setFundVariable(gameServerId, moduleId, FUND_STATE_LOCK_KEY, {
         owner: `${lockOwner}:other-owner`,
         createdAt: Date.now(),
@@ -155,10 +158,11 @@ async function main() {
     }
 
     const carryover = newTotal - threshold;
+    const nextRound = newCycle + 1;
     const carryoverMessage = carryover > 0
-      ? ` ${carryover} carried over into the new round.`
-      : '';
-    const playerMessage = `You contributed ${amount} to the community fund. The community fund goal has been met! A new round begins. (Round #${newCycle})${carryoverMessage}`;
+      ? ` ${carryover} currency carried over into Round #${nextRound}.`
+      : ` Round #${nextRound} now begins.`;
+    const playerMessage = `You contributed ${amount} to the community fund. The community fund goal has been met! Completed round #${newCycle}; now starting Round #${nextRound}.${carryoverMessage}`;
 
     console.log(playerMessage);
     await pog.pm(playerMessage);

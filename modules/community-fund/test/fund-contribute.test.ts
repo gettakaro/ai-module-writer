@@ -530,8 +530,8 @@ describe('community-fund: fund-contribute command', () => {
 
     const logMessages = (meta?.result?.logs ?? []).map((l) => l.msg);
     assert.ok(
-      logMessages.some((msg) => msg.includes('5 carried over into the new round.')),
-      `Expected completion message to mention the carryover amount, got: ${JSON.stringify(logMessages)}`,
+      logMessages.some((msg) => msg.includes('5 currency carried over into Round #2.')),
+      `Expected completion message to mention the carryover amount and next round, got: ${JSON.stringify(logMessages)}`,
     );
 
     const statusBefore = new Date();
@@ -756,7 +756,7 @@ describe('community-fund: lock owner mismatch during release', () => {
         completionMessage: 'The community fund reached {threshold}!',
         completionCommands: [],
         broadcastContributions: false,
-        debugReplaceLockOwnerBeforeRelease: true,
+        
       },
     });
     prefix = await getCommandPrefix(client, ctx.gameServer.id);
@@ -790,6 +790,12 @@ describe('community-fund: lock owner mismatch during release', () => {
 
   it('logs a warning and leaves the lock record alone when ownership changes before release', async () => {
     const player = ctx.players[0]!;
+    await client.variable.variableControllerCreate({
+      key: '__debug_replace_lock_owner_before_release',
+      value: JSON.stringify(true),
+      gameServerId: ctx.gameServer.id,
+      moduleId,
+    });
     const before = new Date();
 
     await client.command.commandControllerTrigger(ctx.gameServer.id, {
@@ -857,7 +863,7 @@ describe('community-fund: refund handling after state-write failure', () => {
         completionMessage: 'The community fund reached {threshold}!',
         completionCommands: [],
         broadcastContributions: false,
-        debugForceStateWriteFailureAfterDeduct: true,
+        
       },
     });
     prefix = await getCommandPrefix(client, ctx.gameServer.id);
@@ -901,6 +907,12 @@ describe('community-fund: refund handling after state-write failure', () => {
 
   it('refunds the player and leaves fund state unchanged when persistence fails after deduction', async () => {
     const player = ctx.players[0]!;
+    await client.variable.variableControllerCreate({
+      key: '__debug_force_state_write_failure_after_deduct',
+      value: JSON.stringify(true),
+      gameServerId: ctx.gameServer.id,
+      moduleId,
+    });
     const beforePog = await getPog(player.playerId);
     assert.ok(beforePog, 'Expected player POG before refund-path test');
     const beforeCurrency = beforePog?.currency ?? 0;

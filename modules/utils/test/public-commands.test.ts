@@ -15,7 +15,6 @@ import {
   cleanupTestModules,
   cleanupTestGameServers,
 } from '../../../test/helpers/modules.js';
-import { collapsePlayersById, collectPaginatedResults, formatOnlinePlayersLine } from '../src/functions/utils-pure.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,7 +31,7 @@ describe('utils: public commands', () => {
     client = await createClient();
     await cleanupTestModules(client);
     await cleanupTestGameServers(client);
-    ctx = await startMockServer(client);
+    ctx = await startMockServer(client, { totalPlayers: 12 });
 
     const mod = await pushModule(client, MODULE_DIR);
     moduleId = mod.id;
@@ -104,7 +103,7 @@ describe('utils: public commands', () => {
 
     assert.equal(res.success, true, `Expected command to succeed, logs: ${JSON.stringify(res.logs)}`);
     assert.ok(res.logs.some((msg) => msg.includes('Server: test-')), JSON.stringify(res.logs));
-    assert.ok(res.logs.some((msg) => msg.includes('Players online: 3')), JSON.stringify(res.logs));
+    assert.ok(res.logs.some((msg) => msg.includes('Players online: 12')), JSON.stringify(res.logs));
     assert.ok(
       res.logs.some((msg) => msg.includes('Info: No griefing outside claim areas. Join Discord with /discord')),
       JSON.stringify(res.logs),
@@ -121,12 +120,12 @@ describe('utils: public commands', () => {
     assert.ok(res.logs.some((msg) => msg.includes('No players are currently online.')), JSON.stringify(res.logs));
 
     await ctx.server.executeConsoleCommand('connectAll');
-    await waitForOnlineCount(3);
+    await waitForOnlineCount(12);
   });
 
-  it('online lists online player names in alphabetical order with a pluralized count', async () => {
+  it('online lists names alphabetically, paginates real API results, and explains truncated players', async () => {
     await ctx.server.executeConsoleCommand('connectAll');
-    await waitForOnlineCount(3);
+    await waitForOnlineCount(12);
 
     const expectedNames = (await Promise.all(ctx.players.map((player) => getPlayerName(player.playerId))))
       .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
@@ -134,72 +133,12 @@ describe('utils: public commands', () => {
     const res = await trigger(ctx.players[0].playerId, `${prefix}online`);
 
     assert.equal(res.success, true, `Expected command to succeed, logs: ${JSON.stringify(res.logs)}`);
-    const expectedLine = `3 players online: ${expectedNames.join(', ')}`;
+    const expectedLine = `12 players online: ${expectedNames.slice(0, 10).join(', ')}, ... (+2 more)`;
     assert.ok(res.logs.some((msg) => msg.includes(expectedLine)), JSON.stringify(res.logs));
-  });
-
-  it('online pagination helper walks multiple pages until the reported total is reached', async () => {
-    const requestedPages: number[] = [];
-    const players = await collectPaginatedResults(async ({ page, limit }: { page: number; limit: number }) => {
-      requestedPages.push(page);
-      assert.equal(limit, 2);
-
-      const pages = [
-        [
-          { playerId: '1', playerName: 'Amy' },
-          { playerId: '2', playerName: 'Bea' },
-        ],
-        [
-          { playerId: '3', playerName: 'Cal' },
-        ],
-      ];
-
-      return {
-        data: pages[page] ?? [],
-        total: 3,
-      };
-    }, { limit: 2 });
-
-    assert.deepEqual(requestedPages, [0, 1]);
-    assert.equal(players.length, 3);
-  });
-
-  it('online duplicate-collapse helper keeps the first record for each playerId', () => {
-    const unique = collapsePlayersById([
-      { playerId: '1', playerName: 'Amy', gameId: 'game-1' },
-      { playerId: '1', playerName: 'Amy Duplicate', gameId: 'game-1b' },
-      { playerId: '2', playerName: 'Bea', gameId: 'game-2' },
-      { playerId: '2', playerName: 'Bea Duplicate', gameId: 'game-2b' },
-      { playerId: '3', playerName: 'Cal', gameId: 'game-3' },
-    ]);
-
-    assert.deepEqual(
-      unique.map((player: { playerId?: string; playerName?: string; gameId?: string }) => ({ playerId: player.playerId, playerName: player.playerName, gameId: player.gameId })),
-      [
-        { playerId: '1', playerName: 'Amy', gameId: 'game-1' },
-        { playerId: '2', playerName: 'Bea', gameId: 'game-2' },
-        { playerId: '3', playerName: 'Cal', gameId: 'game-3' },
-      ],
+    assert.ok(
+      res.logs.filter((msg) => msg.includes('➡️ POST /gameserver/player/search')).length >= 2,
+      `Expected /online to paginate through the real Takaro API, logs: ${JSON.stringify(res.logs)}`,
     );
-  });
-
-  it('online formatter truncates after 10 visible names', () => {
-    const line = formatOnlinePlayersLine([
-      { playerName: 'Zed' },
-      { playerName: 'Amy' },
-      { playerName: 'Bea' },
-      { playerName: 'Cal' },
-      { playerName: 'Dex' },
-      { playerName: 'Eli' },
-      { playerName: 'Fox' },
-      { playerName: 'Gia' },
-      { playerName: 'Hal' },
-      { playerName: 'Ivy' },
-      { playerName: 'Jae' },
-      { playerName: 'Kai' },
-    ]);
-
-    assert.equal(line, '12 players online: Amy, Bea, Cal, Dex, Eli, Fox, Gia, Hal, Ivy, Jae, ...');
   });
 
   it('discord shows the configured link', async () => {

@@ -13,7 +13,8 @@ export function formatOnlinePlayersLine(players) {
   }
 
   const visible = names.slice(0, 10);
-  const suffix = names.length > 10 ? ', ...' : '';
+  const hiddenCount = Math.max(0, names.length - visible.length);
+  const suffix = hiddenCount > 0 ? `, ... (+${hiddenCount} more)` : '';
   const noun = names.length === 1 ? 'player' : 'players';
   return `${names.length} ${noun} online: ${visible.join(', ')}${suffix}`;
 }

@@ -1,12 +1,13 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
-  getCommandTargetPlayer,
   getGameServerPogForPlayer,
   getPlayerName,
   renderTemplate,
+  resolveCommandTargetPlayer,
   safeBroadcast,
   safeDirectMessage,
   safePrivateMessage,
+  trimOrEmpty,
 } from './utils-helpers.js';
 
 async function main() {
@@ -17,8 +18,9 @@ async function main() {
   }
 
   const amount = args.amount;
+  const targetToken = trimOrEmpty(args.player);
 
-  const target = getCommandTargetPlayer(args.player);
+  const target = await resolveCommandTargetPlayer(gameServerId, targetToken, { requireOnline: true });
   if (!target) {
     throw new TakaroUserError('Please specify a valid player.');
   }
@@ -40,6 +42,7 @@ async function main() {
   try {
     await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, target.playerId, {
       currency: amount,
+      reason: `Granted by ${adminName} via /givecurrency`,
     });
   } catch (err) {
     const errorMessage = String(err?.response?.data?.message ?? err?.message ?? err ?? '');

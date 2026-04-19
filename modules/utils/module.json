@@ -126,10 +126,10 @@
       "arguments": [
         {
           "name": "player",
-          "type": "player",
-          "helpText": "The online player to kick",
+          "type": "string",
+          "helpText": "The online player to kick (name or player ID)",
           "position": 0,
-          "defaultValue": null
+          "defaultValue": "?"
         },
         {
           "name": "reason",
@@ -148,10 +148,10 @@
       "arguments": [
         {
           "name": "player",
-          "type": "player",
-          "helpText": "The player to ban",
+          "type": "string",
+          "helpText": "The player to ban (name or player ID)",
           "position": 0,
-          "defaultValue": null
+          "defaultValue": "?"
         },
         {
           "name": "duration",
@@ -176,10 +176,10 @@
       "arguments": [
         {
           "name": "player",
-          "type": "player",
-          "helpText": "The online player who should receive currency",
+          "type": "string",
+          "helpText": "The online player who should receive currency (name or player ID)",
           "position": 0,
-          "defaultValue": null
+          "defaultValue": "?"
         },
         {
           "name": "amount",

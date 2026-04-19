@@ -5,6 +5,8 @@ export const FUND_TOTAL_KEY = 'fund_total';
 export const FUND_CYCLE_KEY = 'fund_cycle';
 export const FUND_LAST_COMPLETION_KEY = 'fund_last_completion';
 export const FUND_STATE_LOCK_KEY = 'fund_state_lock';
+export const FUND_DEBUG_FORCE_STATE_WRITE_FAILURE_KEY = '__debug_force_state_write_failure_after_deduct';
+export const FUND_DEBUG_REPLACE_LOCK_OWNER_KEY = '__debug_replace_lock_owner_before_release';
 
 function wait(ms) {
   const deadline = Date.now() + ms;
@@ -73,7 +75,7 @@ export async function acquireFundStateLock(
   gameServerId,
   moduleId,
   owner,
-  { maxWaitMs = 5000, pollMs = 200, staleAfterMs = 120000 } = {},
+  { maxWaitMs = 30000, pollMs = 200, staleAfterMs = 120000 } = {},
 ) {
   const deadline = Date.now() + maxWaitMs;
   const now = Date.now();
@@ -135,6 +137,13 @@ export async function refreshFundStateLock(gameServerId, moduleId, owner) {
     }),
   });
   return true;
+}
+
+export async function assertFundStateLock(gameServerId, moduleId, owner) {
+  const stillOwned = await refreshFundStateLock(gameServerId, moduleId, owner);
+  if (!stillOwned) {
+    throw new Error('Community fund contribution lost its state lock before the operation could finish');
+  }
 }
 
 export async function releaseFundStateLock(gameServerId, moduleId, owner) {
@@ -209,4 +218,24 @@ export async function recordCompletion(gameServerId, moduleId, cycle, triggerPla
     triggerPlayer,
   };
   await setFundVariable(gameServerId, moduleId, FUND_LAST_COMPLETION_KEY, completion);
+}
+
+export async function consumeFundDebugFlag(gameServerId, moduleId, key) {
+  const variable = await getFundVariable(gameServerId, moduleId, key);
+  if (!variable) return false;
+
+  let enabled = false;
+  try {
+    enabled = JSON.parse(variable.value) === true;
+  } catch {
+    enabled = false;
+  }
+
+  try {
+    await takaro.variable.variableControllerDelete(variable.id);
+  } catch (err) {
+    console.warn(`fund-helpers: failed to delete debug flag ${key}: ${err}`);
+  }
+
+  return enabled;
 }
