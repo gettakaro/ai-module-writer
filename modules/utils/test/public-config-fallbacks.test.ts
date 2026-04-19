@@ -41,6 +41,7 @@ describe('utils: public config fallbacks', () => {
       userConfig: {
         discordLink: '   ',
         rules: ['   ', ''],
+        serverInfoMessage: '   ',
       },
     });
 
@@ -93,5 +94,13 @@ describe('utils: public config fallbacks', () => {
       res.logs.some((msg) => msg.includes('This server has not configured any rules yet.')),
       JSON.stringify(res.logs),
     );
+  });
+
+  it('serverinfo omits the Info line when serverInfoMessage is blank', async () => {
+    const res = await trigger(ctx.players[0].playerId, `${prefix}serverinfo`);
+    assert.equal(res.success, true, `Expected command to succeed, logs: ${JSON.stringify(res.logs)}`);
+    assert.ok(res.logs.some((msg) => msg.includes('Server: test-')), JSON.stringify(res.logs));
+    assert.ok(res.logs.some((msg) => msg.includes('Players online: 3')), JSON.stringify(res.logs));
+    assert.ok(!res.logs.some((msg) => msg.includes('Info:')), JSON.stringify(res.logs));
   });
 });

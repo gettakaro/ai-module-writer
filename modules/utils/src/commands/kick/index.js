@@ -6,10 +6,9 @@ import {
   isPlayerOnlineHere,
   normalizeReason,
   renderTemplate,
-  resolveCommandTargetPlayer,
+  resolveOnlinePlayerArgument,
   safeBroadcast,
   safePrivateMessage,
-  trimOrEmpty,
 } from './utils-helpers.js';
 
 async function main() {
@@ -19,8 +18,7 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const targetToken = trimOrEmpty(args.player);
-  const target = await resolveCommandTargetPlayer(gameServerId, targetToken, { requireOnline: true });
+  const target = await resolveOnlinePlayerArgument(gameServerId, args.player);
   if (!target) {
     throw new TakaroUserError('Please specify a valid player.');
   }

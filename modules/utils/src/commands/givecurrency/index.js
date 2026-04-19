@@ -1,13 +1,12 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
-  getGameServerPogForPlayer,
+  getOnlinePogForPlayer,
   getPlayerName,
   renderTemplate,
-  resolveCommandTargetPlayer,
+  resolveOnlinePlayerArgument,
   safeBroadcast,
   safeDirectMessage,
   safePrivateMessage,
-  trimOrEmpty,
 } from './utils-helpers.js';
 
 async function main() {
@@ -18,9 +17,8 @@ async function main() {
   }
 
   const amount = args.amount;
-  const targetToken = trimOrEmpty(args.player);
 
-  const target = await resolveCommandTargetPlayer(gameServerId, targetToken, { requireOnline: true });
+  const target = await resolveOnlinePlayerArgument(gameServerId, args.player);
   if (!target) {
     throw new TakaroUserError('Please specify a valid player.');
   }
@@ -32,7 +30,7 @@ async function main() {
   const [adminName, targetName, targetPog] = await Promise.all([
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),
-    getGameServerPogForPlayer(gameServerId, target.playerId),
+    getOnlinePogForPlayer(gameServerId, target.playerId),
   ]);
 
   if (!targetPog?.online) {
@@ -40,15 +38,14 @@ async function main() {
   }
 
   try {
-    await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, target.playerId, {
+    await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(targetPog.gameServerId || gameServerId, target.playerId, {
       currency: amount,
-      reason: `Granted by ${adminName} via /givecurrency`,
     });
   } catch (err) {
     const errorMessage = String(err?.response?.data?.message ?? err?.message ?? err ?? '');
     console.error(`utils:givecurrency failed for target=${target.playerId} amount=${amount}: ${err}`);
 
-    if (/economy|currency is not available|enable economy/i.test(errorMessage)) {
+    if (/economy|currency is not available|enable economy|Currency is not enabled/i.test(errorMessage)) {
       throw new TakaroUserError('Currency is not available on this game server. Ask an admin to enable economy support before using /givecurrency.');
     }
 

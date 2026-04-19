@@ -60,7 +60,7 @@
       },
       "banBroadcastMessage": {
         "type": "string",
-        "default": "{player} was banned by {admin} for {duration}. Reason: {reason}",
+        "default": "{player} was banned by {admin} {duration}. Reason: {reason}",
         "maxLength": 300,
         "description": "Broadcast template for /ban. Supports {player}, {reason}, {admin}, and {duration}."
       }
@@ -126,10 +126,9 @@
       "arguments": [
         {
           "name": "player",
-          "type": "string",
-          "helpText": "The online player to kick (name or player ID)",
-          "position": 0,
-          "defaultValue": "?"
+          "type": "player",
+          "helpText": "The online player to kick",
+          "position": 0
         },
         {
           "name": "reason",
@@ -148,10 +147,9 @@
       "arguments": [
         {
           "name": "player",
-          "type": "string",
-          "helpText": "The player to ban (name or player ID)",
-          "position": 0,
-          "defaultValue": "?"
+          "type": "player",
+          "helpText": "The player to ban",
+          "position": 0
         },
         {
           "name": "duration",
@@ -176,10 +174,9 @@
       "arguments": [
         {
           "name": "player",
-          "type": "string",
-          "helpText": "The online player who should receive currency (name or player ID)",
-          "position": 0,
-          "defaultValue": "?"
+          "type": "player",
+          "helpText": "The online player who should receive currency",
+          "position": 0
         },
         {
           "name": "amount",

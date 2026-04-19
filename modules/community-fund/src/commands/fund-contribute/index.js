@@ -161,7 +161,7 @@ async function main() {
     const nextRound = newCycle + 1;
     const carryoverMessage = carryover > 0
       ? ` ${carryover} currency carried over into Round #${nextRound}.`
-      : ` Round #${nextRound} now begins.`;
+      : '';
     const playerMessage = `You contributed ${amount} to the community fund. The community fund goal has been met! Completed round #${newCycle}; now starting Round #${nextRound}.${carryoverMessage}`;
 
     console.log(playerMessage);

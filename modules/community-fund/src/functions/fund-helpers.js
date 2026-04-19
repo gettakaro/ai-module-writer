@@ -8,14 +8,6 @@ export const FUND_STATE_LOCK_KEY = 'fund_state_lock';
 export const FUND_DEBUG_FORCE_STATE_WRITE_FAILURE_KEY = '__debug_force_state_write_failure_after_deduct';
 export const FUND_DEBUG_REPLACE_LOCK_OWNER_KEY = '__debug_replace_lock_owner_before_release';
 
-function wait(ms) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    // Takaro's function sandbox does not expose timer APIs like setTimeout.
-    // A short synchronous pause is enough for lock contention backoff here.
-  }
-}
-
 function isConflictError(err) {
   const status = err?.response?.status ?? err?.status;
   const message = String(err?.message ?? err ?? '');
@@ -75,17 +67,18 @@ export async function acquireFundStateLock(
   gameServerId,
   moduleId,
   owner,
-  { maxWaitMs = 30000, pollMs = 200, staleAfterMs = 120000 } = {},
+  { maxWaitMs = 5000, pollMs = 200, staleAfterMs = 120000 } = {},
 ) {
-  const deadline = Date.now() + maxWaitMs;
-  const now = Date.now();
-  const lockValue = {
-    owner,
-    createdAt: now,
-    refreshedAt: now,
-  };
+  const maxAttempts = Math.max(1, Math.ceil(maxWaitMs / Math.max(1, pollMs)));
 
-  while (Date.now() < deadline) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const now = Date.now();
+    const lockValue = {
+      owner,
+      createdAt: now,
+      refreshedAt: now,
+    };
+
     try {
       await takaro.variable.variableControllerCreate({
         key: FUND_STATE_LOCK_KEY,
@@ -112,8 +105,6 @@ export async function acquireFundStateLock(
           console.warn(`fund-helpers: failed to delete stale fund lock: ${deleteErr}`);
         }
       }
-
-      wait(pollMs);
     }
   }
 

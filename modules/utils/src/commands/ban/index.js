@@ -1,15 +1,14 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
   extractReason,
-  findPlayerByToken,
   getCommandArgumentTokens,
   getPlayerName,
   normalizeReason,
   parseBanDurationToken,
   renderTemplate,
+  requireResolvedPlayerArgument,
   safeBroadcast,
   safePrivateMessage,
-  trimOrEmpty,
 } from './utils-helpers.js';
 
 async function main() {
@@ -19,10 +18,9 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const targetToken = trimOrEmpty(args.player);
-  const target = await findPlayerByToken(targetToken);
+  const target = requireResolvedPlayerArgument(args.player);
   if (!target) {
-    throw new TakaroUserError('Please specify a valid player that Takaro can resolve. Offline bans only work for players already known to Takaro.');
+    throw new TakaroUserError('Please specify a valid player.');
   }
 
   if (target.playerId === player.id) {
@@ -72,11 +70,17 @@ async function main() {
   await safePrivateMessage(pog, confirmationMessage);
 
   if (mod.userConfig.broadcastBans) {
-    const message = renderTemplate(mod.userConfig.banBroadcastMessage, {
+    const template = mod.userConfig.banBroadcastMessage;
+    const usesLegacyForPrefix = String(template).includes('for {duration}');
+    const duration = usesLegacyForPrefix
+      ? parsedDuration.humanDuration
+      : (parsedDuration.isPermanent ? 'permanently' : `for ${parsedDuration.humanDuration}`);
+
+    const message = renderTemplate(template, {
       player: targetName,
       reason,
       admin: adminName,
-      duration: parsedDuration.humanDuration,
+      duration,
     });
     await safeBroadcast(gameServerId, message);
   }
