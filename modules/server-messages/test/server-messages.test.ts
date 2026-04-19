@@ -345,18 +345,13 @@ describe('server-messages: broadcast cronjob', () => {
     );
   });
 
-  it('ignores whitespace-only messages instead of broadcasting blank chat lines', async () => {
-    await reinstall({
-      order: 'sequential',
-      messages: [{ text: '   ' }],
-    });
-
-    const result = await triggerCronjobAndCollectMessages();
-    assert.equal(result.success, true, `Expected whitespace-only run to succeed, logs: ${JSON.stringify(result.logs)}`);
-    assert.deepEqual(result.chatMessages, []);
-    assert.ok(
-      result.logs.some((log) => log.includes('no messages configured')),
-      `Expected whitespace-only message to be treated as empty config, got: ${JSON.stringify(result.logs)}`,
+  it('rejects whitespace-only messages at install time so invalid configs fail loudly', async () => {
+    await assert.rejects(
+      reinstall({
+        order: 'sequential',
+        messages: [{ text: '   ' }],
+      }),
+      /pattern|validation|config|userConfig/i,
     );
   });
 
@@ -543,10 +538,51 @@ describe('server-messages: broadcast cronjob', () => {
     assert.equal(lockVariable, null, 'Expected stale execution lock to be cleared after broadcast completes');
   });
 
-  it('accepts install-time configs that runtime normalization clamps or filters', async () => {
+  it('fails cleanly without broadcasting when another healthy execution lock stays active', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: 'Alpha' }, { text: 'Beta' }],
+    });
+
+    await client.variable.variableControllerCreate({
+      key: LOCK_KEY,
+      value: JSON.stringify({
+        token: 'held-by-other-run',
+        acquiredAt: new Date().toISOString(),
+        heartbeatAt: new Date().toISOString(),
+      }),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+      gameServerId: ctx.gameServer.id,
+      moduleId,
+    });
+
+    try {
+      const before = new Date();
+      const failed = await triggerCronjob();
+      assert.equal(failed.success, false, `Expected lock-contention run to fail, logs: ${JSON.stringify(failed.logs)}`);
+      assert.ok(
+        failed.logs.some((log) => log.includes('timed out acquiring execution lock')),
+        `Expected lock-timeout log, got: ${JSON.stringify(failed.logs)}`,
+      );
+
+      const chatMessages = await getChatMessages(before);
+      assert.deepEqual(chatMessages, [], `Expected no broadcast during lock contention, got ${JSON.stringify(chatMessages)}`);
+
+      const lockVariable = await getVariable(LOCK_KEY);
+      assert.ok(lockVariable, 'Expected active foreign execution lock to remain in place after timeout');
+      assert.match(lockVariable.value, /held-by-other-run/);
+    } finally {
+      const lockVariable = await getVariable(LOCK_KEY);
+      if (lockVariable) {
+        await client.variable.variableControllerDelete(lockVariable.id);
+      }
+    }
+  });
+
+  it('accepts install-time configs that runtime normalization clamps', async () => {
     await reinstall({
       order: 'random',
-      messages: [{ text: '   ' }, { text: 'Low', weight: 0 }, { text: 'High', weight: 250.9 }],
+      messages: [{ text: 'Low', weight: 0 }, { text: 'High', weight: 250.9 }],
     });
 
     const result = await triggerCronjobAndCollectMessages();
@@ -640,14 +676,19 @@ describe('server-messages: broadcast cronjob', () => {
     assert.equal(lockAfterFailure, null, 'Expected failed run to release its execution lock');
   });
 
-  it('documents placeholder support, normalization behavior, and bounded message lists in module.json', async () => {
+  it('documents placeholder support, validation behavior, and bounded message lists in module.json', async () => {
     const moduleJson = JSON.parse(await fs.readFile(path.join(MODULE_DIR, 'module.json'), 'utf8')) as {
       config: {
         properties: {
           messages: {
             description?: string;
             maxItems?: number;
-            items: { properties: { text: { description?: string }; weight: { type?: string; description?: string } } };
+            items: {
+              properties: {
+                text: { description?: string; pattern?: string };
+                weight: { type?: string; description?: string };
+              };
+            };
           };
         };
       };
@@ -655,8 +696,10 @@ describe('server-messages: broadcast cronjob', () => {
 
     assert.match(moduleJson.config.properties.messages.description ?? '', /\{playerCount\}.*\{serverName\}/);
     assert.match(moduleJson.config.properties.messages.description ?? '', /Unknown placeholders are left unchanged/);
+    assert.match(moduleJson.config.properties.messages.description ?? '', /at least one non-whitespace character/);
     assert.equal(moduleJson.config.properties.messages.maxItems, 100);
-    assert.match(moduleJson.config.properties.messages.items.properties.text.description ?? '', /Whitespace-only messages are ignored/);
+    assert.equal(moduleJson.config.properties.messages.items.properties.text.pattern, '\\S');
+    assert.match(moduleJson.config.properties.messages.items.properties.text.description ?? '', /Whitespace-only messages are rejected at install time/);
     assert.equal(moduleJson.config.properties.messages.items.properties.weight.type, 'number');
     assert.match(moduleJson.config.properties.messages.items.properties.weight.description ?? '', /clamps weights into the 1-100 range/);
   });

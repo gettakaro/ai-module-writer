@@ -142,6 +142,13 @@ describe('vote-restart module', () => {
         passThreshold: 51,
         minimumPlayers: 2,
       },
+      systemConfig: {
+        cronJobs: {
+          'check-vote': {
+            temporalValue: '0 0 1 1 *',
+          },
+        },
+      },
     });
 
     prefix = await getCommandPrefix(client, ctx.gameServer.id);
@@ -438,6 +445,13 @@ describe('vote-restart edge cases', () => {
         passThreshold: 51,
         minimumPlayers: 4,
       },
+      systemConfig: {
+        cronJobs: {
+          'check-vote': {
+            temporalValue: '0 0 1 1 *',
+          },
+        },
+      },
     });
 
     prefix2 = await getCommandPrefix(client2, ctx2.gameServer.id);
@@ -577,6 +591,13 @@ describe('vote-restart dynamic threshold recalculation', () => {
         restartCommand: 'say restart-test',
         passThreshold: 49,
         minimumPlayers: 2,
+      },
+      systemConfig: {
+        cronJobs: {
+          'check-vote': {
+            temporalValue: '0 0 1 1 *',
+          },
+        },
       },
     });
 

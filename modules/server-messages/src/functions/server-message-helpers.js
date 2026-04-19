@@ -7,6 +7,7 @@ export const MAX_MESSAGE_COUNT = 100;
 const LOCK_RETRY_DELAY_MS = 250;
 const LOCK_TIMEOUT_MS = 10000;
 const LOCK_TTL_MS = 30000;
+const LOCK_HEARTBEAT_INTERVAL_MS = Math.max(1000, Math.floor(LOCK_TTL_MS / 3));
 const PLAYER_COUNT_PAGE_SIZE = 100;
 const MAX_PLAYER_COUNT_PAGES = 100;
 const SUPPORTED_PLACEHOLDERS = ['playerCount', 'serverName'];
@@ -213,6 +214,11 @@ async function refreshExecutionLock(lock, ttlMs) {
   });
 }
 
+function waitForDelay(delayMs) {
+  if (!(delayMs > 0)) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
 export function startExecutionLockHeartbeat(lock, options = {}) {
   if (!lock?.id || !lock?.token) {
     return {
@@ -222,23 +228,51 @@ export function startExecutionLockHeartbeat(lock, options = {}) {
   }
 
   const ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : LOCK_TTL_MS;
+  const intervalMs = Number.isFinite(options.intervalMs)
+    ? Math.max(250, Math.floor(options.intervalMs))
+    : LOCK_HEARTBEAT_INTERVAL_MS;
   let stopped = false;
+  let timer = null;
+  let inFlightBeat = Promise.resolve();
   let lastError = null;
+
+  const beatOnce = async (label = 'checkpoint') => {
+    if (stopped) return;
+    if (lastError) throw lastError;
+
+    try {
+      await refreshExecutionLock(lock, ttlMs);
+    } catch (err) {
+      lastError = new Error(`server-message-helpers: execution lock heartbeat failed at ${label}: ${err}`);
+      throw lastError;
+    }
+  };
+
+  const scheduleNextBeat = () => {
+    if (stopped) return;
+
+    timer = setTimeout(() => {
+      inFlightBeat = beatOnce('interval').catch(() => {});
+      inFlightBeat.finally(() => {
+        scheduleNextBeat();
+      });
+    }, intervalMs);
+  };
+
+  scheduleNextBeat();
 
   return {
     beat: async (label = 'checkpoint') => {
-      if (stopped) return;
-      if (lastError) throw lastError;
-
-      try {
-        await refreshExecutionLock(lock, ttlMs);
-      } catch (err) {
-        lastError = new Error(`server-message-helpers: execution lock heartbeat failed at ${label}: ${err}`);
-        throw lastError;
-      }
+      await inFlightBeat;
+      await beatOnce(label);
     },
     stop: async () => {
       stopped = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      await inFlightBeat;
     },
   };
 }
@@ -278,6 +312,11 @@ export async function acquireExecutionLock(gameServerId, moduleId, options = {})
         if (deleted) {
           console.warn(`server-message-helpers: cleared stale execution lock ${existingLock.id}`);
         }
+      }
+
+      const remainingMs = deadline - Date.now();
+      if (remainingMs > 0) {
+        await waitForDelay(Math.min(retryDelayMs, remainingMs));
       }
     }
   }
