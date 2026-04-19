@@ -16,6 +16,7 @@ import {
   ensureInteractivePlayAllowed,
   withCasinoLocks,
   sendPlayerMessage,
+  consumeRecentCancellation,
 } from './casino-helpers.js';
 
 async function main() {
@@ -51,6 +52,10 @@ async function main() {
     }
 
     if (!existing) {
+      const cancelled = await consumeRecentCancellation(gameServerId, mod.moduleId, player.id, 'hilo');
+      if (cancelled) {
+        throw new TakaroUserError(`Your hilo streak was cancelled and ${formatCurrency(cancelled.amount ?? 0)} coin was refunded because you can no longer play casino games.`);
+      }
       throw new TakaroUserError('You have no active hilo streak. Start with /hilo <amount>.');
     }
 

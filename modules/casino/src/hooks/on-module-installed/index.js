@@ -8,10 +8,10 @@ async function main() {
     await assertNoLegacyCasinoModules(gameServerId, mod.moduleId);
   } catch (err) {
     const message = String(err?.message ?? err ?? 'Legacy casino module conflict detected.');
-    console.log(`casino.onModuleInstalled: install blocked until legacy modules are removed: ${message}`);
+    console.log(`casino.onModuleInstalled: legacy casino module conflict detected; gameplay is disabled until the old modules are removed: ${message}`);
     try {
       await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-        message: `🎰 Casino install blocked: ${message}`,
+        message: `🎰 Casino installed in conflict mode: gameplay is disabled until the old gambling modules are removed. ${message}`,
         opts: {},
       });
     } catch (notifyErr) {

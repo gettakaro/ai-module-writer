@@ -1,5 +1,5 @@
 import { data, TakaroUserError } from '@takaro/helpers';
-import { requireManagePermission, resolvePlayerByName, setBan, formatCurrency, formatUtcTimestamp, getDefaultConfig, cancelPlayerCasinoState, removePlayerFromRacePool, refund, sendPlayerMessage } from './casino-helpers.js';
+import { requireManagePermission, resolvePlayerByName, setBan, formatCurrency, formatUtcTimestamp, getDefaultConfig, cancelPlayerCasinoState, removePlayerFromRacePool, refund, sendPlayerMessage, setRecentCancellation, KEY_HILO_SESSION, KEY_BLACKJACK_SESSION } from './casino-helpers.js';
 
 async function main() {
   const { pog, gameServerId, arguments: args, module: mod } = data;
@@ -20,13 +20,32 @@ async function main() {
     expiresAt = new Date(Date.now() + (hours * 60 * 60 * 1000)).toISOString();
   }
 
-  await setBan(gameServerId, mod.moduleId, target.playerId, { expiresAt });
   const cancelled = await cancelPlayerCasinoState(gameServerId, mod.moduleId, target.playerId, config);
   const removedRaceEntries = await removePlayerFromRacePool(gameServerId, mod.moduleId, target.playerId);
   const refundedRaceStake = removedRaceEntries.reduce((sum, entry) => sum + Number(entry.amount ?? 0), 0);
   if (refundedRaceStake > 0) {
     await refund({ gameServerId, moduleId: mod.moduleId, playerId: target.playerId, amount: refundedRaceStake, config });
   }
+  await setBan(gameServerId, mod.moduleId, target.playerId, { expiresAt });
+  for (const entry of cancelled) {
+    if (entry.key === KEY_HILO_SESSION) {
+      await setRecentCancellation(gameServerId, mod.moduleId, target.playerId, {
+        game: 'hilo',
+        amount: Number(entry.amount ?? 0),
+        reason: 'ban',
+        at: new Date().toISOString(),
+      });
+    }
+    if (entry.key === KEY_BLACKJACK_SESSION) {
+      await setRecentCancellation(gameServerId, mod.moduleId, target.playerId, {
+        game: 'blackjack',
+        amount: Number(entry.amount ?? 0),
+        reason: 'ban',
+        at: new Date().toISOString(),
+      });
+    }
+  }
+
   const cleanupBits = [];
   if (cancelled.length > 0) cleanupBits.push(`${cancelled.length} active stake${cancelled.length === 1 ? '' : 's'} refunded`);
   if (removedRaceEntries.length > 0) cleanupBits.push(`${removedRaceEntries.length} race entr${removedRaceEntries.length === 1 ? 'y was' : 'ies were'} removed and ${formatCurrency(refundedRaceStake)} coin refunded`);

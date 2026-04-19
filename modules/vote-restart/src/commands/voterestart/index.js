@@ -76,11 +76,11 @@ async function main() {
 
   // 6. Broadcast
   const snapshotNote = initiatorIsImmune
-    ? ` ${player.name} is immune, so the vote starts at 0/${threshold}.`
+    ? ` ${player.name} is immune, so the vote starts at 0/${threshold} and they do not auto-vote.`
     : '';
 
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-    message: `[Vote Restart] ${player.name} wants a restart. Type /voteyes to agree. ${currentVotes}/${threshold} yes votes so far, ${config.voteDuration}s left. Only the non-immune players who were online when the vote began can vote.${snapshotNote}`,
+    message: `[Vote Restart] Restart vote started by ${player.name}. Type /voteyes to agree. ${currentVotes}/${threshold} yes votes so far, ${config.voteDuration}s left. Only the non-immune players who were online when the vote began can vote.${snapshotNote}`,
     opts: {},
   });
 }

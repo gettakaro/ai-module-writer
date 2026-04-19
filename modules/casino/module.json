@@ -162,7 +162,7 @@
     "duel": {
       "trigger": "duel",
       "description": "Challenge another player to rock-paper-scissors",
-      "helpText": "Usage: /duel <player> <amount> | /duel <accept|decline|rock|paper|scissors>",
+      "helpText": "Usage: /duel <player> <amount> | /duel <accept|decline|cancel|rock|paper|scissors>",
       "function": "src/commands/duel/index.js",
       "arguments": [
         { "name": "arg1", "type": "string", "helpText": "Player name or action", "position": 0 },

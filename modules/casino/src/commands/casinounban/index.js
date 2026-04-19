@@ -24,7 +24,7 @@ async function main() {
     console.error(`casino.casinounban: failed to remove CASINO_BANNED role assignments for ${target.playerId}: ${err}`);
   }
 
-  await pog.pm(`✅ ${target.player?.name ?? targetName} can use the casino again.${removedPermissionRoles > 0 ? ` Removed ${removedPermissionRoles} CASINO_BANNED role assignment${removedPermissionRoles === 1 ? '' : 's'}.` : ''}`);
+  await pog.pm(`✅ ${target.player?.name ?? targetName} can use the casino again.${removedPermissionRoles > 0 ? ` Removed ${removedPermissionRoles} casino-ban role assignment${removedPermissionRoles === 1 ? '' : 's'}.` : ''}`);
 }
 
 await main();

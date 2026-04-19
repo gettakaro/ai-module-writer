@@ -12,6 +12,7 @@ export const KEY_BLACKJACK_SESSION = 'casino_session_blackjack';
 export const KEY_WINDOW_PREFIX = 'casino_window';
 export const KEY_REPORT_DAY_PREFIX = 'casino_report_day';
 export const KEY_LOCK_PREFIX = 'casino_lock';
+export const KEY_LAST_CANCEL = 'casino_last_cancel';
 
 export const DEFAULT_STATS = {
   wagered: 0,
@@ -471,6 +472,21 @@ export async function clearBan(gameServerId, moduleId, playerId) {
   await deleteVariable(gameServerId, moduleId, KEY_BAN, playerId);
 }
 
+export async function setRecentCancellation(gameServerId, moduleId, playerId, cancellation) {
+  await writeVariable(gameServerId, moduleId, KEY_LAST_CANCEL, cancellation, playerId);
+}
+
+export async function consumeRecentCancellation(gameServerId, moduleId, playerId, game) {
+  const cancellation = await readJsonVariable(gameServerId, moduleId, KEY_LAST_CANCEL, playerId, null);
+  if (!cancellation) return null;
+  const at = new Date(cancellation.at ?? 0).getTime();
+  if (Number.isNaN(at) || Date.now() - at > 5 * 60 * 1000 || (game && cancellation.game !== game)) {
+    return null;
+  }
+  await deleteVariable(gameServerId, moduleId, KEY_LAST_CANCEL, playerId);
+  return cancellation;
+}
+
 export async function ensurePlayerNotBanned(gameServerId, moduleId, playerId) {
   const ban = await getBan(gameServerId, moduleId, playerId);
   if (!ban) return;
@@ -558,11 +574,23 @@ export async function getPlayerBalance(gameServerId, playerId) {
 
 export async function assertNoLegacyCasinoModules(gameServerId, moduleId) {
   const legacyNames = new Set(['blackjack', 'roulette', 'slotmachines', 'hangman', 'horseracing', 'pvpbet']);
-  const res = await takaro.module.moduleInstallationsControllerGetInstalledModules({
-    filters: { gameserverId: [gameServerId] },
-    limit: 100,
-  });
-  const conflicts = (res.data.data ?? []).filter((row) => {
+  const installed = [];
+  let page = 0;
+  const limit = 100;
+
+  while (page < 100) {
+    const res = await takaro.module.moduleInstallationsControllerGetInstalledModules({
+      filters: { gameserverId: [gameServerId] },
+      page,
+      limit,
+    });
+    const batch = res.data.data ?? [];
+    installed.push(...batch);
+    if (batch.length < limit) break;
+    page += 1;
+  }
+
+  const conflicts = installed.filter((row) => {
     if (row.moduleId === moduleId) return false;
     const normalized = String(row.module?.name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
     return legacyNames.has(normalized);
@@ -1040,14 +1068,15 @@ export async function ensureInteractivePlayAllowed(gameServerId, moduleId, pog, 
 
 export async function sweepExpiredBans(gameServerId, moduleId) {
   const deleted = [];
-  let page = 0;
-  while (page < 100) {
+  while (deleted.length < 10000) {
     const res = await takaro.variable.variableControllerSearch({
       filters: { key: [KEY_BAN], gameServerId: [gameServerId], moduleId: [moduleId] },
-      page,
+      page: 0,
       limit: 100,
     });
     const batch = res.data.data;
+    if (batch.length === 0) break;
+    let deletedThisPass = 0;
     for (const row of batch) {
       if (!row.playerId) continue;
       try {
@@ -1055,13 +1084,13 @@ export async function sweepExpiredBans(gameServerId, moduleId) {
         if (ban?.expiresAt && new Date(ban.expiresAt).getTime() <= Date.now()) {
           await takaro.variable.variableControllerDelete(row.id);
           deleted.push(row.playerId);
+          deletedThisPass += 1;
         }
       } catch (err) {
         console.error(`casino-helpers: failed to parse ban ${row.id}: ${err}`);
       }
     }
-    if (batch.length < 100) break;
-    page += 1;
+    if (batch.length < 100 || deletedThisPass === 0) break;
   }
   return deleted;
 }
@@ -1069,24 +1098,25 @@ export async function sweepExpiredBans(gameServerId, moduleId) {
 export async function sweepExpiredWindows(gameServerId, moduleId, config) {
   const keep = new Set([getCurrentWindowKey(config.capWindow), getPreviousWindowKey(config.capWindow)]);
   let deleted = 0;
-  let page = 0;
-  while (page < 100) {
+  while (deleted < 10000) {
     const res = await takaro.variable.variableControllerSearch({
       filters: { gameServerId: [gameServerId], moduleId: [moduleId] },
       search: { key: [KEY_WINDOW_PREFIX] },
-      page,
+      page: 0,
       limit: 100,
     });
     const batch = res.data.data.filter((row) => row.key.startsWith(`${KEY_WINDOW_PREFIX}:`));
+    if (batch.length === 0) break;
+    let deletedThisPass = 0;
     for (const row of batch) {
       const key = row.key.slice(`${KEY_WINDOW_PREFIX}:`.length);
       if (!keep.has(key)) {
         await takaro.variable.variableControllerDelete(row.id);
         deleted += 1;
+        deletedThisPass += 1;
       }
     }
-    if (res.data.data.length < 100) break;
-    page += 1;
+    if (res.data.data.length < 100 || deletedThisPass === 0) break;
   }
   return deleted;
 }
@@ -1129,14 +1159,15 @@ export async function sweepExpiredSessions(gameServerId, moduleId, config) {
   const actions = [];
 
   for (const key of [KEY_HILO_SESSION, KEY_BLACKJACK_SESSION]) {
-    let page = 0;
-    while (page < 100) {
+    while (actions.length < 10000) {
       const res = await takaro.variable.variableControllerSearch({
         filters: { key: [key], gameServerId: [gameServerId], moduleId: [moduleId] },
-        page,
+        page: 0,
         limit: 100,
       });
       const batch = res.data.data;
+      if (batch.length === 0) break;
+      const actionsBeforePass = actions.length;
       for (const row of batch) {
         if (!row.playerId) continue;
         try {
@@ -1157,19 +1188,19 @@ export async function sweepExpiredSessions(gameServerId, moduleId, config) {
           console.error(`casino-helpers: failed to parse session ${row.id}: ${err}`);
         }
       }
-      if (batch.length < 100) break;
-      page += 1;
+      if (batch.length < 100 || actions.length === actionsBeforePass) break;
     }
   }
 
-  let duelPage = 0;
-  while (duelPage < 100) {
+  while (actions.length < 10000) {
     const res = await takaro.variable.variableControllerSearch({
       filters: { key: [KEY_DUEL], gameServerId: [gameServerId], moduleId: [moduleId] },
-      page: duelPage,
+      page: 0,
       limit: 100,
     });
     const batch = res.data.data;
+    if (batch.length === 0) break;
+    const actionsBeforePass = actions.length;
     for (const row of batch) {
       if (!row.playerId) continue;
       try {
@@ -1195,8 +1226,7 @@ export async function sweepExpiredSessions(gameServerId, moduleId, config) {
         console.error(`casino-helpers: failed to parse duel row ${row.id}: ${err}`);
       }
     }
-    if (batch.length < 100) break;
-    duelPage += 1;
+    if (batch.length < 100 || actions.length === actionsBeforePass) break;
   }
 
   return actions;

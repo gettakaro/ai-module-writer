@@ -49,6 +49,19 @@ export async function acquireVoteLock(gameServerId, moduleId, { ttlMs = 15000, t
   const deadline = Date.now() + timeoutMs;
   const maxAttempts = Math.max(10, Math.ceil(timeoutMs / Math.max(1, retryMs)));
   let attempts = 0;
+
+  const searchLockRows = async () => {
+    const res = await takaro.variable.variableControllerSearch({
+      filters: {
+        key: [LOCK_KEY],
+        gameServerId: [gameServerId],
+        moduleId: [moduleId],
+      },
+      limit: 100,
+    });
+    return res.data.data;
+  };
+
   while (Date.now() < deadline && attempts < maxAttempts) {
     attempts += 1;
     try {
@@ -60,32 +73,35 @@ export async function acquireVoteLock(gameServerId, moduleId, { ttlMs = 15000, t
       });
       return {
         async release() {
-          const current = await findVariable(gameServerId, moduleId, LOCK_KEY);
-          if (!current) return;
-          try {
-            const parsed = JSON.parse(current.value);
-            if (parsed?.owner === owner) {
-              await takaro.variable.variableControllerDelete(current.id);
+          const rows = await searchLockRows();
+          for (const row of rows) {
+            try {
+              const parsed = JSON.parse(row.value);
+              if (parsed?.owner === owner) {
+                await takaro.variable.variableControllerDelete(row.id);
+              }
+            } catch {
+              await takaro.variable.variableControllerDelete(row.id);
             }
-          } catch {
-            await takaro.variable.variableControllerDelete(current.id);
           }
         },
       };
     } catch {
-      const current = await findVariable(gameServerId, moduleId, LOCK_KEY);
-      if (current) {
+      const rows = await searchLockRows();
+      let removedStaleRow = false;
+      for (const row of rows) {
         try {
-          const parsed = JSON.parse(current.value);
+          const parsed = JSON.parse(row.value);
           if (parsed?.expiresAt && new Date(parsed.expiresAt).getTime() <= Date.now()) {
-            await takaro.variable.variableControllerDelete(current.id);
-            continue;
+            await takaro.variable.variableControllerDelete(row.id);
+            removedStaleRow = true;
           }
         } catch {
-          await takaro.variable.variableControllerDelete(current.id);
-          continue;
+          await takaro.variable.variableControllerDelete(row.id);
+          removedStaleRow = true;
         }
       }
+      if (removedStaleRow) continue;
     }
   }
   throw new Error('Timed out acquiring vote-restart state lock');

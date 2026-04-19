@@ -16,6 +16,7 @@ import {
   refund,
   ensureInteractivePlayAllowed,
   withCasinoLocks,
+  consumeRecentCancellation,
 } from './casino-helpers.js';
 
 async function finishHand({ session, gameServerId, mod, player, pog, config }) {
@@ -77,7 +78,13 @@ async function main() {
       return;
     }
 
-    if (!session) throw new TakaroUserError('You have no active blackjack hand. Start with /bj <amount>.');
+    if (!session) {
+      const cancelled = await consumeRecentCancellation(gameServerId, mod.moduleId, player.id, 'blackjack');
+      if (cancelled) {
+        throw new TakaroUserError(`Your blackjack hand was cancelled and ${formatCurrency(cancelled.amount ?? 0)} coin was refunded because you can no longer play casino games.`);
+      }
+      throw new TakaroUserError('You have no active blackjack hand. Start with /bj <amount>.');
+    }
 
     try {
       await ensureInteractivePlayAllowed(gameServerId, mod.moduleId, pog, player, config, 'blackjack');

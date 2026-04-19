@@ -10,9 +10,8 @@ async function main() {
   if (!target) throw new TakaroUserError(`Player \"${targetName}\" not found.`);
   await deleteVariable(gameServerId, mod.moduleId, 'casino_stats', target.playerId);
 
-  let page = 0;
   let clearedWindows = 0;
-  while (page < 100) {
+  while (clearedWindows < 10000) {
     const res = await takaro.variable.variableControllerSearch({
       filters: {
         gameServerId: [gameServerId],
@@ -20,16 +19,16 @@ async function main() {
         playerId: [target.playerId],
       },
       search: { key: ['casino_window:'] },
-      page,
+      page: 0,
       limit: 100,
     });
     const batch = res.data.data.filter((row) => row.key.startsWith('casino_window:'));
+    if (batch.length === 0) break;
     for (const row of batch) {
       await takaro.variable.variableControllerDelete(row.id);
       clearedWindows += 1;
     }
     if (res.data.data.length < 100) break;
-    page += 1;
   }
 
   const clearedReportDays = await removePlayerFromReportDays(gameServerId, mod.moduleId, target.playerId);

@@ -34,7 +34,7 @@ async function main() {
   const config = getDefaultConfig(mod.userConfig);
   const arg1 = String(args.arg1 ?? '').toLowerCase();
 
-  if (['accept', 'decline', 'rock', 'paper', 'scissors'].includes(arg1)) {
+  if (['accept', 'decline', 'cancel', 'rock', 'paper', 'scissors'].includes(arg1)) {
     const found = await findDuelForPlayer(gameServerId, mod.moduleId, player.id);
     if (!found) throw new TakaroUserError('You are not part of an active duel.');
     const duel = found.duel;
@@ -53,6 +53,24 @@ async function main() {
           `⚔️ ${current.opponentName} declined ${current.challengerName}'s duel. ${current.challengerName} was refunded ${formatCurrency(current.amount)} coin.`,
         );
         await pog.pm('⚔️ Duel declined. Challenger refunded.');
+        return;
+      }
+
+      if (arg1 === 'cancel') {
+        if (![found.challengerId, current.opponentId].includes(player.id)) {
+          throw new TakaroUserError('You are not part of this duel.');
+        }
+        await refund({ gameServerId, moduleId: mod.moduleId, playerId: found.challengerId, amount: current.amount, config, skipLock: true });
+        if (current.acceptedStakePlaced && current.opponentId) {
+          await refund({ gameServerId, moduleId: mod.moduleId, playerId: current.opponentId, amount: current.amount, config, skipLock: true });
+        }
+        await deleteDuel(gameServerId, mod.moduleId, found.challengerId);
+        const cancellerName = player.id === found.challengerId ? current.challengerName : current.opponentName;
+        await announce(
+          gameServerId,
+          `⚔️ ${cancellerName} cancelled the duel between ${current.challengerName} and ${current.opponentName}. ${current.acceptedStakePlaced ? 'Both stakes were refunded.' : `${current.challengerName}'s stake was refunded.`}`,
+        );
+        await pog.pm(`⚔️ Duel cancelled. ${current.acceptedStakePlaced ? 'Both stakes were refunded.' : 'The challenger was refunded.'}`);
         return;
       }
 
@@ -132,7 +150,7 @@ async function main() {
 
   const targetName = String(args.arg1 ?? '').trim();
   const amount = parsePositiveNumberLike(args.arg2);
-  if (!targetName || !amount) throw new TakaroUserError('Usage: /duel <player> <amount>');
+  if (!targetName || !amount) throw new TakaroUserError('Usage: /duel <player> <amount> | /duel <accept|decline|cancel|rock|paper|scissors>');
   const target = await resolvePlayerByName(targetName, gameServerId);
   if (!target) throw new TakaroUserError(`Player "${targetName}" not found.`);
   if (!target.pog) throw new TakaroUserError(`Player "${targetName}" is not currently online on this game server.`);
@@ -143,7 +161,7 @@ async function main() {
     if (challengerExisting) throw new TakaroUserError('You already have an open duel challenge.');
 
     const challengerInAnyDuel = await findDuelForPlayer(gameServerId, mod.moduleId, player.id);
-    if (challengerInAnyDuel) throw new TakaroUserError('You are already involved in another duel. Finish or cancel it first.');
+    if (challengerInAnyDuel) throw new TakaroUserError('You are already involved in another duel. Finish it or use /duel cancel first.');
 
     const targetInAnyDuel = await findDuelForPlayer(gameServerId, mod.moduleId, target.playerId);
     if (targetInAnyDuel) {
