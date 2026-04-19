@@ -202,32 +202,104 @@ export async function getPlayerName(playerId, fallback) {
   }
 }
 
+export async function resolvePlayerNameTarget(targetName) {
+  const normalizedTargetName = trimOrEmpty(targetName);
+  if (normalizedTargetName === '' || normalizedTargetName === '?') {
+    throw new Error('Please specify a valid player.');
+  }
+
+  const result = await takaro.player.playerControllerSearch({
+    search: {
+      name: [normalizedTargetName],
+    },
+  });
+
+  const exactMatch = result.data.data.find(
+    (candidate) => trimOrEmpty(candidate.name).toLowerCase() === normalizedTargetName.toLowerCase(),
+  );
+
+  if (!exactMatch) {
+    throw new Error(`No player found with the name or ID "${normalizedTargetName}".`);
+  }
+
+  return {
+    playerId: exactMatch.id,
+    name: trimOrEmpty(exactMatch.name) || normalizedTargetName,
+  };
+}
+
+export async function getGameServerPogForPlayer(gameServerId, playerId, { onlineOnly = false } = {}) {
+  const filters = {
+    gameServerId: [gameServerId],
+    playerId: [playerId],
+  };
+
+  if (onlineOnly) {
+    filters.online = [true];
+  }
+
+  const result = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
+    filters,
+    limit: 1,
+  });
+
+  const pog = result.data.data[0];
+  if (!pog) return null;
+
+  return {
+    playerId: pog.playerId,
+    name: trimOrEmpty(pog.name) || '',
+    gameId: pog.gameId,
+    gameServerId: pog.gameServerId,
+    online: pog.online,
+  };
+}
+
+export async function getOnlinePogForPlayer(gameServerId, playerId) {
+  return getGameServerPogForPlayer(gameServerId, playerId, { onlineOnly: true });
+}
+
+export async function resolveCurrentGameServerTarget(gameServerId, targetName) {
+  const target = await resolvePlayerNameTarget(targetName);
+  const pog = await getGameServerPogForPlayer(gameServerId, target.playerId);
+
+  return {
+    ...target,
+    gameId: pog?.gameId,
+    gameServerId: pog?.gameServerId,
+    online: Boolean(pog?.online),
+  };
+}
+
 export async function safeBroadcast(gameServerId, message) {
-  if (isBlank(message)) return;
-  console.log(message);
+  if (isBlank(message)) return false;
   try {
     await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
       message,
       opts: {},
     });
+    console.log(message);
+    return true;
   } catch (err) {
     console.error(`utils-helpers: broadcast failed: ${err}`);
+    return false;
   }
 }
 
 export async function safePrivateMessage(recipient, message) {
-  if (!recipient || isBlank(message)) return;
-  console.log(message);
+  if (!recipient || isBlank(message)) return false;
   try {
     await recipient.pm(message);
+    console.log(message);
+    return true;
   } catch (err) {
     console.error(`utils-helpers: private message failed: ${err}`);
+    return false;
   }
 }
 
 export async function safeDirectMessage(gameServerId, recipient, message) {
-  if (!recipient || !recipient.gameId || isBlank(message)) return;
-  console.log(message);
+  if (!recipient || !recipient.gameId || isBlank(message)) return false;
   try {
     await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
       message,
@@ -237,8 +309,11 @@ export async function safeDirectMessage(gameServerId, recipient, message) {
         },
       },
     });
+    console.log(message);
+    return true;
   } catch (err) {
     console.error(`utils-helpers: direct message failed to player ${recipient.playerId}: ${err}`);
+    return false;
   }
 }
 

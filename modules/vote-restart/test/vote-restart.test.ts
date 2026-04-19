@@ -685,7 +685,12 @@ describe('vote-restart dynamic threshold recalculation', () => {
         },
       });
       for (const v of varSearch.data.data) {
-        await client3.variable.variableControllerDelete(v.id);
+        try {
+          await client3.variable.variableControllerDelete(v.id);
+        } catch (err) {
+          const status = (err as { response?: { status?: number } })?.response?.status;
+          if (status !== 404) throw err;
+        }
       }
     }
   });

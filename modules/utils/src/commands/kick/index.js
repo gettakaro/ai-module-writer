@@ -1,11 +1,10 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
   extractReason,
-  getCommandTargetPlayer,
   getPlayerName,
-  isPlayerOnlineHere,
   normalizeReason,
   renderTemplate,
+  resolveCurrentGameServerTarget,
   safeBroadcast,
   safePrivateMessage,
 } from './utils-helpers.js';
@@ -17,16 +16,18 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const target = getCommandTargetPlayer(args.player);
-  if (!target) {
-    throw new TakaroUserError('That player is not currently online.');
+  let target;
+  try {
+    target = await resolveCurrentGameServerTarget(gameServerId, args.player);
+  } catch (err) {
+    throw new TakaroUserError(err.message);
   }
 
   if (target.playerId === player.id) {
     throw new TakaroUserError('You cannot use this command on yourself.');
   }
 
-  if (!isPlayerOnlineHere(target, gameServerId)) {
+  if (!target.online || !target.gameId) {
     throw new TakaroUserError('That player is not currently online.');
   }
 

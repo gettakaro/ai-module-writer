@@ -25,6 +25,7 @@ const MODULE_DIR = path.resolve(__dirname, '..');
 describe('utils: admin commands', () => {
   let client: Client;
   let ctx: MockServerContext;
+  let otherCtx: MockServerContext;
   let moduleId: string;
   let versionId: string;
   let prefix: string;
@@ -35,6 +36,7 @@ describe('utils: admin commands', () => {
     await cleanupTestModules(client);
     await cleanupTestGameServers(client);
     ctx = await startMockServer(client);
+    otherCtx = await startMockServer(client);
 
     await client.settings.settingsControllerSet('economyEnabled', {
       gameServerId: ctx.gameServer.id,
@@ -77,6 +79,7 @@ describe('utils: admin commands', () => {
       console.error('Cleanup: failed to delete module:', err);
     }
     await stopMockServer(ctx.server, client, ctx.gameServer.id);
+    await stopMockServer(otherCtx.server, client, otherCtx.gameServer.id);
   });
 
   async function trigger(playerId: string, msg: string) {
@@ -197,6 +200,15 @@ describe('utils: admin commands', () => {
     assert.equal(res.success, false, 'Expected /givecurrency with an invalid player to fail');
     assert.ok(res.logs.some((msg) => msg.includes('No player found with the name or ID')), JSON.stringify(res.logs));
     assert.ok(!res.logs.some((msg) => msg.includes('positive whole number')), JSON.stringify(res.logs));
+  });
+
+  it('rejects /givecurrency when the player exists globally but is not online on this server', async () => {
+    const otherServerPlayerName = await getPlayerName(otherCtx.players[0].playerId);
+    const res = await trigger(ctx.players[0].playerId, `${prefix}givecurrency ${otherServerPlayerName} 5`);
+
+    assert.equal(res.success, false, 'Expected /givecurrency to reject a player from another server');
+    assert.ok(res.logs.some((msg) => msg.includes('not currently online')), JSON.stringify(res.logs));
+    assert.ok(!res.logs.some((msg) => msg.includes(`Gave 5 currency to ${otherServerPlayerName}.`)), JSON.stringify(res.logs));
   });
 
   it('allows self /givecurrency', async () => {
@@ -322,6 +334,15 @@ describe('utils: admin commands', () => {
 
     assert.equal(res.success, false, 'Expected self kick to fail');
     assert.ok(res.logs.some((msg) => msg.includes('cannot use this command on yourself')), JSON.stringify(res.logs));
+  });
+
+  it('rejects /kick when the player exists globally but is not online on this server', async () => {
+    const otherServerPlayerName = await getPlayerName(otherCtx.players[1].playerId);
+    const res = await trigger(ctx.players[0].playerId, `${prefix}kick ${otherServerPlayerName}`);
+
+    assert.equal(res.success, false, 'Expected /kick to reject a player from another server');
+    assert.ok(res.logs.some((msg) => msg.includes('not currently online')), JSON.stringify(res.logs));
+    assert.ok(!res.logs.some((msg) => msg.includes(`Kicked ${otherServerPlayerName}.`)), JSON.stringify(res.logs));
   });
 
   it('kicks an online player, confirms success, and broadcasts when enabled', async () => {

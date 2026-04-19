@@ -56,22 +56,43 @@ async function main() {
     throw new TakaroUserError('Your contribution could not be processed because your currency could not be deducted. Please try again.');
   }
 
-  // This read-modify-write is not atomic. If two players contribute simultaneously, both may
-  // read the same currentTotal and one contribution could be lost. This is an accepted limitation
-  // of the Takaro variable storage platform (no atomic increment API).
-  const currentTotal = await getFundTotal(gameServerId, moduleId);
-  const newTotal = currentTotal + amount;
+  let currentTotal;
+  let newTotal;
+  let newCycle;
+  let thresholdReached = false;
 
-  console.log(`Fund contribution: player=${player.name}, amount=${amount}, previousTotal=${currentTotal}, newTotal=${newTotal}, threshold=${threshold}`);
+  try {
+    // This read-modify-write is not atomic. If two players contribute simultaneously, both may
+    // read the same currentTotal and one contribution could be lost. This is an accepted limitation
+    // of the Takaro variable storage platform (no atomic increment API).
+    currentTotal = await getFundTotal(gameServerId, moduleId);
+    newTotal = currentTotal + amount;
 
-  if (newTotal >= threshold) {
-    // Carry overshoot forward instead of discarding excess
-    const carryover = newTotal - threshold;
+    console.log(`Fund contribution: player=${player.name}, amount=${amount}, previousTotal=${currentTotal}, newTotal=${newTotal}, threshold=${threshold}`);
 
-    await setFundTotal(gameServerId, moduleId, carryover);
-    const newCycle = await incrementFundCycle(gameServerId, moduleId);
-    await recordCompletion(gameServerId, moduleId, newCycle, player.name);
+    if (newTotal >= threshold) {
+      thresholdReached = true;
+      const carryover = newTotal - threshold;
+      await setFundTotal(gameServerId, moduleId, carryover);
+      newCycle = await incrementFundCycle(gameServerId, moduleId);
+      await recordCompletion(gameServerId, moduleId, newCycle, player.name);
+    } else {
+      await setFundTotal(gameServerId, moduleId, newTotal);
+    }
+  } catch (stateErr) {
+    console.error(`Fund: failed to persist contribution state for player ${player.name} after deducting ${amount}. Attempting currency rollback. Error: ${stateErr}`);
+    try {
+      await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, pog.playerId, {
+        currency: amount,
+      });
+      console.log(`Fund: rolled back ${amount} currency to player ${player.name} after contribution-state failure.`);
+    } catch (rollbackErr) {
+      console.error(`Fund: CRITICAL rollback failure for player ${player.name} after contribution-state failure. Manual intervention required. Rollback error: ${rollbackErr}`);
+    }
+    throw new TakaroUserError('Your contribution could not be recorded, so your currency was refunded. Please try again.');
+  }
 
+  if (thresholdReached) {
     const completionMsg = config.completionMessage.replace('{threshold}', String(threshold));
     await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
       message: completionMsg,
@@ -94,8 +115,6 @@ async function main() {
       `You contributed ${amount} to the community fund. The community fund goal has been met! A new round begins. (Round #${newCycle})`,
     );
   } else {
-    await setFundTotal(gameServerId, moduleId, newTotal);
-
     const percent = Math.floor((newTotal / threshold) * 100);
 
     await pog.pm(

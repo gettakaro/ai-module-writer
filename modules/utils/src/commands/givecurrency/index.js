@@ -1,8 +1,9 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
-  getCommandTargetPlayer,
   getPlayerName,
+  getGameServerPogForPlayer,
   renderTemplate,
+  resolvePlayerNameTarget,
   safeBroadcast,
   safeDirectMessage,
   safePrivateMessage,
@@ -15,21 +16,28 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const target = getCommandTargetPlayer(args.player);
   const amount = args.amount;
 
-  if (!target) {
-    throw new TakaroUserError('Please specify a valid player to receive currency.');
+  let target;
+  try {
+    target = await resolvePlayerNameTarget(args.player);
+  } catch (err) {
+    throw new TakaroUserError(err.message);
   }
 
   if (!Number.isInteger(amount) || amount <= 0) {
     throw new TakaroUserError('Usage: /givecurrency <player> <amount> — Amount must be a positive whole number.');
   }
 
-  const [adminName, targetName] = await Promise.all([
+  const [adminName, targetName, targetPog] = await Promise.all([
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),
+    getGameServerPogForPlayer(gameServerId, target.playerId),
   ]);
+
+  if (!targetPog?.online) {
+    throw new TakaroUserError('That player is not currently online.');
+  }
 
   await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, target.playerId, {
     currency: amount,
@@ -38,7 +46,11 @@ async function main() {
   console.log(`utils:givecurrency admin=${adminName} target=${targetName} amount=${amount}`);
 
   await safePrivateMessage(pog, `Gave ${amount} currency to ${targetName}.`);
-  await safeDirectMessage(gameServerId, target, `${adminName} gave you ${amount} currency.`);
+  await safeDirectMessage(
+    gameServerId,
+    targetPog,
+    `${adminName} gave you ${amount} currency.`,
+  );
 
   if (mod.userConfig.broadcastCurrencyGrants) {
     const message = renderTemplate(mod.userConfig.currencyGrantBroadcastMessage, {
