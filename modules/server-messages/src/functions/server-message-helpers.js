@@ -3,16 +3,19 @@ import { takaro } from '@takaro/helpers';
 export const SERVER_MESSAGES_STATE_KEY = 'server_messages_state';
 export const SERVER_MESSAGES_LOCK_KEY = 'server_messages_lock';
 export const MAX_MESSAGE_WEIGHT = 100;
+export const MAX_MESSAGE_COUNT = 100;
 const LOCK_RETRY_DELAY_MS = 250;
 const LOCK_TIMEOUT_MS = 10000;
 const LOCK_TTL_MS = 30000;
 const PLAYER_COUNT_PAGE_SIZE = 100;
 const MAX_PLAYER_COUNT_PAGES = 100;
+const SUPPORTED_PLACEHOLDERS = ['playerCount', 'serverName'];
 
 export function normalizeMessages(rawMessages) {
   if (!Array.isArray(rawMessages)) return [];
 
   return rawMessages
+    .slice(0, MAX_MESSAGE_COUNT)
     .filter((message) => message && typeof message.text === 'string' && message.text.trim().length > 0)
     .map((message) => ({
       text: message.text,
@@ -124,10 +127,10 @@ export async function writeVariable(gameServerId, moduleId, key, value) {
   });
 }
 
-function sleep(ms) {
+async function sleep(ms) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
-    // Takaro's function runtime does not expose setTimeout, so busy-wait briefly.
+    await Promise.resolve();
   }
 }
 
@@ -202,7 +205,7 @@ export async function acquireExecutionLock(gameServerId, moduleId, options = {})
         continue;
       }
 
-      sleep(retryDelayMs);
+      await sleep(retryDelayMs);
     }
   }
 
@@ -283,10 +286,22 @@ export async function getServerName(gameServerId) {
 }
 
 export function renderMessage(template, context) {
-  return template.replace(/\{([^{}]+)\}/g, (match, token) => {
+  const unknownTokens = new Set();
+
+  const rendered = template.replace(/\{([^{}]+)\}/g, (match, token) => {
     if (Object.prototype.hasOwnProperty.call(context, token)) {
       return String(context[token]);
     }
-    return match;
+
+    unknownTokens.add(token);
+    return '';
   });
+
+  if (unknownTokens.size > 0) {
+    console.warn(
+      `server-message-helpers: removed unknown placeholders [${[...unknownTokens].join(', ')}]; supported placeholders: ${SUPPORTED_PLACEHOLDERS.join(', ')}`,
+    );
+  }
+
+  return rendered;
 }

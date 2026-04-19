@@ -360,7 +360,7 @@ describe('server-messages: broadcast cronjob', () => {
     );
   });
 
-  it('renders playerCount and serverName placeholders and leaves unknown placeholders unchanged', async () => {
+  it('renders supported placeholders and strips unknown placeholders with a warning', async () => {
     await reinstall({
       order: 'sequential',
       messages: [{ text: 'Players={playerCount} Server={serverName} Unknown={unknownToken}' }],
@@ -369,8 +369,12 @@ describe('server-messages: broadcast cronjob', () => {
     const result = await triggerCronjobAndCollectMessages();
     assert.equal(result.success, true, `Expected placeholder run to succeed, logs: ${JSON.stringify(result.logs)}`);
     assert.deepEqual(result.chatMessages, [
-      `Players=3 Server=${ctx.gameServer.name} Unknown={unknownToken}`,
+      `Players=3 Server=${ctx.gameServer.name} Unknown=`,
     ]);
+    assert.ok(
+      result.logs.some((log) => log.includes('removed unknown placeholders') && log.includes('unknownToken')),
+      `Expected unknown-placeholder warning log, got: ${JSON.stringify(result.logs)}`,
+    );
   });
 
   it('resets rotation cleanly after reinstalling with a changed message list', async () => {
@@ -500,6 +504,29 @@ describe('server-messages: broadcast cronjob', () => {
     assert.equal(lockVariable, null, 'Expected stale execution lock to be cleared after broadcast completes');
   });
 
+  it('accepts install-time configs that runtime normalization clamps or filters', async () => {
+    await reinstall({
+      order: 'random',
+      messages: [{ text: '   ' }, { text: 'Low', weight: 0 }, { text: 'High', weight: 250.9 }],
+    });
+
+    const result = await triggerCronjobAndCollectMessages();
+    assert.equal(result.success, true, `Expected normalized-config run to succeed, logs: ${JSON.stringify(result.logs)}`);
+
+    const stateVariable = await getStateVariable();
+    assert.ok(stateVariable, 'Expected state variable after normalized-config run');
+    const state = JSON.parse(stateVariable.value) as { bag?: number[]; cursor?: number };
+    const counts = (state.bag ?? []).reduce<Record<number, number>>((acc, index) => {
+      acc[index] = (acc[index] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    assert.equal(state.bag?.length, 101, `Expected bounded weighted bag length 101, got ${stateVariable.value}`);
+    assert.equal(counts[0], 1, `Expected low weight to clamp to one slot, got ${stateVariable.value}`);
+    assert.equal(counts[1], 100, `Expected high weight to clamp to 100 slots, got ${stateVariable.value}`);
+    assert.equal(state.cursor, 1, `Expected normalized weighted bag cursor to advance once, got ${stateVariable.value}`);
+  });
+
   it('builds a bounded weighted bag from normalized message weights', async () => {
     await reinstall({
       order: 'random',
@@ -542,20 +569,40 @@ describe('server-messages: broadcast cronjob', () => {
     assert.equal(state.sequentialIndex, 0, `Expected wrapped sequential index after two sends, got ${updated.value}`);
   });
 
-  it('documents placeholder support and bounded random weights in module.json', async () => {
+  it('does not advance persisted rotation state when broadcasting fails', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: 'Fail First' }, { text: 'Fail Second' }],
+    });
+
+    await ctx.server.shutdown();
+    await wait(500);
+
+    const failed = await triggerCronjob();
+    assert.equal(failed.success, false, `Expected failed broadcast run to report failure, logs: ${JSON.stringify(failed.logs)}`);
+
+    const stateAfterFailure = await getStateVariable();
+    assert.equal(stateAfterFailure, null, 'Expected no rotation state to be persisted after a failed first broadcast');
+  });
+
+  it('documents placeholder support, normalization behavior, and bounded message lists in module.json', async () => {
     const moduleJson = JSON.parse(await fs.readFile(path.join(MODULE_DIR, 'module.json'), 'utf8')) as {
       config: {
         properties: {
           messages: {
             description?: string;
-            items: { properties: { text: { description?: string }; weight: { maximum?: number } } };
+            maxItems?: number;
+            items: { properties: { text: { description?: string }; weight: { type?: string; description?: string } } };
           };
         };
       };
     };
 
     assert.match(moduleJson.config.properties.messages.description ?? '', /\{playerCount\}.*\{serverName\}/);
-    assert.match(moduleJson.config.properties.messages.items.properties.text.description ?? '', /\{playerCount\}.*\{serverName\}/);
-    assert.equal(moduleJson.config.properties.messages.items.properties.weight.maximum, 100);
+    assert.match(moduleJson.config.properties.messages.description ?? '', /Unknown placeholders are removed with a warning/);
+    assert.equal(moduleJson.config.properties.messages.maxItems, 100);
+    assert.match(moduleJson.config.properties.messages.items.properties.text.description ?? '', /Whitespace-only messages are ignored/);
+    assert.equal(moduleJson.config.properties.messages.items.properties.weight.type, 'number');
+    assert.match(moduleJson.config.properties.messages.items.properties.weight.description ?? '', /clamps weights into the 1-100 range/);
   });
 });

@@ -11,23 +11,20 @@
     "properties": {
       "messages": {
         "type": "array",
-        "description": "Messages to broadcast. Supports {playerCount} and {serverName} placeholders. Weight only affects random order.",
+        "description": "Messages to broadcast. Supports {playerCount} and {serverName} placeholders. Unknown placeholders are removed with a warning. Weight only affects random order. Limited to 100 messages to keep shuffle bags bounded.",
         "default": [],
+        "maxItems": 100,
         "items": {
           "type": "object",
           "properties": {
             "text": {
               "type": "string",
-              "minLength": 1,
-              "pattern": ".*\\S.*",
-              "description": "The message text to broadcast. Supports {playerCount} and {serverName}; unknown placeholders are left unchanged. Whitespace-only messages are ignored."
+              "description": "The message text to broadcast. Supports {playerCount} and {serverName}; unknown placeholders are removed with a warning. Whitespace-only messages are ignored."
             },
             "weight": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100,
+              "type": "number",
               "default": 1,
-              "description": "Relative frequency in random weighted shuffle-bag mode. Capped at 100 to keep shuffle bags bounded."
+              "description": "Relative frequency in random weighted shuffle-bag mode. Runtime normalization clamps weights into the 1-100 range to keep shuffle bags bounded."
             }
           },
           "required": [
