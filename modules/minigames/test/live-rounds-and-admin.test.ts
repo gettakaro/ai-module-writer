@@ -200,7 +200,7 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
     assert.equal(stats.totalPoints, 40);
   });
 
-  it('refreshes leaderboard cache and serves top points', async () => {
+  it('refreshes leaderboard cache and serves top points through both leaderboard commands', async () => {
     const refreshEvent = await triggerCron(refreshCronId);
     const meta = refreshEvent.meta as { result?: { success?: boolean } };
     assert.equal(meta?.result?.success, true, 'refreshLeaderboards should succeed');
@@ -210,9 +210,15 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
     assert.ok(cache.topPoints.length >= 1);
     assert.equal(cache.topPoints[0].value, 40);
 
+    const leaderboardEvent = await triggerCommand(ctx.players[1].playerId, `${prefix}minigamesleaderboard points`);
+    const leaderboardMeta = leaderboardEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const leaderboardLogs = (leaderboardMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(leaderboardMeta?.result?.success, true, 'minigamesleaderboard should succeed');
+    assert.ok(leaderboardLogs.some((msg) => msg.includes('leaderboard category=points')), `expected canonical leaderboard log, got ${JSON.stringify(leaderboardLogs)}`);
+
     const topEvent = await triggerCommand(ctx.players[1].playerId, `${prefix}minigamestop points`);
     const topMeta = topEvent.meta as { result?: { success?: boolean } };
-    assert.equal(topMeta?.result?.success, true, 'minigamestop should succeed');
+    assert.equal(topMeta?.result?.success, true, 'minigamestop should still succeed as a legacy alias');
   });
 
   it('denies admin-only commands to non-admin players', async () => {
@@ -412,9 +418,13 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
   });
 
   it('settles trivia and mathrace rounds through /answer and logs read-only report output', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE, null);
+
     const triviaFireEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamesfirenow trivia`);
-    const triviaFireMeta = triviaFireEvent.meta as { result?: { success?: boolean } };
+    const triviaFireMeta = triviaFireEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const triviaFireLogs = (triviaFireMeta?.result?.logs ?? []).map((l) => l.msg);
     assert.equal(triviaFireMeta?.result?.success, true, 'forced trivia round should fire');
+    assert.ok(triviaFireLogs.some((msg) => msg.includes('live round fired game=trivia')), `expected forced trivia fire log, got ${JSON.stringify(triviaFireLogs)}`);
 
     const triviaRound = await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE);
     assert.equal(triviaRound.game, 'trivia');
@@ -451,6 +461,12 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
     assert.equal(reportMeta?.result?.success, true, 'minigamesreport should succeed without args');
     assert.ok(reportLogs.some((msg) => msg.includes('minigames: report days=7')), `expected report log, got ${JSON.stringify(reportLogs)}`);
     assert.ok(reportLogs.some((msg) => msg.includes('Top 5:')), `expected report content in logs, got ${JSON.stringify(reportLogs)}`);
+
+    const invalidReportEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamesreport 0`);
+    const invalidReportMeta = invalidReportEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const invalidReportLogs = (invalidReportMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(invalidReportMeta?.result?.success, false, 'minigamesreport should reject invalid day windows');
+    assert.ok(invalidReportLogs.some((msg) => msg.includes('Usage: /minigamesreport [days>0]')), `expected invalid-days usage log, got ${JSON.stringify(invalidReportLogs)}`);
   });
 
   it('settles reaction-race rounds through the chat-message hook and rejects /answer for chat-only rounds', async () => {
@@ -470,27 +486,19 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
     assert.equal(commandMeta?.result?.success, false, 'reactionrace should reject /answer');
     assert.ok(commandLogs.some((msg) => msg.includes('This round is chat-only')), `expected chat-only rejection, got ${JSON.stringify(commandLogs)}`);
 
-    const before = new Date();
     await emitChatMessage(client, ctx, ctx.players[1].playerId, '!go', moduleId);
-    const hookEvent = await waitForEvent(client, {
-      eventName: EventSearchInputAllowedFiltersEventNameEnum.HookExecuted,
-      gameserverId: ctx.gameServer.id,
-      after: before,
-      timeout: 30000,
-    });
-    const hookMeta = hookEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
-    const hookLogs = (hookMeta?.result?.logs ?? []).map((l) => l.msg);
-    assert.equal(hookMeta?.result?.success, true, 'reactionrace hook should succeed');
 
-    const cleared = await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE);
+    let cleared = undefined;
     let stats = null;
-    for (let attempt = 0; attempt < 10; attempt++) {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      cleared = await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE);
       stats = await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[1].playerId);
-      if (stats?.perGame?.reactionrace?.wins === 1) break;
+      if (cleared === null && stats?.perGame?.reactionrace?.wins === 1) break;
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    assert.equal(cleared, null, 'reactionrace round should clear after chat win');
-    assert.equal(stats?.perGame?.reactionrace?.wins, 1, `expected reactionrace win to be recorded, hook logs=${JSON.stringify(hookLogs)}`);
+
+    assert.equal(cleared, null, `reactionrace round should clear after chat win; stats=${JSON.stringify(stats)}`);
+    assert.equal(stats?.perGame?.reactionrace?.wins, 1, `expected reactionrace win to be recorded, stats=${JSON.stringify(stats)}`);
   });
 
   it('closes an expired round via cronjob', async () => {

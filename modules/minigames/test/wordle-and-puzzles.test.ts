@@ -191,9 +191,9 @@ describe('minigames: daily puzzles and wordle scoring', () => {
     assert.equal(history.days[puzzleDate()].totalPoints, 150);
     assert.equal(history.days[puzzleDate()].perGame.wordle.wins, 1);
 
-    let foundBigScore = false;
+    let foundBigScoreAnnouncement = false;
     for (let attempt = 0; attempt < 10; attempt++) {
-      const bigScoreEvents = await client.event.eventControllerSearch({
+      const recentEvents = await client.event.eventControllerSearch({
         filters: {
           gameserverId: [ctx.gameServer.id],
         },
@@ -204,11 +204,14 @@ describe('minigames: daily puzzles and wordle scoring', () => {
         sortDirection: 'desc',
         sortBy: 'createdAt',
       });
-      foundBigScore = bigScoreEvents.data.data.some((entry) => String(entry.eventName) === 'minigames-big-score');
-      if (foundBigScore) break;
+      foundBigScoreAnnouncement = recentEvents.data.data.some((entry) => {
+        const meta = entry.meta as { msg?: string } | undefined;
+        return String(entry.eventName) === 'chat-message' && String(meta?.msg || '').includes('BIG SCORE!');
+      });
+      if (foundBigScoreAnnouncement) break;
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-    assert.equal(foundBigScore, true, 'expected a minigames-big-score event');
+    assert.equal(foundBigScoreAnnouncement, true, 'expected a big-score chat announcement event');
 
     const pogSearch = await client.playerOnGameserver.playerOnGameServerControllerSearch({
       filters: { gameServerId: [ctx.gameServer.id], playerId: [ctx.players[1].playerId] },
