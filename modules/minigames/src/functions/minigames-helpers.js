@@ -17,6 +17,7 @@ export const BAN_KEY = 'minigames_ban';
 export const WORDLE_SESSION_KEY = 'minigames_session_wordle';
 export const HANGMAN_SESSION_KEY = 'minigames_session_hangman';
 export const HOTCOLD_SESSION_KEY = 'minigames_session_hotcold';
+export const SESSION_LOCK_PREFIX = 'minigames_session_lock';
 export const BIG_SCORE_EVENT_NAME = 'minigames-big-score';
 
 const LIVE_ROUND_LOCK_TTL_MS = 2 * 60 * 1000;
@@ -486,43 +487,34 @@ export function getBoostMultiplier(pog) {
 }
 
 export async function emitBigScoreEvent({ gameServerId, moduleId, playerId, playerName, game, points, context }) {
-  const payload = {
-    eventName: BIG_SCORE_EVENT_NAME,
-    gameserverId: gameServerId,
-    gameServerId,
-    moduleId,
+  const meta = {
     playerId,
-    meta: {
-      playerId,
-      playerName,
-      game,
-      points,
-      context: context || null,
-      emittedAt: new Date().toISOString(),
-    },
+    playerName,
+    game,
+    points,
+    context: context || null,
+    emittedAt: new Date().toISOString(),
   };
 
   const attempts = [
-    async () => takaro.axios?.post?.('/event', payload),
-    async () => takaro.event?.eventControllerCreate?.({
-      eventName: payload.eventName,
-      gameserverId: payload.gameserverId,
-      moduleId: payload.moduleId,
-      playerId: payload.playerId,
-      meta: payload.meta,
+    async () => takaro.axios?.post?.('/hook/trigger', {
+      gameServerId,
+      playerId,
+      moduleId,
+      eventType: BIG_SCORE_EVENT_NAME,
+      eventMeta: meta,
     }),
     async () => takaro.axios?.post?.('/event', {
-      eventName: payload.eventName,
-      gameserverId: payload.gameserverId,
-      moduleId: payload.moduleId,
-      playerId: payload.playerId,
-      meta: payload.meta,
+      eventName: BIG_SCORE_EVENT_NAME,
+      gameserverId: gameServerId,
+      moduleId,
+      playerId,
+      meta,
     }),
   ];
 
   for (const [index, attempt] of attempts.entries()) {
     try {
-      if (!attempt) continue;
       const result = await attempt();
       if (result === undefined) continue;
       console.log(`minigames: emitted ${BIG_SCORE_EVENT_NAME} player=${playerName} game=${game} points=${points} attempt=${index + 1}`);
@@ -684,18 +676,22 @@ export async function warnEmptyBanks(gameServerId, moduleId, keys) {
   if (keys.length === 0) return;
   const today = getTodayUtcDate();
   const warnings = await readJsonVariable(gameServerId, moduleId, WARNINGS_KEY, { date: today, keys: [] }, null);
-  const effective = warnings.date === today ? warnings : { date: today, keys: [] };
+  const normalizedWarnings = warnings && typeof warnings === 'object' && Array.isArray(warnings.keys)
+    ? warnings
+    : { date: today, keys: [] };
+  const effective = normalizedWarnings.date === today ? normalizedWarnings : { date: today, keys: [] };
   const freshKeys = keys.filter((key) => !effective.keys.includes(key));
   if (freshKeys.length === 0) return;
   effective.keys.push(...freshKeys);
   await writeVariable(gameServerId, moduleId, WARNINGS_KEY, effective);
-  const descriptions = {
+  const adminDescriptions = {
     [CONTENT_WORDLE_KEY]: 'Wordle words (Variables → minigames_content_wordle.words)',
     [CONTENT_WORDLIST_KEY]: 'Hangman/Scramble word list (Variables → minigames_content_wordlist.words)',
     [CONTENT_TRIVIA_KEY]: 'custom trivia questions (Variables → minigames_content_trivia.questions)',
   };
+  console.log(`minigames: missing content banks ${freshKeys.map((key) => adminDescriptions[key] || key).join('; ')}`);
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-    message: `⚠️ miniGames is missing content: ${freshKeys.map((key) => descriptions[key] || key).join('; ')}. An admin needs to seed the module Variables tab before those games can run.`,
+    message: '⚠️ Some mini-games are temporarily unavailable because their content has not been configured yet. An admin has been notified.',
     opts: {},
   });
 }
@@ -758,16 +754,41 @@ export async function getWordleSession(gameServerId, moduleId, playerId) {
   return readJsonVariable(gameServerId, moduleId, WORDLE_SESSION_KEY, { guesses: [], solved: false, completedAt: null, lastPoints: 0 }, playerId);
 }
 
+export async function withSessionLock({ gameServerId, moduleId, playerId, gameKey, fn }) {
+  const lockToken = await acquireVariableLock({
+    gameServerId,
+    moduleId,
+    key: `${SESSION_LOCK_PREFIX}:${gameKey}:${playerId}`,
+    ttlMs: PLAYER_AWARD_LOCK_TTL_MS,
+    owner: `session:${gameKey}:${playerId}`,
+    retries: 4,
+  });
+  if (!lockToken) {
+    throw new Error(`Could not acquire ${gameKey} session lock for player ${playerId}`);
+  }
+
+  try {
+    return await fn();
+  } finally {
+    await releaseVariableLock({
+      gameServerId,
+      moduleId,
+      key: `${SESSION_LOCK_PREFIX}:${gameKey}:${playerId}`,
+      token: lockToken,
+    });
+  }
+}
+
 export async function playWordle({ gameServerId, moduleId, player, pog, config, guess }) {
   await requirePlayable({ gameServerId, moduleId, pog, playerId: player.id });
   requireGameEnabled(config, 'wordle', 'Wordle');
   const puzzle = await getPuzzleToday(gameServerId, moduleId);
-  if (!puzzle.wordle) throw new TakaroUserError('🟩 Wordle is not configured yet. Ask an admin to seed minigames_content_wordle.');
+  if (!puzzle.wordle) throw new TakaroUserError('🟩 Wordle is not configured yet. Ask an admin to seed the Wordle bank.');
 
   const bank = await getWordleBank(gameServerId, moduleId);
-  const session = await getWordleSession(gameServerId, moduleId, player.id);
 
   if (!guess) {
+    const session = await getWordleSession(gameServerId, moduleId, player.id);
     const rendered = session.guesses.length > 0
       ? session.guesses.map((entry) => `${entry.toUpperCase()} ${renderWordleFeedback(entry, puzzle.wordle)}`).join(' | ')
       : 'No guesses yet.';
@@ -784,76 +805,84 @@ export async function playWordle({ gameServerId, moduleId, player, pog, config, 
   const normalized = String(guess).trim().toLowerCase();
   if (!/^[a-z]{5}$/.test(normalized)) throw new TakaroUserError('Wordle guesses must be exactly 5 letters.');
   if (!bank.includes(normalized)) throw new TakaroUserError('That word is not in the Wordle bank.');
-  if (session.solved || session.completedAt) throw new TakaroUserError('You already finished today\'s Wordle.');
-  if (session.guesses.length >= 6) throw new TakaroUserError('You already used all 6 Wordle guesses today.');
-  if (session.guesses.includes(normalized)) throw new TakaroUserError('You already guessed that word.');
 
-  session.guesses.push(normalized);
-  const feedback = renderWordleFeedback(normalized, puzzle.wordle);
+  await withSessionLock({
+    gameServerId,
+    moduleId,
+    playerId: player.id,
+    gameKey: 'wordle',
+    fn: async () => {
+      const session = await getWordleSession(gameServerId, moduleId, player.id);
+      if (session.solved || session.completedAt) throw new TakaroUserError('You already finished today\'s Wordle.');
+      if (session.guesses.length >= 6) throw new TakaroUserError('You already used all 6 Wordle guesses today.');
+      if (session.guesses.includes(normalized)) throw new TakaroUserError('You already guessed that word.');
 
-  if (normalized === puzzle.wordle) {
-    session.solved = true;
-    session.completedAt = new Date().toISOString();
-    const basePoints = Math.round(Number(config.pointsWordleBase) * ((7 - session.guesses.length) / 6));
-    const reward = await awardPoints({
-      gameServerId,
-      moduleId,
-      pog,
-      playerId: player.id,
-      playerName: player.name,
-      config,
-      game: 'wordle',
-      basePoints,
-      context: `solved in ${session.guesses.length}`,
-    });
-    session.lastPoints = reward.actualPoints;
+      session.guesses.push(normalized);
+      const feedback = renderWordleFeedback(normalized, puzzle.wordle);
 
-    const stats = await getPlayerStats(gameServerId, moduleId, player.id);
-    const streak = stats.streaks.wordle || { current: 0, best: 0, lastSolvedDate: null };
-    if (streak.lastSolvedDate === getTodayUtcDate()) {
-      // already updated today — leave as-is
-    } else {
-      const yesterday = new Date();
-      yesterday.setUTCDate(yesterday.getUTCDate() - 1);
-      const yesterdayDate = yesterday.toISOString().slice(0, 10);
-      const nextCurrent = streak.lastSolvedDate === yesterdayDate ? streak.current + 1 : 1;
-      stats.streaks.wordle = {
-        current: nextCurrent,
-        best: Math.max(streak.best || 0, nextCurrent),
-        lastSolvedDate: getTodayUtcDate(),
-      };
-      await setPlayerStats(gameServerId, moduleId, player.id, stats);
-    }
+      if (normalized === puzzle.wordle) {
+        session.solved = true;
+        session.completedAt = new Date().toISOString();
+        const basePoints = Math.round(Number(config.pointsWordleBase) * ((7 - session.guesses.length) / 6));
+        const reward = await awardPoints({
+          gameServerId,
+          moduleId,
+          pog,
+          playerId: player.id,
+          playerName: player.name,
+          config,
+          game: 'wordle',
+          basePoints,
+          context: `solved in ${session.guesses.length}`,
+        });
+        session.lastPoints = reward.actualPoints;
 
-    await writeVariable(gameServerId, moduleId, WORDLE_SESSION_KEY, session, player.id);
-    await pog.pm(`🟩 ${feedback} SOLVED in ${session.guesses.length}! +${reward.actualPoints} points${formatMultiplier(reward.multiplier)}.`);
-    console.log(`wordle: solved player=${player.name} guesses=${session.guesses.length} answer=${puzzle.wordle} points=${reward.actualPoints}`);
-    return;
-  }
+        const stats = await getPlayerStats(gameServerId, moduleId, player.id);
+        const streak = stats.streaks.wordle || { current: 0, best: 0, lastSolvedDate: null };
+        if (streak.lastSolvedDate !== getTodayUtcDate()) {
+          const yesterday = new Date();
+          yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+          const yesterdayDate = yesterday.toISOString().slice(0, 10);
+          const nextCurrent = streak.lastSolvedDate === yesterdayDate ? streak.current + 1 : 1;
+          stats.streaks.wordle = {
+            current: nextCurrent,
+            best: Math.max(streak.best || 0, nextCurrent),
+            lastSolvedDate: getTodayUtcDate(),
+          };
+          await setPlayerStats(gameServerId, moduleId, player.id, stats);
+        }
 
-  if (session.guesses.length >= 6) {
-    session.completedAt = new Date().toISOString();
-    const stats = await getPlayerStats(gameServerId, moduleId, player.id);
-    stats.gamesPlayed += 1;
-    stats.perGame.wordle.plays += 1;
-    stats.streaks.wordle = {
-      current: 0,
-      best: stats.streaks.wordle.best || 0,
-      lastSolvedDate: stats.streaks.wordle.lastSolvedDate || null,
-    };
-    await Promise.all([
-      setPlayerStats(gameServerId, moduleId, player.id, stats),
-      recordDailySummary({ gameServerId, moduleId, playerId: player.id, game: 'wordle', plays: 1, wins: 0, points: 0 }),
-    ]);
-    await writeVariable(gameServerId, moduleId, WORDLE_SESSION_KEY, session, player.id);
-    await pog.pm(`🟩 ${feedback} Out of guesses — today's word was ${puzzle.wordle.toUpperCase()}.`);
-    console.log(`wordle: failed player=${player.name} answer=${puzzle.wordle}`);
-    return;
-  }
+        await writeVariable(gameServerId, moduleId, WORDLE_SESSION_KEY, session, player.id);
+        await pog.pm(`🟩 ${feedback} SOLVED in ${session.guesses.length}! +${reward.actualPoints} points${formatMultiplier(reward.multiplier)}.`);
+        console.log(`wordle: solved player=${player.name} guesses=${session.guesses.length} answer=${puzzle.wordle} points=${reward.actualPoints}`);
+        return;
+      }
 
-  await writeVariable(gameServerId, moduleId, WORDLE_SESSION_KEY, session, player.id);
-  await pog.pm(`🟩 ${feedback} (${6 - session.guesses.length}/6 left)`);
-  console.log(`wordle: guess player=${player.name} guess=${normalized} feedback=${feedback}`);
+      if (session.guesses.length >= 6) {
+        session.completedAt = new Date().toISOString();
+        const stats = await getPlayerStats(gameServerId, moduleId, player.id);
+        stats.gamesPlayed += 1;
+        stats.perGame.wordle.plays += 1;
+        stats.streaks.wordle = {
+          current: 0,
+          best: stats.streaks.wordle.best || 0,
+          lastSolvedDate: stats.streaks.wordle.lastSolvedDate || null,
+        };
+        await Promise.all([
+          setPlayerStats(gameServerId, moduleId, player.id, stats),
+          recordDailySummary({ gameServerId, moduleId, playerId: player.id, game: 'wordle', plays: 1, wins: 0, points: 0 }),
+        ]);
+        await writeVariable(gameServerId, moduleId, WORDLE_SESSION_KEY, session, player.id);
+        await pog.pm(`🟩 ${feedback} Out of guesses — today's word was ${puzzle.wordle.toUpperCase()}.`);
+        console.log(`wordle: failed player=${player.name} answer=${puzzle.wordle}`);
+        return;
+      }
+
+      await writeVariable(gameServerId, moduleId, WORDLE_SESSION_KEY, session, player.id);
+      await pog.pm(`🟩 ${feedback} (${6 - session.guesses.length}/6 left)`);
+      console.log(`wordle: guess player=${player.name} guess=${normalized} feedback=${feedback}`);
+    },
+  });
 }
 
 export async function getHangmanSession(gameServerId, moduleId, playerId) {
@@ -871,76 +900,85 @@ export async function playHangman({ gameServerId, moduleId, player, pog, config,
   await requirePlayable({ gameServerId, moduleId, pog, playerId: player.id });
   requireGameEnabled(config, 'hangman', 'Hangman');
   const puzzle = await getPuzzleToday(gameServerId, moduleId);
-  if (!puzzle.hangman) throw new TakaroUserError('🎪 Hangman is not configured yet. Ask an admin to seed minigames_content_wordlist.');
+  if (!puzzle.hangman) throw new TakaroUserError('🎪 Hangman is not configured yet. Ask an admin to seed the shared word bank.');
 
-  const session = await getHangmanSession(gameServerId, moduleId, player.id);
   if (!letterOrWord) {
+    const session = await getHangmanSession(gameServerId, moduleId, player.id);
     await pog.pm(`🎪 ${maskHangman(puzzle.hangman, session.lettersTried)} (wrong ${session.wrongCount}/6, tried: ${session.lettersTried.join(', ').toUpperCase() || 'none'})`);
     console.log(`hangman: status player=${player.name} wrong=${session.wrongCount}`);
     return;
   }
 
-  if (session.solved || session.completedAt) throw new TakaroUserError('You already finished today\'s Hangman.');
   await requireDailyPuzzleAttempt({ gameServerId, moduleId, playerId: player.id, config });
-
   const attempt = String(letterOrWord).trim().toLowerCase();
   if (!/^[a-z]+$/.test(attempt)) throw new TakaroUserError('Hangman guesses must use letters only.');
 
-  if (attempt.length === 1) {
-    if (session.lettersTried.includes(attempt)) throw new TakaroUserError('You already tried that letter.');
-    session.lettersTried.push(attempt);
-    if (!puzzle.hangman.includes(attempt)) session.wrongCount += 1;
-  } else if (attempt === puzzle.hangman) {
-    for (const char of puzzle.hangman.split('')) {
-      if (!session.lettersTried.includes(char)) session.lettersTried.push(char);
-    }
-    session.solved = true;
-  } else {
-    session.wrongCount = 6;
-    session.completedAt = new Date().toISOString();
-  }
+  await withSessionLock({
+    gameServerId,
+    moduleId,
+    playerId: player.id,
+    gameKey: 'hangman',
+    fn: async () => {
+      const session = await getHangmanSession(gameServerId, moduleId, player.id);
+      if (session.solved || session.completedAt) throw new TakaroUserError('You already finished today\'s Hangman.');
 
-  const solved = session.solved || puzzle.hangman.split('').every((char) => session.lettersTried.includes(char));
-  if (solved) {
-    session.solved = true;
-    session.completedAt = new Date().toISOString();
-    const basePoints = Math.round(Number(config.pointsHangmanBase) * ((7 - session.wrongCount) / 7));
-    const reward = await awardPoints({
-      gameServerId,
-      moduleId,
-      pog,
-      playerId: player.id,
-      playerName: player.name,
-      config,
-      game: 'hangman',
-      basePoints,
-      context: `wrong=${session.wrongCount}`,
-    });
-    session.lastPoints = reward.actualPoints;
-    await writeVariable(gameServerId, moduleId, HANGMAN_SESSION_KEY, session, player.id);
-    await pog.pm(`🎪 ${maskHangman(puzzle.hangman, session.lettersTried)} SOLVED! +${reward.actualPoints} points${formatMultiplier(reward.multiplier)}.`);
-    console.log(`hangman: solved player=${player.name} answer=${puzzle.hangman} wrong=${session.wrongCount}`);
-    return;
-  }
+      if (attempt.length === 1) {
+        if (session.lettersTried.includes(attempt)) throw new TakaroUserError('You already tried that letter.');
+        session.lettersTried.push(attempt);
+        if (!puzzle.hangman.includes(attempt)) session.wrongCount += 1;
+      } else if (attempt === puzzle.hangman) {
+        for (const char of puzzle.hangman.split('')) {
+          if (!session.lettersTried.includes(char)) session.lettersTried.push(char);
+        }
+        session.solved = true;
+      } else {
+        session.wrongCount = 6;
+        session.completedAt = new Date().toISOString();
+      }
 
-  if (session.wrongCount >= 6) {
-    session.completedAt = new Date().toISOString();
-    const stats = await getPlayerStats(gameServerId, moduleId, player.id);
-    stats.gamesPlayed += 1;
-    stats.perGame.hangman.plays += 1;
-    await Promise.all([
-      setPlayerStats(gameServerId, moduleId, player.id, stats),
-      recordDailySummary({ gameServerId, moduleId, playerId: player.id, game: 'hangman', plays: 1, wins: 0, points: 0 }),
-    ]);
-    await writeVariable(gameServerId, moduleId, HANGMAN_SESSION_KEY, session, player.id);
-    await pog.pm(`🎪 Game over — the word was ${puzzle.hangman.toUpperCase()}.`);
-    console.log(`hangman: failed player=${player.name} answer=${puzzle.hangman}`);
-    return;
-  }
+      const solved = session.solved || puzzle.hangman.split('').every((char) => session.lettersTried.includes(char));
+      if (solved) {
+        session.solved = true;
+        session.completedAt = new Date().toISOString();
+        const basePoints = Math.round(Number(config.pointsHangmanBase) * ((7 - session.wrongCount) / 7));
+        const reward = await awardPoints({
+          gameServerId,
+          moduleId,
+          pog,
+          playerId: player.id,
+          playerName: player.name,
+          config,
+          game: 'hangman',
+          basePoints,
+          context: `wrong=${session.wrongCount}`,
+        });
+        session.lastPoints = reward.actualPoints;
+        await writeVariable(gameServerId, moduleId, HANGMAN_SESSION_KEY, session, player.id);
+        await pog.pm(`🎪 ${maskHangman(puzzle.hangman, session.lettersTried)} SOLVED! +${reward.actualPoints} points${formatMultiplier(reward.multiplier)}.`);
+        console.log(`hangman: solved player=${player.name} answer=${puzzle.hangman} wrong=${session.wrongCount}`);
+        return;
+      }
 
-  await writeVariable(gameServerId, moduleId, HANGMAN_SESSION_KEY, session, player.id);
-  await pog.pm(`🎪 ${maskHangman(puzzle.hangman, session.lettersTried)} (wrong ${session.wrongCount}/6)`);
-  console.log(`hangman: guess player=${player.name} attempt=${attempt} wrong=${session.wrongCount}`);
+      if (session.wrongCount >= 6) {
+        session.completedAt = new Date().toISOString();
+        const stats = await getPlayerStats(gameServerId, moduleId, player.id);
+        stats.gamesPlayed += 1;
+        stats.perGame.hangman.plays += 1;
+        await Promise.all([
+          setPlayerStats(gameServerId, moduleId, player.id, stats),
+          recordDailySummary({ gameServerId, moduleId, playerId: player.id, game: 'hangman', plays: 1, wins: 0, points: 0 }),
+        ]);
+        await writeVariable(gameServerId, moduleId, HANGMAN_SESSION_KEY, session, player.id);
+        await pog.pm(`🎪 Game over — the word was ${puzzle.hangman.toUpperCase()}.`);
+        console.log(`hangman: failed player=${player.name} answer=${puzzle.hangman}`);
+        return;
+      }
+
+      await writeVariable(gameServerId, moduleId, HANGMAN_SESSION_KEY, session, player.id);
+      await pog.pm(`🎪 ${maskHangman(puzzle.hangman, session.lettersTried)} (wrong ${session.wrongCount}/6)`);
+      console.log(`hangman: guess player=${player.name} attempt=${attempt} wrong=${session.wrongCount}`);
+    },
+  });
 }
 
 export async function getHotColdSession(gameServerId, moduleId, playerId) {
@@ -965,63 +1003,73 @@ export async function playHotCold({ gameServerId, moduleId, player, pog, config,
   const puzzle = await getPuzzleToday(gameServerId, moduleId);
   if (!Number.isInteger(puzzle.hotcold)) throw new TakaroUserError('🌡️ Hot/Cold is not ready yet.');
 
-  const session = await getHotColdSession(gameServerId, moduleId, player.id);
   if (number === undefined || number === null || number === '') {
+    const session = await getHotColdSession(gameServerId, moduleId, player.id);
     const trail = session.guesses.length > 0 ? session.guesses.join(', ') : 'No guesses yet.';
     await pog.pm(`🌡️ ${trail} (${8 - session.guesses.length}/8 left)`);
     console.log(`hotcold: status player=${player.name} guesses=${session.guesses.length}`);
     return;
   }
 
-  if (session.solved || session.completedAt) throw new TakaroUserError('You already finished today\'s Hot/Cold puzzle.');
   await requireDailyPuzzleAttempt({ gameServerId, moduleId, playerId: player.id, config });
   const guess = Number(number);
   if (!Number.isInteger(guess) || guess < 1 || guess > 1000) throw new TakaroUserError('Hot/Cold guesses must be an integer from 1 to 1000.');
 
-  const previous = session.guesses.length > 0 ? session.guesses[session.guesses.length - 1] : null;
-  session.guesses.push(guess);
-  const description = describeHotCold(puzzle.hotcold, previous, guess);
+  await withSessionLock({
+    gameServerId,
+    moduleId,
+    playerId: player.id,
+    gameKey: 'hotcold',
+    fn: async () => {
+      const session = await getHotColdSession(gameServerId, moduleId, player.id);
+      if (session.solved || session.completedAt) throw new TakaroUserError('You already finished today\'s Hot/Cold puzzle.');
 
-  if (guess === puzzle.hotcold) {
-    session.solved = true;
-    session.completedAt = new Date().toISOString();
-    const basePoints = Math.round(Number(config.pointsHotColdBase) * ((9 - session.guesses.length) / 8));
-    const reward = await awardPoints({
-      gameServerId,
-      moduleId,
-      pog,
-      playerId: player.id,
-      playerName: player.name,
-      config,
-      game: 'hotcold',
-      basePoints,
-      context: `solved in ${session.guesses.length}`,
-    });
-    session.lastPoints = reward.actualPoints;
-    await writeVariable(gameServerId, moduleId, HOTCOLD_SESSION_KEY, session, player.id);
-    await pog.pm(`🌡️ SOLVED in ${session.guesses.length}! +${reward.actualPoints} points${formatMultiplier(reward.multiplier)}.`);
-    console.log(`hotcold: solved player=${player.name} secret=${puzzle.hotcold} guesses=${session.guesses.length}`);
-    return;
-  }
+      const previous = session.guesses.length > 0 ? session.guesses[session.guesses.length - 1] : null;
+      session.guesses.push(guess);
+      const description = describeHotCold(puzzle.hotcold, previous, guess);
 
-  if (session.guesses.length >= 8) {
-    session.completedAt = new Date().toISOString();
-    const stats = await getPlayerStats(gameServerId, moduleId, player.id);
-    stats.gamesPlayed += 1;
-    stats.perGame.hotcold.plays += 1;
-    await Promise.all([
-      setPlayerStats(gameServerId, moduleId, player.id, stats),
-      recordDailySummary({ gameServerId, moduleId, playerId: player.id, game: 'hotcold', plays: 1, wins: 0, points: 0 }),
-    ]);
-    await writeVariable(gameServerId, moduleId, HOTCOLD_SESSION_KEY, session, player.id);
-    await pog.pm(`🌡️ ${description} Out of guesses — the number was ${puzzle.hotcold}.`);
-    console.log(`hotcold: failed player=${player.name} secret=${puzzle.hotcold}`);
-    return;
-  }
+      if (guess === puzzle.hotcold) {
+        session.solved = true;
+        session.completedAt = new Date().toISOString();
+        const basePoints = Math.round(Number(config.pointsHotColdBase) * ((9 - session.guesses.length) / 8));
+        const reward = await awardPoints({
+          gameServerId,
+          moduleId,
+          pog,
+          playerId: player.id,
+          playerName: player.name,
+          config,
+          game: 'hotcold',
+          basePoints,
+          context: `solved in ${session.guesses.length}`,
+        });
+        session.lastPoints = reward.actualPoints;
+        await writeVariable(gameServerId, moduleId, HOTCOLD_SESSION_KEY, session, player.id);
+        await pog.pm(`🌡️ SOLVED in ${session.guesses.length}! +${reward.actualPoints} points${formatMultiplier(reward.multiplier)}.`);
+        console.log(`hotcold: solved player=${player.name} secret=${puzzle.hotcold} guesses=${session.guesses.length}`);
+        return;
+      }
 
-  await writeVariable(gameServerId, moduleId, HOTCOLD_SESSION_KEY, session, player.id);
-  await pog.pm(`🌡️ ${description} (${8 - session.guesses.length}/8 left)`);
-  console.log(`hotcold: guess player=${player.name} guess=${guess} description=${description}`);
+      if (session.guesses.length >= 8) {
+        session.completedAt = new Date().toISOString();
+        const stats = await getPlayerStats(gameServerId, moduleId, player.id);
+        stats.gamesPlayed += 1;
+        stats.perGame.hotcold.plays += 1;
+        await Promise.all([
+          setPlayerStats(gameServerId, moduleId, player.id, stats),
+          recordDailySummary({ gameServerId, moduleId, playerId: player.id, game: 'hotcold', plays: 1, wins: 0, points: 0 }),
+        ]);
+        await writeVariable(gameServerId, moduleId, HOTCOLD_SESSION_KEY, session, player.id);
+        await pog.pm(`🌡️ ${description} Out of guesses — the number was ${puzzle.hotcold}.`);
+        console.log(`hotcold: failed player=${player.name} secret=${puzzle.hotcold}`);
+        return;
+      }
+
+      await writeVariable(gameServerId, moduleId, HOTCOLD_SESSION_KEY, session, player.id);
+      await pog.pm(`🌡️ ${description} (${8 - session.guesses.length}/8 left)`);
+      console.log(`hotcold: guess player=${player.name} guess=${guess} description=${description}`);
+    },
+  });
 }
 
 export async function getStoredActiveRound(gameServerId, moduleId) {
@@ -1371,18 +1419,34 @@ export async function maybeFireLiveRound({ gameServerId, moduleId, config, force
 }
 
 export async function closeExpiredRound({ gameServerId, moduleId, reason = 'expired' }) {
-  const round = await getStoredActiveRound(gameServerId, moduleId);
-  if (!round) return null;
-  if (reason === 'expired' && new Date(round.expiresAt).getTime() > Date.now()) {
-    return null;
+  const liveRoundLockToken = await acquireLiveRoundLock(gameServerId, moduleId);
+  if (!liveRoundLockToken) return null;
+
+  try {
+    const round = await getStoredActiveRound(gameServerId, moduleId);
+    if (!round) return null;
+    if (reason === 'expired' && new Date(round.expiresAt).getTime() > Date.now()) {
+      return null;
+    }
+
+    const currentRound = await getStoredActiveRound(gameServerId, moduleId);
+    if (!currentRound || !sameRound(currentRound, round)) {
+      return null;
+    }
+
+    const message = reason === 'skipped'
+      ? `⏭️ ${getGameDisplayName(round.game)} was skipped by an admin.`
+      : `⌛ ${getGameDisplayName(round.game)} closed — nobody got it. Answer: ${round.answer}`;
+    await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
+      message,
+      opts: {},
+    });
+    await clearActiveRound(gameServerId, moduleId);
+    console.log(`minigames: live round closed game=${round.game} reason=${reason}`);
+    return round;
+  } finally {
+    await releaseLiveRoundLock(gameServerId, moduleId, liveRoundLockToken);
   }
-  await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-    message: `⌛ ${getGameDisplayName(round.game)} closed — nobody got it. Answer: ${round.answer}`,
-    opts: {},
-  });
-  await clearActiveRound(gameServerId, moduleId);
-  console.log(`minigames: live round closed game=${round.game} reason=${reason}`);
-  return round;
 }
 
 export function getLiveRoundPoints(config, game) {
@@ -1554,7 +1618,16 @@ export async function refreshLeaderboards(gameServerId, moduleId) {
 }
 
 export async function getLeaderboardCache(gameServerId, moduleId) {
-  return readJsonVariable(gameServerId, moduleId, LEADERBOARD_KEY, { topPoints: [], topWordle: [], topHangman: [], topStreak: [], refreshedAt: null }, null);
+  const fallback = { topPoints: [], topWordle: [], topHangman: [], topStreak: [], refreshedAt: null };
+  const cache = await readJsonVariable(gameServerId, moduleId, LEADERBOARD_KEY, fallback, null);
+  if (!cache || typeof cache !== 'object') return clone(fallback);
+  return {
+    topPoints: Array.isArray(cache.topPoints) ? cache.topPoints : [],
+    topWordle: Array.isArray(cache.topWordle) ? cache.topWordle : [],
+    topHangman: Array.isArray(cache.topHangman) ? cache.topHangman : [],
+    topStreak: Array.isArray(cache.topStreak) ? cache.topStreak : [],
+    refreshedAt: cache.refreshedAt || null,
+  };
 }
 
 export function renderLeaderboard(title, entries) {

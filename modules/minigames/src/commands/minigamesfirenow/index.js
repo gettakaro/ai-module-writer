@@ -8,11 +8,15 @@ async function main() {
   const forcedGame = normalizeOptionalStringArg(args.game).toLowerCase() || undefined;
   const validGames = ['trivia', 'scramble', 'mathrace', 'reactionrace'];
   if (forcedGame && !validGames.includes(forcedGame)) {
-    await pog.pm(`Unknown live game "${forcedGame}". Try: ${validGames.join(', ')}.`);
+    const message = `Unknown live game "${forcedGame}". Try: ${validGames.join(', ')}.`;
+    console.log(`minigames: ${message}`);
+    await pog.pm(message);
     return;
   }
   if (forcedGame && !config.games[forcedGame]) {
-    await pog.pm(`${forcedGame} is disabled on this server. Enabled live games: ${validGames.filter((game) => config.games[game]).join(', ') || 'none'}.`);
+    const message = `${forcedGame} is disabled on this server. Enabled live games: ${validGames.filter((game) => config.games[game]).join(', ') || 'none'}.`;
+    console.log(`minigames: ${message}`);
+    await pog.pm(message);
     return;
   }
 
@@ -24,9 +28,11 @@ async function main() {
     ignoreThresholds: true,
   });
   if (!round) {
-    await pog.pm(forcedGame
+    const message = forcedGame
       ? `Could not fire ${forcedGame} right now. Check content banks or clear the active round first.`
-      : 'Could not fire a round right now. Check content banks, enabled games, or clear the active round first.');
+      : 'Could not fire a round right now. Check content banks, enabled games, or clear the active round first.';
+    console.log(`minigames: ${message}`);
+    await pog.pm(message);
     return;
   }
   await pog.pm(`🚀 Fired ${round.game}.`);

@@ -134,8 +134,8 @@
     },
     "minigamestop": {
       "trigger": "minigamestop",
-      "description": "Legacy alias for the mini-games leaderboard command.",
-      "helpText": "Usage: /minigamestop <points|wordle|hangman|streak>",
+      "description": "Deprecated legacy alias for /minigamesleaderboard. Does not stop mini-games.",
+      "helpText": "Deprecated: use /minigamesleaderboard <points|wordle|hangman|streak>",
       "function": "src/commands/minigamestop/index.js",
       "arguments": [
         { "name": "category", "type": "string", "helpText": "points, wordle, hangman, or streak", "position": 0, "defaultValue": "__MINIGAMES_NONE__" }

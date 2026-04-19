@@ -9,6 +9,8 @@ import {
   setCooldownUntil,
   getOnlineNonImmunePlayers,
   computeThreshold,
+  acquireExecutionLock,
+  releaseExecutionLock,
 } from './vote-helpers.js';
 
 async function main() {
@@ -101,58 +103,78 @@ async function main() {
     }
 
     if (elapsedSincePassed >= delay) {
-      console.log(`check-vote: restart delay elapsed (${Math.floor(elapsedSincePassed)}s), executing restart`);
-
-      await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-        message: '[Vote Restart] Restarting now!',
-        opts: {},
-      });
-
-      await setRestartPending(gameServerId, moduleId, {
-        ...restartPending,
-        status: 'executing',
-        attemptedAt: new Date().toISOString(),
-        restartDelay: delay,
-        restartCommand,
-      });
+      const lockToken = await acquireExecutionLock(gameServerId, moduleId, 'restart-execution');
+      if (!lockToken) {
+        console.log('check-vote: restart execution already claimed by another cron run');
+        return;
+      }
 
       try {
-        await takaro.gameserver.gameServerControllerExecuteCommand(gameServerId, {
-          command: restartCommand,
-        });
-        console.log('check-vote: restart command executed successfully');
-        try {
-          await deleteRestartPending(gameServerId, moduleId);
-        } catch (err) {
-          console.error('check-vote: restart executed but failed to delete restartPending', err);
+        const currentPending = await getRestartPending(gameServerId, moduleId);
+        if (!currentPending) {
+          console.log('check-vote: restart-pending disappeared before execution');
+          return;
         }
-        try {
-          await deleteVoteState(gameServerId, moduleId);
-        } catch (err) {
-          console.error('check-vote: restart executed but failed to delete voteState', err);
+        if (currentPending.status === 'executing') {
+          console.log('check-vote: restart already marked executing by another cron run');
+          return;
         }
-      } catch (cmdErr) {
-        console.error(`check-vote: failed to execute restart command "${restartCommand}": ${cmdErr}`);
 
-        const cooldownUntil = new Date(Date.now() + config.cooldownDuration * 1000).toISOString();
-        try {
-          await setCooldownUntil(gameServerId, moduleId, cooldownUntil);
-        } catch (e) {
-          console.error('Failed to set cooldown', e);
-        }
-        try {
-          await Promise.all([
-            deleteVoteState(gameServerId, moduleId),
-            deleteRestartPending(gameServerId, moduleId),
-          ]);
-        } catch (e) {
-          console.error('Failed to delete vote state', e);
-        }
+        console.log(`check-vote: restart delay elapsed (${Math.floor(elapsedSincePassed)}s), executing restart`);
+
+        await setRestartPending(gameServerId, moduleId, {
+          ...currentPending,
+          status: 'executing',
+          attemptedAt: new Date().toISOString(),
+          restartDelay: delay,
+          restartCommand,
+        });
 
         await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-          message: '[Vote Restart] Failed to execute restart command. Please try again later.',
+          message: '[Vote Restart] Restarting now!',
           opts: {},
         });
+
+        try {
+          await takaro.gameserver.gameServerControllerExecuteCommand(gameServerId, {
+            command: restartCommand,
+          });
+          console.log('check-vote: restart command executed successfully');
+          try {
+            await deleteRestartPending(gameServerId, moduleId);
+          } catch (err) {
+            console.error('check-vote: restart executed but failed to delete restartPending', err);
+          }
+          try {
+            await deleteVoteState(gameServerId, moduleId);
+          } catch (err) {
+            console.error('check-vote: restart executed but failed to delete voteState', err);
+          }
+        } catch (cmdErr) {
+          console.error(`check-vote: failed to execute restart command "${restartCommand}": ${cmdErr}`);
+
+          const cooldownUntil = new Date(Date.now() + config.cooldownDuration * 1000).toISOString();
+          try {
+            await setCooldownUntil(gameServerId, moduleId, cooldownUntil);
+          } catch (e) {
+            console.error('Failed to set cooldown', e);
+          }
+          try {
+            await Promise.all([
+              deleteVoteState(gameServerId, moduleId),
+              deleteRestartPending(gameServerId, moduleId),
+            ]);
+          } catch (e) {
+            console.error('Failed to delete vote state', e);
+          }
+
+          await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
+            message: '[Vote Restart] Failed to execute restart command. Please try again later.',
+            opts: {},
+          });
+        }
+      } finally {
+        await releaseExecutionLock(gameServerId, moduleId, lockToken);
       }
     }
   }

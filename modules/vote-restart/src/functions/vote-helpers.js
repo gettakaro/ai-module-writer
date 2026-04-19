@@ -3,6 +3,7 @@ import { takaro, checkPermission } from '@takaro/helpers';
 export const VOTE_STATE_KEY = 'vr_vote_state';
 export const COOLDOWN_KEY = 'vr_cooldown_until';
 export const RESTART_PENDING_KEY = 'vr_restart_pending';
+export const RESTART_EXECUTION_LOCK_KEY = 'vr_restart_execution_lock';
 
 // ── Generic variable CRUD ─────────────────────────────────────────────────────
 
@@ -37,6 +38,34 @@ export async function removeVariable(gameServerId, moduleId, key) {
   if (existing) {
     await takaro.variable.variableControllerDelete(existing.id);
   }
+}
+
+export async function acquireExecutionLock(gameServerId, moduleId, owner = 'restart') {
+  const token = `${owner}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  try {
+    await takaro.variable.variableControllerCreate({
+      key: RESTART_EXECUTION_LOCK_KEY,
+      value: JSON.stringify({ token, owner, createdAt: new Date().toISOString() }),
+      gameServerId,
+      moduleId,
+    });
+    return token;
+  } catch (err) {
+    console.log(`vote-helpers: restart execution lock busy owner=${owner}: ${err}`);
+    return null;
+  }
+}
+
+export async function releaseExecutionLock(gameServerId, moduleId, token) {
+  const existing = await findVariable(gameServerId, moduleId, RESTART_EXECUTION_LOCK_KEY);
+  if (!existing) return;
+  try {
+    const parsed = JSON.parse(existing.value);
+    if (token && parsed?.token && parsed.token !== token) return;
+  } catch {
+    // Best-effort cleanup below.
+  }
+  await takaro.variable.variableControllerDelete(existing.id);
 }
 
 // ── Vote state ────────────────────────────────────────────────────────────────

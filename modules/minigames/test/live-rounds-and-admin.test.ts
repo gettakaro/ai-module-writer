@@ -495,6 +495,27 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
     assert.ok(resetLogs.some((msg) => msg.includes('Usage: /minigamesresetstats <player>')), `expected reset usage log, got ${JSON.stringify(resetLogs)}`);
   });
 
+  it('surfaces ban and unban validation errors for unknown players and invalid durations', async () => {
+    const knownPlayer = (await client.player.playerControllerGetOne(ctx.players[1].playerId)).data.data.name;
+    const invalidDuration = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamesban ${knownPlayer} 0`);
+    const invalidDurationMeta = invalidDuration.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const invalidDurationLogs = (invalidDurationMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(invalidDurationMeta?.result?.success, false, 'zero-hour bans should fail');
+    assert.ok(invalidDurationLogs.some((msg) => msg.includes('positive number')), `expected invalid-duration guidance, got ${JSON.stringify(invalidDurationLogs)}`);
+
+    const unknownBan = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamesban definitely-not-a-real-player 1`);
+    const unknownBanMeta = unknownBan.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const unknownBanLogs = (unknownBanMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(unknownBanMeta?.result?.success, false, 'unknown ban target should fail');
+    assert.ok(unknownBanLogs.some((msg) => msg.includes('not found')), `expected unknown-player ban guidance, got ${JSON.stringify(unknownBanLogs)}`);
+
+    const unknownUnban = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamesunban definitely-not-a-real-player`);
+    const unknownUnbanMeta = unknownUnban.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const unknownUnbanLogs = (unknownUnbanMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(unknownUnbanMeta?.result?.success, false, 'unknown unban target should fail');
+    assert.ok(unknownUnbanLogs.some((msg) => msg.includes('not found')), `expected unknown-player unban guidance, got ${JSON.stringify(unknownUnbanLogs)}`);
+  });
+
   it('accepts multi-word /answer responses for trivia rounds', async () => {
     await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE, {
       game: 'trivia',

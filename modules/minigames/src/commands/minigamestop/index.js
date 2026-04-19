@@ -19,7 +19,7 @@ async function main() {
   };
   const selected = map[category];
   if (!selected) throw new TakaroUserError('Category must be one of: points, wordle, hangman, streak.');
-  const message = renderLeaderboard(selected[0], selected[1]);
+  const message = `⚠️ /minigamestop is deprecated and only shows leaderboards. Use /minigamesleaderboard instead.\n${renderLeaderboard(selected[0], selected[1])}`;
   await pog.pm(message);
   console.log(`minigames: leaderboard category=${category} summary=${message.replace(/\n/g, ' | ')}`);
 }

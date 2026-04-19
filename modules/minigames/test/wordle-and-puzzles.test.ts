@@ -174,6 +174,73 @@ describe('minigames: daily puzzles and wordle scoring', () => {
     assert.equal(meta?.result?.success, false, 'invalid word should fail');
   });
 
+  it('covers daily-puzzle validation branches for malformed, duplicate, and exhausted submissions', async () => {
+    const malformedWordle = await triggerCommand(ctx.players[0].playerId, `${prefix}wordle toolong`);
+    const malformedWordleMeta = malformedWordle.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(malformedWordleMeta?.result?.success, false, 'malformed wordle guess should fail');
+    assert.ok((malformedWordleMeta?.result?.logs ?? []).some((entry) => entry.msg.includes('exactly 5 letters')), 'expected exact-length guidance for malformed wordle');
+
+    await upsertVariable(client, ctx.gameServer.id, moduleId, 'minigames_session_wordle', {
+      guesses: ['crane'],
+      solved: false,
+      completedAt: null,
+      lastPoints: 0,
+    }, ctx.players[0].playerId);
+    const duplicateWordle = await triggerCommand(ctx.players[0].playerId, `${prefix}wordle crane`);
+    const duplicateWordleMeta = duplicateWordle.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(duplicateWordleMeta?.result?.success, false, 'duplicate wordle guess should fail');
+    assert.ok((duplicateWordleMeta?.result?.logs ?? []).some((entry) => entry.msg.includes('already guessed that word')), 'expected duplicate-wordle guidance');
+
+    await upsertVariable(client, ctx.gameServer.id, moduleId, 'minigames_session_wordle', {
+      guesses: ['aaaaa', 'bbbbb', 'ccccc', 'ddddd', 'eeeee', 'fffff'],
+      solved: false,
+      completedAt: null,
+      lastPoints: 0,
+    }, ctx.players[0].playerId);
+    const exhaustedWordle = await triggerCommand(ctx.players[0].playerId, `${prefix}wordle crane`);
+    const exhaustedWordleMeta = exhaustedWordle.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(exhaustedWordleMeta?.result?.success, false, 'exhausted wordle should fail');
+    assert.ok((exhaustedWordleMeta?.result?.logs ?? []).some((entry) => entry.msg.includes('used all 6 Wordle guesses')), 'expected exhausted-wordle guidance');
+
+    await upsertVariable(client, ctx.gameServer.id, moduleId, 'minigames_session_hangman', {
+      lettersTried: [],
+      wrongCount: 0,
+      solved: false,
+      completedAt: null,
+      lastPoints: 0,
+    }, ctx.players[0].playerId);
+    const invalidHangman = await triggerCommand(ctx.players[0].playerId, `${prefix}hangman 7`);
+    const invalidHangmanMeta = invalidHangman.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(invalidHangmanMeta?.result?.success, false, 'non-letter hangman guess should fail');
+    assert.ok((invalidHangmanMeta?.result?.logs ?? []).some((entry) => entry.msg.includes('letters only')), 'expected non-letter hangman guidance');
+
+    await upsertVariable(client, ctx.gameServer.id, moduleId, 'minigames_session_hangman', {
+      lettersTried: ['t'],
+      wrongCount: 0,
+      solved: false,
+      completedAt: null,
+      lastPoints: 0,
+    }, ctx.players[0].playerId);
+    const duplicateHangman = await triggerCommand(ctx.players[0].playerId, `${prefix}hangman t`);
+    const duplicateHangmanMeta = duplicateHangman.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(duplicateHangmanMeta?.result?.success, false, 'duplicate hangman letter should fail');
+    assert.ok((duplicateHangmanMeta?.result?.logs ?? []).some((entry) => entry.msg.includes('already tried that letter')), 'expected duplicate-letter hangman guidance');
+
+    const invalidHotCold = await triggerCommand(ctx.players[0].playerId, `${prefix}hotcold 1001`);
+    const invalidHotColdMeta = invalidHotCold.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(invalidHotColdMeta?.result?.success, false, 'out-of-range hotcold guess should fail');
+    assert.ok((invalidHotColdMeta?.result?.logs ?? []).some((entry) => entry.msg.includes('integer from 1 to 1000')), 'expected hotcold range guidance');
+
+    await client.variable.variableControllerSearch({
+      filters: {
+        key: ['minigames_session_wordle', 'minigames_session_hangman'],
+        gameServerId: [ctx.gameServer.id],
+        moduleId: [moduleId],
+        playerId: [ctx.players[0].playerId],
+      },
+    }).then(async (res) => Promise.all(res.data.data.map((entry) => client.variable.variableControllerDelete(entry.id))));
+  });
+
   it('awards boosted wordle points, history, and a big-score event on solve', async () => {
     const event = await triggerCommand(ctx.players[1].playerId, `${prefix}wordle crane`);
     const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
