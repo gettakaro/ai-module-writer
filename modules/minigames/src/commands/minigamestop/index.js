@@ -1,4 +1,4 @@
-import { data } from '@takaro/helpers';
+import { data, TakaroUserError } from '@takaro/helpers';
 import { getLeaderboardCache, refreshLeaderboards, renderLeaderboard, requirePlayable, normalizeOptionalStringArg } from './minigames-helpers.js';
 
 async function main() {
@@ -6,12 +6,7 @@ async function main() {
   const moduleId = mod.moduleId;
   await requirePlayable({ gameServerId, moduleId, pog, playerId: player.id });
   const category = normalizeOptionalStringArg(args.category).toLowerCase();
-  if (!category) {
-    const message = '⚠️ /minigamestop does not stop live rounds. Use /minigamesskiproundnow to cancel the active round, or /minigamesleaderboard <points|wordle|hangman|streak> for leaderboards.';
-    await pog.pm(message);
-    console.log(`minigames: legacy stop guidance=${message}`);
-    return;
-  }
+  if (!category) throw new TakaroUserError('Usage: /minigamestop <points|wordle|hangman|streak>');
 
   let cache = await getLeaderboardCache(gameServerId, moduleId);
   if (!cache.refreshedAt) cache = await refreshLeaderboards(gameServerId, moduleId);
@@ -24,7 +19,7 @@ async function main() {
   };
   const selected = map[category];
   if (!selected) throw new TakaroUserError('Category must be one of: points, wordle, hangman, streak.');
-  const message = `⚠️ /minigamestop is deprecated and only shows leaderboards. Use /minigamesleaderboard instead.\n${renderLeaderboard(selected[0], selected[1])}`;
+  const message = renderLeaderboard(selected[0], selected[1]);
   await pog.pm(message);
   console.log(`minigames: leaderboard category=${category} summary=${message.replace(/\n/g, ' | ')}`);
 }

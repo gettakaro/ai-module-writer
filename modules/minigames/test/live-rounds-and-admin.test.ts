@@ -2,7 +2,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { Client, EventSearchInputAllowedFiltersEventNameEnum } from '@takaro/apiclient';
+import { Client, EventOutputDTO, EventSearchInputAllowedFiltersEventNameEnum } from '@takaro/apiclient';
 import { createClient } from '../../../test/helpers/client.js';
 import { startMockServer, stopMockServer, MockServerContext } from '../../../test/helpers/mock-server.js';
 import { waitForEvent } from '../../../test/helpers/events.js';
@@ -198,6 +198,28 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
     const stats = await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[1].playerId);
     assert.equal(stats.perGame.scramble.wins, 1);
     assert.equal(stats.totalPoints, 40);
+  });
+
+  it('fires a scheduled live round through the cron path and updates last-fired bookkeeping', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_LAST, { firedAt: '2000-01-01T00:00:00.000Z' });
+    const existing = await client.variable.variableControllerSearch({
+      filters: { key: [KEY_ACTIVE], gameServerId: [ctx.gameServer.id], moduleId: [moduleId] },
+    });
+    if (existing.data.data[0]) {
+      await client.variable.variableControllerDelete(existing.data.data[0].id);
+    }
+
+    const fireEvent = await triggerCron(fireCronId);
+    const fireMeta = fireEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const fireLogs = (fireMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(fireMeta?.result?.success, true, `scheduled fire should succeed, logs=${JSON.stringify(fireLogs)}`);
+    assert.ok(fireLogs.some((msg) => msg.includes('live round fired game=')), `expected scheduled fire log, got ${JSON.stringify(fireLogs)}`);
+
+    const round = await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE);
+    const lastFired = await readVariable(client, ctx.gameServer.id, moduleId, KEY_LAST);
+    assert.ok(round?.game, `expected an active round after scheduled fire, got ${JSON.stringify(round)}`);
+    assert.equal(lastFired?.game, round.game, `expected last-fired marker to match active round, got ${JSON.stringify(lastFired)}`);
+    assert.ok(lastFired?.firedAt, 'expected last-fired bookkeeping timestamp to be written');
   });
 
   it('refreshes leaderboard cache and serves top points through both leaderboard commands', async () => {
@@ -451,7 +473,7 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
     const after = new Date();
     await ctx.server.executeConsoleCommand('disconnectAll');
 
-    let matchingEvent: { meta?: { result?: { success?: boolean; logs?: Array<{ msg: string }> } } } | null = null;
+    let matchingEvent: EventOutputDTO | null = null;
     for (let attempt = 0; attempt < 20; attempt++) {
       const events = await client.event.eventControllerSearch({
         filters: {
@@ -463,10 +485,11 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
         sortBy: 'createdAt',
         limit: 20,
       });
-      matchingEvent = events.data.data.find((entry) => {
+      const found = events.data.data.find((entry) => {
         const meta = entry.meta as { result?: { logs?: Array<{ msg: string }> } } | undefined;
         return (meta?.result?.logs ?? []).some((log) => log.msg.includes('disconnect hook handled player-disconnected'));
-      }) as typeof matchingEvent;
+      });
+      matchingEvent = found ?? null;
       if (matchingEvent) break;
       await new Promise((resolve) => setTimeout(resolve, 500));
     }

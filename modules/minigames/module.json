@@ -47,6 +47,16 @@
     "additionalProperties": false
   },
   "uiSchema": {},
+  "systemConfig": {
+    "cronJobs": {
+      "rolloverDailyPuzzles": { "temporalValue": "0 0 * * *" },
+      "fireLiveRound": { "temporalValue": "*/5 * * * *" },
+      "closeLiveRound": { "temporalValue": "* * * * *" },
+      "refreshLeaderboards": { "temporalValue": "*/5 * * * *" },
+      "expireWindows": { "temporalValue": "0 0 * * *" },
+      "expireBans": { "temporalValue": "0 * * * *" }
+    }
+  },
   "permissions": [
     {
       "permission": "MINIGAMES_PLAY",
@@ -141,8 +151,8 @@
     },
     "minigamestop": {
       "trigger": "minigamestop",
-      "description": "Deprecated legacy command. Use /minigamesskiproundnow to stop a live round or /minigamesleaderboard for rankings.",
-      "helpText": "Deprecated: /minigamestop does not stop rounds. Use /minigamesskiproundnow or /minigamesleaderboard <points|wordle|hangman|streak>",
+      "description": "View cached mini-games leaderboards.",
+      "helpText": "Usage: /minigamestop <points|wordle|hangman|streak>",
       "function": "src/commands/minigamestop/index.js",
       "arguments": [
         { "name": "category", "type": "string", "helpText": "points, wordle, hangman, or streak", "position": 0, "defaultValue": "__MINIGAMES_NONE__" }
@@ -150,7 +160,7 @@
     },
     "minigamesleaderboard": {
       "trigger": "minigamesleaderboard",
-      "description": "View cached mini-games leaderboards.",
+      "description": "Legacy alias for /minigamestop.",
       "helpText": "Usage: /minigamesleaderboard <points|wordle|hangman|streak>",
       "function": "src/commands/minigamesleaderboard/index.js",
       "arguments": [

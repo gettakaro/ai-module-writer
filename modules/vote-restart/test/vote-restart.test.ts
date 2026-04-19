@@ -687,10 +687,10 @@ describe('vote-restart recovery and hardening', () => {
     );
   });
 
-  it('does not re-execute a restart when restart-pending is already marked executing', async () => {
+  it('does not re-execute a restart while a fresh execution attempt is still in progress', async () => {
     await upsertVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_vote_state', {
       startedAt: new Date(Date.now() - 60 * 1000).toISOString(),
-      initiatorName: 'CleanupOnly',
+      initiatorName: 'InFlight',
       voters: [ctx4.players[0].playerId],
       status: 'passed',
       passedAt: new Date(Date.now() - 30 * 1000).toISOString(),
@@ -699,19 +699,106 @@ describe('vote-restart recovery and hardening', () => {
       status: 'executing',
       passedAt: new Date(Date.now() - 30 * 1000).toISOString(),
       attemptedAt: new Date(Date.now() - 20 * 1000).toISOString(),
-      initiatorName: 'CleanupOnly',
+      initiatorName: 'InFlight',
       restartDelay: 0,
       restartCommand: 'say restart-test',
     });
 
     const { success, logs } = await triggerCronjob4();
-    assert.equal(success, true, `Expected cleanup-only cronjob success, logs: ${JSON.stringify(logs)}`);
+    assert.equal(success, true, `Expected in-flight cronjob success, logs: ${JSON.stringify(logs)}`);
     assert.ok(
-      logs.some((l) => l.includes('restart already issued previously, retrying cleanup only')),
-      `Expected cleanup-only log branch, got: ${JSON.stringify(logs)}`,
+      logs.some((l) => l.includes('restart execution is already in progress elsewhere')),
+      `Expected in-flight execution guard log, got: ${JSON.stringify(logs)}`,
     );
-    assert.equal(await readVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_vote_state'), null, 'vote state should be cleaned up after executing marker');
-    assert.equal(await readVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_pending'), null, 'restart-pending should be cleaned up after executing marker');
+    assert.ok(await readVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_vote_state'), 'vote state should be preserved while execution is in progress');
+    assert.ok(await readVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_pending'), 'restart-pending should be preserved while execution is in progress');
+  });
+
+  it('retries a stale executing restart marker instead of dropping the passed vote', async () => {
+    await upsertVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_vote_state', {
+      startedAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      initiatorName: 'RetryMe',
+      voters: [ctx4.players[0].playerId],
+      status: 'passed',
+      passedAt: new Date(Date.now() - 4 * 60 * 1000).toISOString(),
+    });
+    await upsertVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_pending', {
+      status: 'executing',
+      passedAt: new Date(Date.now() - 4 * 60 * 1000).toISOString(),
+      attemptedAt: new Date(Date.now() - 3 * 60 * 1000).toISOString(),
+      initiatorName: 'RetryMe',
+      restartDelay: 0,
+      restartCommand: 'say restart-test',
+    });
+
+    const { success, logs } = await triggerCronjob4();
+    assert.equal(success, true, `Expected stale-executing cronjob success, logs: ${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((l) => l.includes('restart command executed successfully')),
+      `Expected stale executing marker to retry the restart command, got: ${JSON.stringify(logs)}`,
+    );
+    assert.equal(await readVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_vote_state'), null, 'vote state should be cleaned up after the retried restart executes');
+    assert.equal(await readVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_pending'), null, 'restart-pending should be cleaned up after the retried restart executes');
+  });
+
+  it('reaps corrupt or stale execution locks before issuing the restart command', async () => {
+    await upsertVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_vote_state', {
+      startedAt: new Date(Date.now() - 60 * 1000).toISOString(),
+      initiatorName: 'LockRecovery',
+      voters: [ctx4.players[0].playerId],
+      status: 'passed',
+      passedAt: new Date(Date.now() - 30 * 1000).toISOString(),
+    });
+    await upsertVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_pending', {
+      status: 'passed',
+      passedAt: new Date(Date.now() - 30 * 1000).toISOString(),
+      initiatorName: 'LockRecovery',
+      restartDelay: 0,
+      restartCommand: 'say restart-test',
+    });
+    await upsertVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_execution_lock', '{not-json');
+
+    const { success, logs } = await triggerCronjob4();
+    assert.equal(success, true, `Expected corrupt-lock cronjob success, logs: ${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((l) => l.includes('failed to parse restart execution lock') || l.includes('reaped stale restart execution lock')),
+      `Expected corrupt/stale lock recovery log, got: ${JSON.stringify(logs)}`,
+    );
+    assert.ok(
+      logs.some((l) => l.includes('restart command executed successfully')),
+      `Expected restart command execution after lock recovery, got: ${JSON.stringify(logs)}`,
+    );
+  });
+
+  it('leaves the passed vote pending when another cron run owns the execution lock', async () => {
+    await upsertVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_vote_state', {
+      startedAt: new Date(Date.now() - 60 * 1000).toISOString(),
+      initiatorName: 'BusyLock',
+      voters: [ctx4.players[0].playerId],
+      status: 'passed',
+      passedAt: new Date(Date.now() - 30 * 1000).toISOString(),
+    });
+    await upsertVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_pending', {
+      status: 'passed',
+      passedAt: new Date(Date.now() - 30 * 1000).toISOString(),
+      initiatorName: 'BusyLock',
+      restartDelay: 0,
+      restartCommand: 'say restart-test',
+    });
+    await upsertVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_execution_lock', {
+      token: 'other-run',
+      owner: 'concurrent-cron',
+      createdAt: new Date().toISOString(),
+    });
+
+    const { success, logs } = await triggerCronjob4();
+    assert.equal(success, true, `Expected busy-lock cronjob success, logs: ${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((l) => l.includes('restart execution already claimed by another cron run')),
+      `Expected busy-lock guard log, got: ${JSON.stringify(logs)}`,
+    );
+    assert.ok(await readVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_vote_state'), 'vote state should remain pending when another cron run owns the lock');
+    assert.ok(await readVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_pending'), 'restart-pending should remain pending when another cron run owns the lock');
   });
 });
 

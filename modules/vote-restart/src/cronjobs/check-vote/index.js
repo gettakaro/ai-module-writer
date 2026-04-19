@@ -13,6 +13,26 @@ import {
   releaseExecutionLock,
 } from './vote-helpers.js';
 
+const EXECUTING_STALE_MS = 2 * 60 * 1000;
+
+function isFreshExecutingAttempt(restartPending) {
+  const attemptedAt = new Date(restartPending?.attemptedAt || 0).getTime();
+  return Boolean(attemptedAt) && (Date.now() - attemptedAt) < EXECUTING_STALE_MS;
+}
+
+async function cleanupRestartState(gameServerId, moduleId, context) {
+  try {
+    await deleteRestartPending(gameServerId, moduleId);
+  } catch (err) {
+    console.error(`check-vote: failed to clean up restartPending after ${context}`, err);
+  }
+  try {
+    await deleteVoteState(gameServerId, moduleId);
+  } catch (err) {
+    console.error(`check-vote: failed to clean up voteState after ${context}`, err);
+  }
+}
+
 async function main() {
   const { gameServerId, module: mod } = data;
   const config = mod.userConfig;
@@ -86,18 +106,14 @@ async function main() {
     const restartCommand = restartPending.restartCommand || config.restartCommand;
     const elapsedSincePassed = (Date.now() - new Date(restartPending.passedAt).getTime()) / 1000;
 
-    if (restartPending.status === 'executing') {
+    if (restartPending.status === 'executed') {
       console.log('check-vote: restart already issued previously, retrying cleanup only');
-      try {
-        await deleteRestartPending(gameServerId, moduleId);
-      } catch (err) {
-        console.error('check-vote: failed to clean up restartPending after previously issued restart', err);
-      }
-      try {
-        await deleteVoteState(gameServerId, moduleId);
-      } catch (err) {
-        console.error('check-vote: failed to clean up voteState after previously issued restart', err);
-      }
+      await cleanupRestartState(gameServerId, moduleId, 'previously issued restart');
+      return;
+    }
+
+    if (restartPending.status === 'executing' && isFreshExecutingAttempt(restartPending)) {
+      console.log('check-vote: restart execution is already in progress elsewhere');
       return;
     }
 
@@ -114,27 +130,23 @@ async function main() {
           console.log('check-vote: restart-pending disappeared before execution');
           return;
         }
-        if (currentPending.status === 'executing') {
+        if (currentPending.status === 'executed') {
           console.log('check-vote: restart already issued previously, retrying cleanup only');
-          try {
-            await deleteRestartPending(gameServerId, moduleId);
-          } catch (err) {
-            console.error('check-vote: failed to clean up restartPending after concurrently observed executing marker', err);
-          }
-          try {
-            await deleteVoteState(gameServerId, moduleId);
-          } catch (err) {
-            console.error('check-vote: failed to clean up voteState after concurrently observed executing marker', err);
-          }
+          await cleanupRestartState(gameServerId, moduleId, 'concurrently observed executed marker');
+          return;
+        }
+        if (currentPending.status === 'executing' && isFreshExecutingAttempt(currentPending)) {
+          console.log('check-vote: restart execution already claimed by another cron run');
           return;
         }
 
         console.log(`check-vote: restart delay elapsed (${Math.floor(elapsedSincePassed)}s), executing restart`);
 
+        const attemptedAt = new Date().toISOString();
         await setRestartPending(gameServerId, moduleId, {
           ...currentPending,
           status: 'executing',
-          attemptedAt: new Date().toISOString(),
+          attemptedAt,
           restartDelay: delay,
           restartCommand,
         });
@@ -149,16 +161,15 @@ async function main() {
             command: restartCommand,
           });
           console.log('check-vote: restart command executed successfully');
-          try {
-            await deleteRestartPending(gameServerId, moduleId);
-          } catch (err) {
-            console.error('check-vote: restart executed but failed to delete restartPending', err);
-          }
-          try {
-            await deleteVoteState(gameServerId, moduleId);
-          } catch (err) {
-            console.error('check-vote: restart executed but failed to delete voteState', err);
-          }
+          await setRestartPending(gameServerId, moduleId, {
+            ...currentPending,
+            status: 'executed',
+            attemptedAt,
+            executedAt: new Date().toISOString(),
+            restartDelay: delay,
+            restartCommand,
+          });
+          await cleanupRestartState(gameServerId, moduleId, 'successful restart execution');
         } catch (cmdErr) {
           console.error(`check-vote: failed to execute restart command "${restartCommand}": ${cmdErr}`);
 

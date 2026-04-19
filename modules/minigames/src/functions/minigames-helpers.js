@@ -495,30 +495,26 @@ export async function emitBigScoreEvent({ gameServerId, moduleId, playerId, play
     context: context || null,
     emittedAt: new Date().toISOString(),
   };
+  const basePayload = {
+    eventName: BIG_SCORE_EVENT_NAME,
+    gameserverId: gameServerId,
+    moduleId,
+    playerId,
+    actingModuleId: moduleId,
+    meta,
+  };
 
   const attempts = [
-    async () => takaro.event?.eventControllerCreate?.({
-      eventName: BIG_SCORE_EVENT_NAME,
-      gameserverId: gameServerId,
-      moduleId,
-      playerId,
-      actingModuleId: moduleId,
-      meta,
-    }),
-    async () => takaro.axios?.post?.('/event', {
-      eventName: BIG_SCORE_EVENT_NAME,
-      gameserverId: gameServerId,
-      moduleId,
-      playerId,
-      actingModuleId: moduleId,
-      meta,
-    }),
+    async () => takaro.event?.eventControllerCreate?.(basePayload),
+    async () => takaro.axios?.post?.('/event', basePayload),
+    async () => takaro.axios?.post?.('/event', { ...basePayload, gameServerId }),
+    async () => takaro.axios?.post?.('/events', basePayload),
   ];
 
   for (const [index, attempt] of attempts.entries()) {
     try {
       const result = await attempt();
-      if (result === undefined) continue;
+      if (result === undefined || result === null) continue;
       console.log(`minigames: emitted ${BIG_SCORE_EVENT_NAME} player=${playerName} game=${game} points=${points} attempt=${index + 1}`);
       return true;
     } catch (err) {
@@ -624,7 +620,22 @@ export function formatMultiplier(multiplier) {
 export async function getPuzzleToday(gameServerId, moduleId) {
   const today = getTodayUtcDate();
   const puzzle = await readJsonVariable(gameServerId, moduleId, PUZZLE_TODAY_KEY, { date: today }, null);
-  if (puzzle.date !== today) return { date: today };
+  const stale = puzzle.date !== today;
+  const needsHotColdSeed = !Number.isInteger(puzzle.hotcold);
+  if (stale || needsHotColdSeed) {
+    return rolloverDailyPuzzles(gameServerId, moduleId);
+  }
+
+  if (!puzzle.wordle || !puzzle.hangman) {
+    const [wordleWords, wordlist] = await Promise.all([
+      getWordleBank(gameServerId, moduleId),
+      getWordlistBank(gameServerId, moduleId),
+    ]);
+    if ((!puzzle.wordle && wordleWords.length > 0) || (!puzzle.hangman && wordlist.length > 0)) {
+      return rolloverDailyPuzzles(gameServerId, moduleId);
+    }
+  }
+
   return puzzle;
 }
 
@@ -686,14 +697,15 @@ export async function warnEmptyBanks(gameServerId, moduleId, keys) {
   if (freshKeys.length === 0) return;
   effective.keys.push(...freshKeys);
   await writeVariable(gameServerId, moduleId, WARNINGS_KEY, effective);
-  const adminDescriptions = {
-    [CONTENT_WORDLE_KEY]: 'Wordle words (Variables → minigames_content_wordle.words)',
-    [CONTENT_WORDLIST_KEY]: 'Hangman/Scramble word list (Variables → minigames_content_wordlist.words)',
-    [CONTENT_TRIVIA_KEY]: 'custom trivia questions (Variables → minigames_content_trivia.questions)',
+  const variableKeyDescriptions = {
+    [CONTENT_WORDLE_KEY]: 'minigames_content_wordle.words',
+    [CONTENT_WORDLIST_KEY]: 'minigames_content_wordlist.words',
+    [CONTENT_TRIVIA_KEY]: 'minigames_content_trivia.questions',
   };
-  console.log(`minigames: missing content banks ${freshKeys.map((key) => adminDescriptions[key] || key).join('; ')}`);
+  const describedKeys = freshKeys.map((key) => variableKeyDescriptions[key] || key);
+  console.log(`minigames: missing content banks ${describedKeys.join('; ')}`);
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-    message: '⚠️ Some mini-games are temporarily unavailable because their content has not been configured yet. An admin has been notified.',
+    message: `⚠️ miniGames content is missing for: ${describedKeys.join(', ')}. Seed those Variables keys to enable the affected games.`,
     opts: {},
   });
 }
@@ -1764,31 +1776,45 @@ export async function ensureBanMarkerPermissionRole(playerId, gameServerId) {
   }
 }
 
-export async function removeBanMarkerRole({ roleId, playerId, gameServerId }) {
+export async function removeBanMarkerRole({ roleId, playerId, gameServerId, strict = false }) {
   let role = null;
+  let lookupError = null;
   try {
     if (roleId) {
       const roleRes = await takaro.role.roleControllerGetOne(roleId);
       role = roleRes.data.data || null;
     }
   } catch (err) {
+    lookupError = err;
     console.log(`minigames: could not fetch ban marker role ${roleId}. Error: ${err}`);
   }
 
   if (!role && playerId && gameServerId) {
-    const roleName = getBanMarkerRoleName(playerId, gameServerId);
-    const roles = await takaro.role.roleControllerSearch({ search: { name: [roleName] } });
-    role = roles.data.data.find((entry) => entry.name === roleName) || null;
+    try {
+      const roleName = getBanMarkerRoleName(playerId, gameServerId);
+      const roles = await takaro.role.roleControllerSearch({ search: { name: [roleName] } });
+      role = roles.data.data.find((entry) => entry.name === roleName) || null;
+    } catch (err) {
+      lookupError = err;
+      console.error(`minigames: failed to search for scoped ban marker role player=${playerId}. Error: ${err}`);
+    }
   }
 
-  if (!role) return;
-
-  try {
-    if (playerId && gameServerId) {
-      await takaro.player.playerControllerRemoveRole(playerId, role.id, { gameServerId });
+  if (!role) {
+    if (strict && roleId) {
+      throw new Error(`Unable to resolve ban marker role ${roleId}${lookupError ? `: ${lookupError}` : ''}`);
     }
-  } catch (err) {
-    console.error(`minigames: failed to remove ban marker assignment role=${role.id} player=${playerId}. Error: ${err}`);
+    return false;
+  }
+
+  if (playerId && gameServerId) {
+    try {
+      await takaro.player.playerControllerRemoveRole(playerId, role.id, { gameServerId });
+    } catch (err) {
+      console.error(`minigames: failed to remove ban marker assignment role=${role.id} player=${playerId}. Error: ${err}`);
+      if (strict) throw err;
+      return false;
+    }
   }
 
   const expectedScopedName = playerId && gameServerId ? getBanMarkerRoleName(playerId, gameServerId) : null;
@@ -1797,8 +1823,12 @@ export async function removeBanMarkerRole({ roleId, playerId, gameServerId }) {
       await takaro.role.roleControllerRemove(role.id);
     } catch (err) {
       console.error(`minigames: failed to remove scoped ban marker role ${role.id}. Error: ${err}`);
+      if (strict) throw err;
+      return false;
     }
   }
+
+  return true;
 }
 
 export async function banPlayer({ gameServerId, moduleId, targetName, hours }) {
@@ -1822,8 +1852,17 @@ export async function unbanPlayer({ gameServerId, moduleId, targetName }) {
   const target = await findPlayerByName(resolvedTarget, gameServerId);
   if (!target) throw new TakaroUserError(`Player "${resolvedTarget}" not found.`);
   const existing = await readJsonVariable(gameServerId, moduleId, BAN_KEY, null, target.id);
+  try {
+    if (existing?.roleId) {
+      await removeBanMarkerRole({ roleId: existing.roleId, playerId: target.id, gameServerId, strict: true });
+    } else {
+      await removeBanMarkerRole({ playerId: target.id, gameServerId });
+    }
+  } catch (err) {
+    console.error(`minigames: failed to fully remove ban marker for ${target.name}. Error: ${err}`);
+    throw new TakaroUserError(`Could not fully unban ${target.name}. The MINIGAMES_BANNED marker could not be removed, so the ban record was kept.`);
+  }
   const removed = await deleteVariable(gameServerId, moduleId, BAN_KEY, target.id);
-  await removeBanMarkerRole({ roleId: existing?.roleId, playerId: target.id, gameServerId });
   console.log(`minigames: unbanned player=${target.name} removed=${removed}`);
   return { target, removed };
 }
@@ -1936,7 +1975,7 @@ export async function buildReport(gameServerId, moduleId, days) {
 
   const perGame = Object.keys(DEFAULT_STATS.perGame).map((game) => {
     const summary = aggregate.perGame[game];
-    return `${game}: ${summary.points} pts / ${summary.plays} plays / ${summary.wins} wins`;
+    return `${getGameDisplayName(game)}: ${summary.points} pts / ${summary.plays} plays / ${summary.wins} wins`;
   });
 
   return [`miniGames report (${safeDays}d window)`, `Rounds: ${aggregate.gamesPlayed}`, `Points awarded: ${aggregate.totalPoints}`, 'Top 5:', ...(topLines.length > 0 ? topLines : ['No data yet.']), 'Per-game:', ...perGame].join('\n');
