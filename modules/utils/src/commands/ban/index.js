@@ -1,11 +1,11 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
   extractReason,
+  getCommandTargetPlayer,
   getPlayerName,
   normalizeReason,
   parseBanDurationToken,
   renderTemplate,
-  resolvePlayerOnGameServer,
   safeBroadcast,
   safePrivateMessage,
 } from './utils-helpers.js';
@@ -17,12 +17,7 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const targetNameInput = args.player;
-  if (!targetNameInput) {
-    throw new TakaroUserError('Please specify a valid player to ban.');
-  }
-
-  const target = await resolvePlayerOnGameServer(gameServerId, targetNameInput);
+  const target = getCommandTargetPlayer(args.player);
   if (!target) {
     throw new TakaroUserError('Please specify a valid player to ban.');
   }
@@ -36,11 +31,11 @@ async function main() {
     throw new TakaroUserError('Invalid duration. Use perm/permanent or a value like 10m, 12h, 7d, or 2w.');
   }
 
-  const reason = normalizeReason(extractReason(args.reason, chatMessage, [target.name, args.duration]), 'Banned by an admin.');
   const [adminName, targetName] = await Promise.all([
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),
   ]);
+  const reason = normalizeReason(extractReason(args.reason, chatMessage, [targetName, args.duration]), 'Banned by an admin.');
 
   const payload = {
     reason,

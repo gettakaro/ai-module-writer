@@ -1,8 +1,8 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
+  getCommandTargetPlayer,
   getPlayerName,
   renderTemplate,
-  resolvePlayerOnGameServer,
   safeBroadcast,
   safeDirectMessage,
   safePrivateMessage,
@@ -15,15 +15,14 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const targetNameInput = args.player;
+  const target = getCommandTargetPlayer(args.player);
   const amount = args.amount;
 
-  if (!targetNameInput || !Number.isInteger(amount) || amount <= 0) {
-    throw new TakaroUserError('Usage: /givecurrency <player> <amount> — Amount must be a positive whole number.');
+  if (!target) {
+    throw new TakaroUserError('Please specify a valid player to receive currency.');
   }
 
-  const target = await resolvePlayerOnGameServer(gameServerId, targetNameInput);
-  if (!target) {
+  if (!Number.isInteger(amount) || amount <= 0) {
     throw new TakaroUserError('Usage: /givecurrency <player> <amount> — Amount must be a positive whole number.');
   }
 

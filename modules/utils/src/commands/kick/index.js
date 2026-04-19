@@ -1,11 +1,11 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
   extractReason,
+  getCommandTargetPlayer,
   getPlayerName,
   isPlayerOnlineHere,
   normalizeReason,
   renderTemplate,
-  resolvePlayerOnGameServer,
   safeBroadcast,
   safePrivateMessage,
 } from './utils-helpers.js';
@@ -17,12 +17,7 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const targetNameInput = args.player;
-  if (!targetNameInput) {
-    throw new TakaroUserError('Usage: /kick <player> [reason]');
-  }
-
-  const target = await resolvePlayerOnGameServer(gameServerId, targetNameInput, { requireOnline: true });
+  const target = getCommandTargetPlayer(args.player);
   if (!target) {
     throw new TakaroUserError('That player is not currently online.');
   }
@@ -35,11 +30,11 @@ async function main() {
     throw new TakaroUserError('That player is not currently online.');
   }
 
-  const reason = normalizeReason(extractReason(args.reason, chatMessage, [target.name]), 'Kicked by an admin.');
   const [adminName, targetName] = await Promise.all([
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),
   ]);
+  const reason = normalizeReason(extractReason(args.reason, chatMessage, [targetName]), 'Kicked by an admin.');
 
   await takaro.gameserver.gameServerControllerKickPlayer(gameServerId, target.playerId, {
     reason,

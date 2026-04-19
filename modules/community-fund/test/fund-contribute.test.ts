@@ -27,7 +27,7 @@ const MODULE_DIR = path.resolve(__dirname, '..');
 // The threshold is 100 and later tests intentionally build on earlier state:
 // 1. contribute 20 (fund=20)
 // 2. permission/validation failures keep fund at 20
-// 3. concurrent 30+30 contributions exercise the post-update deduction failure path (fund ends at 50 or 80)
+// 3. concurrent 30+30 contributions exercise the deduction-first race path (fund should end at 50)
 // 4. the completion test reads the live total and contributes only what is needed to cross the threshold once
 
 describe('community-fund: fund-contribute command', () => {
@@ -297,7 +297,7 @@ describe('community-fund: fund-contribute command', () => {
     );
   });
 
-  it('should log and preserve the updated fund total when concurrent deductions race and one deduction fails', async () => {
+  it('should not advance the fund when a concurrent deduction fails', async () => {
     const player = ctx.players[0]!;
     const beforePog = await getPog(player.playerId);
     assert.ok(beforePog, 'Expected player POG to exist before concurrent contribution test');
@@ -332,13 +332,25 @@ describe('community-fund: fund-contribute command', () => {
         success: meta?.result?.success ?? false,
         logs: (meta?.result?.logs ?? []).map((l) => l.msg),
       }))
-      .filter((result) => result.logs.some((msg) => msg.includes('Fund contribution')) || result.logs.some((msg) => msg.includes('currency deduction encountered an issue')));
+      .filter(
+        (result) => result.logs.some((msg) => msg.includes('Fund contribution'))
+          || result.logs.some((msg) => msg.includes('currency deduction failed'))
+          || result.logs.some((msg) => msg.includes('could not be processed because your currency could not be deducted')),
+      );
 
     assert.equal(fundEvents.length, 2, `Expected both concurrent contributions to execute, got: ${JSON.stringify(fundEvents)}`);
-    assert.ok(fundEvents.every((result) => result.success), `Expected both contributions to return success, got: ${JSON.stringify(fundEvents)}`);
+    assert.equal(
+      fundEvents.filter((result) => result.success).length,
+      1,
+      `Expected exactly one contribution to succeed, got: ${JSON.stringify(fundEvents)}`,
+    );
     assert.ok(
       fundEvents.some((result) => result.logs.some((msg) => msg.includes('currency deduction failed'))),
-      `Expected one contribution to hit the deduction recovery path, got: ${JSON.stringify(fundEvents)}`,
+      `Expected one contribution to hit the deduction failure path, got: ${JSON.stringify(fundEvents)}`,
+    );
+    assert.ok(
+      fundEvents.some((result) => result.logs.some((msg) => msg.includes('could not be processed because your currency could not be deducted'))),
+      `Expected one contribution to surface the friendly deduction failure message, got: ${JSON.stringify(fundEvents)}`,
     );
 
     const afterPog = await getPog(player.playerId);
@@ -359,8 +371,8 @@ describe('community-fund: fund-contribute command', () => {
     const statusMeta = statusEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
     const statusLogs = (statusMeta?.result?.logs ?? []).map((l) => l.msg);
     assert.ok(
-      statusLogs.some((msg) => msg.includes('total=50') || msg.includes('total=80')),
-      `Expected the fund total to remain updated despite the failed deduction, got: ${JSON.stringify(statusLogs)}`,
+      statusLogs.some((msg) => msg.includes('total=50')),
+      `Expected only the paid contribution to advance the fund, got: ${JSON.stringify(statusLogs)}`,
     );
   });
 

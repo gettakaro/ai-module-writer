@@ -2,7 +2,6 @@ import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers'
 import {
   getFundTotal,
   setFundTotal,
-  getFundCycle,
   incrementFundCycle,
   recordCompletion,
 } from './fund-helpers.js';
@@ -45,11 +44,18 @@ async function main() {
     throw new TakaroUserError(message);
   }
 
-  // Read fund total FIRST, compute new total, update fund THEN deduct currency.
-  // This ordering ensures that if the fund update fails, no currency is deducted (player keeps money).
-  // If currency deduction fails after the fund update, we log the inconsistency — the fund will be
-  // slightly over-counted, which is far preferable to the player losing money without fund credit.
-  //
+  // Deduct currency BEFORE updating shared fund state.
+  // If the deduction fails due to a race or backend error, the contribution must not advance the
+  // fund, cycle, or completion flow.
+  try {
+    await takaro.playerOnGameserver.playerOnGameServerControllerDeductCurrency(gameServerId, pog.playerId, {
+      currency: amount,
+    });
+  } catch (deductErr) {
+    console.error(`Fund: currency deduction failed for player ${player.name} (amount=${amount}). Contribution aborted. Error: ${deductErr}`);
+    throw new TakaroUserError('Your contribution could not be processed because your currency could not be deducted. Please try again.');
+  }
+
   // This read-modify-write is not atomic. If two players contribute simultaneously, both may
   // read the same currentTotal and one contribution could be lost. This is an accepted limitation
   // of the Takaro variable storage platform (no atomic increment API).
@@ -58,29 +64,13 @@ async function main() {
 
   console.log(`Fund contribution: player=${player.name}, amount=${amount}, previousTotal=${currentTotal}, newTotal=${newTotal}, threshold=${threshold}`);
 
-  // Returns true if deduction succeeded, false if it failed (player keeps their currency).
-  async function deductPlayerCurrency(deductAmount) {
-    try {
-      await takaro.playerOnGameserver.playerOnGameServerControllerDeductCurrency(gameServerId, pog.playerId, {
-        currency: deductAmount,
-      });
-      return true;
-    } catch (deductErr) {
-      console.error(`Fund: currency deduction failed for player ${player.name} (amount=${deductAmount}). Fund total was already updated. Error: ${deductErr}`);
-      return false;
-    }
-  }
-
   if (newTotal >= threshold) {
     // Carry overshoot forward instead of discarding excess
     const carryover = newTotal - threshold;
 
-    // Update fund total BEFORE deducting currency
     await setFundTotal(gameServerId, moduleId, carryover);
     const newCycle = await incrementFundCycle(gameServerId, moduleId);
     await recordCompletion(gameServerId, moduleId, newCycle, player.name);
-
-    const deductionSucceeded = await deductPlayerCurrency(amount);
 
     const completionMsg = config.completionMessage.replace('{threshold}', String(threshold));
     await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
@@ -100,21 +90,16 @@ async function main() {
       }
     }
 
-    const deductionNote = deductionSucceeded ? '' : ' (Note: currency deduction encountered an issue — please contact an admin)';
     await pog.pm(
-      `You contributed ${amount} to the community fund. The community fund goal has been met! A new round begins. (Round #${newCycle})${deductionNote}`,
+      `You contributed ${amount} to the community fund. The community fund goal has been met! A new round begins. (Round #${newCycle})`,
     );
   } else {
-    // Update fund total BEFORE deducting currency
     await setFundTotal(gameServerId, moduleId, newTotal);
-
-    const deductionSucceeded = await deductPlayerCurrency(amount);
 
     const percent = Math.floor((newTotal / threshold) * 100);
 
-    const deductionNote = deductionSucceeded ? '' : ' (Note: currency deduction encountered an issue — please contact an admin)';
     await pog.pm(
-      `You contributed ${amount} to the community fund. Current total: ${newTotal}/${threshold} (${percent}%).${deductionNote}`,
+      `You contributed ${amount} to the community fund. Current total: ${newTotal}/${threshold} (${percent}%).`,
     );
 
     if (config.broadcastContributions) {

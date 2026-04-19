@@ -23,22 +23,28 @@ function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function stripConsumedPrefix(text, consumedValues = []) {
+  let remaining = trimOrEmpty(text);
+
+  for (const value of consumedValues) {
+    const normalized = trimOrEmpty(value);
+    if (normalized === '') continue;
+    const flexibleWhitespace = escapeRegex(normalized).replace(/\s+/g, '\\s+');
+    const pattern = new RegExp(`^${flexibleWhitespace}(?:\\s+|$)`, 'i');
+    remaining = remaining.replace(pattern, '');
+  }
+
+  return trimOrEmpty(remaining);
+}
+
 export function extractReason(argsReason, chatMessage, consumedValues = []) {
-  const parsedReason = trimOrEmpty(argsReason) === '?' ? '' : trimOrEmpty(argsReason);
+  const parsedReasonSource = trimOrEmpty(argsReason) === '?' ? '' : trimOrEmpty(argsReason);
+  const parsedReason = stripConsumedPrefix(parsedReasonSource, consumedValues);
 
   let remaining = trimOrEmpty(getChatMessageText(chatMessage));
   if (remaining !== '') {
     remaining = remaining.replace(/^\S+\s*/, '');
-
-    for (const value of consumedValues) {
-      const normalized = trimOrEmpty(value);
-      if (normalized === '') continue;
-      const flexibleWhitespace = escapeRegex(normalized).replace(/\s+/g, '\\s+');
-      const pattern = new RegExp(`^${flexibleWhitespace}(?:\\s+|$)`, 'i');
-      remaining = remaining.replace(pattern, '');
-    }
-
-    const reconstructedReason = trimOrEmpty(remaining);
+    const reconstructedReason = stripConsumedPrefix(remaining, consumedValues);
     if (reconstructedReason !== '') {
       return reconstructedReason;
     }
@@ -68,6 +74,19 @@ export function formatOnlinePlayersLine(players) {
   const suffix = names.length > 10 ? ', ...' : '';
   const noun = names.length === 1 ? 'player' : 'players';
   return `${names.length} ${noun} online: ${visible.join(', ')}${suffix}`;
+}
+
+export function getCommandTargetPlayer(target) {
+  if (!target || typeof target !== 'object') return null;
+  if (!target.playerId) return null;
+
+  return {
+    playerId: target.playerId,
+    name: trimOrEmpty(target.name) || 'Unknown Player',
+    gameId: target.gameId,
+    gameServerId: target.gameServerId,
+    online: target.online,
+  };
 }
 
 export function renderTemplate(template, placeholders) {
@@ -180,56 +199,6 @@ export async function getPlayerName(playerId, fallback) {
   } catch (err) {
     console.error(`utils-helpers: failed to load player ${playerId}: ${err}`);
     return fallback || 'Unknown Player';
-  }
-}
-
-export async function findPlayerByExactName(playerName) {
-  const normalizedName = trimOrEmpty(playerName);
-  if (normalizedName === '') return null;
-
-  try {
-    const result = await takaro.player.playerControllerSearch({
-      search: { name: [normalizedName] },
-      limit: 20,
-    });
-
-    return result.data.data.find((candidate) => trimOrEmpty(candidate.name).toLowerCase() === normalizedName.toLowerCase()) || null;
-  } catch (err) {
-    console.error(`utils-helpers: failed to search player '${normalizedName}': ${err}`);
-    return null;
-  }
-}
-
-export async function resolvePlayerOnGameServer(gameServerId, playerName, { requireOnline = false } = {}) {
-  const player = await findPlayerByExactName(playerName);
-  if (!player) return null;
-
-  try {
-    const result = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
-      filters: {
-        gameServerId: [gameServerId],
-        playerId: [player.id],
-        ...(requireOnline ? { online: [true] } : {}),
-      },
-      limit: 1,
-    });
-
-    const pog = result.data.data[0];
-    if (!pog) {
-      return requireOnline ? null : {
-        playerId: player.id,
-        name: player.name,
-      };
-    }
-
-    return {
-      ...pog,
-      playerId: player.id,
-      name: player.name,
-    };
-  } catch (err) {
-    console.error(`utils-helpers: failed to resolve player '${playerName}' on gameserver ${gameServerId}: ${err}`);
-    return null;
   }
 }
 
