@@ -258,7 +258,7 @@
     },
     "on-module-installed": {
       "eventType": "module-installed",
-      "description": "Uninstall casino immediately when legacy gambling modules are installed on the same game server",
+      "description": "Warn when legacy gambling modules are installed on the same game server and block gameplay until they are removed",
       "function": "src/hooks/on-module-installed/index.js"
     }
   },

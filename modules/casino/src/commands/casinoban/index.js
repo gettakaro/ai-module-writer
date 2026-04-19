@@ -1,5 +1,5 @@
 import { data, TakaroUserError } from '@takaro/helpers';
-import { requireManagePermission, resolvePlayerByName, setBan, formatUtcTimestamp, getDefaultConfig, cancelPlayerCasinoState } from './casino-helpers.js';
+import { requireManagePermission, resolvePlayerByName, setBan, formatUtcTimestamp, getDefaultConfig, cancelPlayerCasinoState, removePlayerFromRacePool, sendPlayerMessage } from './casino-helpers.js';
 
 async function main() {
   const { pog, gameServerId, arguments: args, module: mod } = data;
@@ -22,8 +22,12 @@ async function main() {
 
   await setBan(gameServerId, mod.moduleId, target.playerId, { expiresAt });
   const cancelled = await cancelPlayerCasinoState(gameServerId, mod.moduleId, target.playerId, config);
-  const cleanupNote = cancelled.length > 0 ? ` Active casino sessions were cancelled and ${cancelled.length} stake${cancelled.length === 1 ? '' : 's'} refunded.` : '';
-  await pog.pm(`🚫 ${target.player?.name ?? targetName} has been banned from the casino${expiresAt ? ` until ${formatUtcTimestamp(expiresAt)}` : ' permanently'}.${cleanupNote}`);
+  const removedRaceEntries = await removePlayerFromRacePool(gameServerId, mod.moduleId, target.playerId);
+  const cleanupBits = [];
+  if (cancelled.length > 0) cleanupBits.push(`${cancelled.length} active stake${cancelled.length === 1 ? '' : 's'} refunded`);
+  if (removedRaceEntries.length > 0) cleanupBits.push(`${removedRaceEntries.length} race entr${removedRaceEntries.length === 1 ? 'y' : 'ies'} removed`);
+  const cleanupNote = cleanupBits.length > 0 ? ` Cleanup: ${cleanupBits.join(', ')}.` : '';
+  await sendPlayerMessage(pog, `🚫 ${target.player?.name ?? targetName} has been banned from the casino${expiresAt ? ` until ${formatUtcTimestamp(expiresAt)}` : ' permanently'}.${cleanupNote}`);
 }
 
 await main();

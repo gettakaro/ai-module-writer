@@ -1,5 +1,5 @@
 import { data, TakaroUserError } from '@takaro/helpers';
-import { requireManagePermission, generateReport, formatCurrency } from './casino-helpers.js';
+import { requireManagePermission, generateReport, formatCurrency, sendPlayerMessage } from './casino-helpers.js';
 
 async function main() {
   const { pog, gameServerId, module: mod, arguments: args } = data;
@@ -25,7 +25,7 @@ async function main() {
     'Per-game breakdown:',
     ...(perGameLines.length > 0 ? perGameLines : ['No per-game activity recorded in this window.']),
   ];
-  await pog.pm(lines.join('\n'));
+  await sendPlayerMessage(pog, lines.join('\n'));
 }
 
 await main();

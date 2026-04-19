@@ -1,5 +1,5 @@
 import { data, TakaroUserError } from '@takaro/helpers';
-import { getDefaultConfig, getPlayerStats, getWindowData, resolvePlayerByName, getPlayerName, formatCurrency, getVipTier, getVipMultiplier, getNextWindowResetAt, formatFutureTime } from './casino-helpers.js';
+import { getDefaultConfig, getPlayerStats, getWindowData, resolvePlayerByName, getPlayerName, formatCurrency, getVipTier, getVipMultiplier, getNextWindowResetAt, formatFutureTime, sendPlayerMessage } from './casino-helpers.js';
 
 async function main() {
   const { pog, gameServerId, player, arguments: args, module: mod } = data;
@@ -21,7 +21,7 @@ async function main() {
     getWindowData(gameServerId, mod.moduleId, targetId, config),
   ]);
 
-  const vipTier = targetPog ? getVipTier(targetPog) : 0;
+  const vipTier = targetPog ? getVipTier(targetPog) : Number(stats.lastVipTier ?? 0);
   const vipMultiplier = getVipMultiplier(vipTier);
   const wagerCap = config.wagerCap > 0 ? Math.floor(config.wagerCap * vipMultiplier) : 0;
   const lossCap = config.lossCap > 0 ? Math.floor(config.lossCap * vipMultiplier) : 0;
@@ -36,7 +36,7 @@ async function main() {
     `Wager cap: ${wagerCap > 0 ? `${formatCurrency(wagerCap)} (${formatCurrency(Math.max(0, wagerCap - windowData.wagered))} remaining)` : 'unlimited'}`,
     `Loss cap: ${lossCap > 0 ? `${formatCurrency(lossCap)} (${formatCurrency(Math.max(0, lossCap - windowData.lost))} remaining)` : 'unlimited'}`,
   ];
-  await pog.pm(lines.join('\n'));
+  await sendPlayerMessage(pog, lines.join('\n'));
 }
 
 await main();

@@ -856,7 +856,7 @@ describe('casino module', () => {
     }
   });
 
-  it('uninstalls itself at install time when a legacy gambling module is already installed', async () => {
+  it('keeps the installation but blocks gameplay when a legacy gambling module is already installed', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'casino-install-conflict-'));
     let legacyModuleId: string | undefined;
     try {
@@ -903,7 +903,11 @@ describe('casino module', () => {
       assert.ok((hookMeta?.result?.logs ?? []).some((log) => /install blocked/i.test(log.msg) || /legacy casino module conflict/i.test(log.msg)), `expected conflict logs, logs=${JSON.stringify(hookMeta?.result?.logs ?? [])}`);
 
       const installation = await client.module.moduleInstallationsControllerGetModuleInstallation(moduleId, ctx.gameServer.id).catch(() => null);
-      assert.equal(installation, null, 'expected casino to uninstall itself during conflicting install');
+      assert.ok(installation, 'expected casino installation to remain present during conflicting install');
+
+      const blocked = await triggerCommand(ctx.players[0]!.playerId, `${prefix}flip 10 heads`);
+      assert.equal(blocked.success, false, 'expected gameplay to stay blocked while legacy module remains installed');
+      assert.ok(blocked.logs.some((msg) => /old gambling modules are still installed/i.test(msg)), `expected legacy-conflict play message, logs=${JSON.stringify(blocked.logs)}`);
 
       await uninstallModule(client, legacyModuleId, ctx.gameServer.id);
       await installModule(client, versionId, ctx.gameServer.id, {
@@ -927,6 +931,35 @@ describe('casino module', () => {
       }
       await fs.rm(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it('validates new admin guardrails and ban cleanup paths', async () => {
+    const admin = ctx.players[1]!;
+    const player = ctx.players[0]!;
+    const playerName = (await client.player.playerControllerGetOne(player.playerId)).data.data.name;
+
+    const invalidBanDuration = await triggerCommand(admin.playerId, `${prefix}casinoban ${playerName} -1`);
+    assert.equal(invalidBanDuration.success, false, 'expected negative ban duration to fail');
+    assert.ok(invalidBanDuration.logs.some((msg) => /positive number of hours/i.test(msg)), `expected ban-duration validation, logs=${JSON.stringify(invalidBanDuration.logs)}`);
+
+    const invalidReportDays = await triggerCommand(admin.playerId, `${prefix}casinoreport 0`);
+    assert.equal(invalidReportDays.success, false, 'expected invalid report days to fail');
+    assert.ok(invalidReportDays.logs.some((msg) => /between 1 and 365/i.test(msg)), `expected report-day validation, logs=${JSON.stringify(invalidReportDays.logs)}`);
+
+    const invalidJackpot = await triggerCommand(admin.playerId, `${prefix}setjackpot -5`);
+    assert.equal(invalidJackpot.success, false, 'expected negative jackpot to fail');
+    assert.ok(invalidJackpot.logs.some((msg) => /number >= 0/i.test(msg)), `expected jackpot validation, logs=${JSON.stringify(invalidJackpot.logs)}`);
+
+    const race = await triggerCommand(player.playerId, `${prefix}race 11`);
+    assert.equal(race.success, true, `expected race join success, logs=${JSON.stringify(race.logs)}`);
+    const ban = await triggerCommand(admin.playerId, `${prefix}casinoban ${playerName} 1`);
+    assert.equal(ban.success, true, `expected ban success, logs=${JSON.stringify(ban.logs)}`);
+    assert.ok(ban.logs.some((msg) => /race entr/i.test(msg)), `expected race cleanup note, logs=${JSON.stringify(ban.logs)}`);
+    const racePool = JSON.parse((await getVariable('casino_race_pool'))!.value);
+    assert.ok((racePool.participants ?? []).every((entry: any) => entry.playerId !== player.playerId), `expected banned player removed from race pool, pool=${JSON.stringify(racePool)}`);
+
+    const unban = await triggerCommand(admin.playerId, `${prefix}casinounban ${playerName}`);
+    assert.equal(unban.success, true, `expected unban success, logs=${JSON.stringify(unban.logs)}`);
   });
 
   it('expires pending and accepted duels through the cleanup cronjob with full refunds', async () => {
@@ -988,6 +1021,40 @@ describe('casino module', () => {
     const expireWindow = await triggerCronjob(expireWindowsCronjobId);
     assert.equal(expireWindow.success, true, `expected expire-windows success, logs=${JSON.stringify(expireWindow.logs)}`);
     assert.equal(await getVariable('casino_window:2000-01-01', player.playerId), null, 'expected old window deletion');
+  });
+
+  it('blocks bets that would exceed the remaining loss-cap room before settlement', async () => {
+    const player = ctx.players[0]!;
+    const install = (await client.module.moduleInstallationsControllerGetModuleInstallation(moduleId, ctx.gameServer.id)).data.data;
+    await client.module.moduleInstallationsControllerUninstallModule(moduleId, ctx.gameServer.id);
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        ...(install.userConfig as any),
+        cooldownSeconds: 0,
+        lossCap: 20,
+        wagerCap: 0,
+      },
+    });
+
+    const windowKey = new Date().toISOString().slice(0, 10);
+    const existingWindow = await getVariable(`casino_window:${windowKey}`, player.playerId);
+    if (existingWindow) {
+      await client.variable.variableControllerUpdate(existingWindow.id, {
+        value: JSON.stringify({ ...(JSON.parse(existingWindow.value)), lost: 15, wagered: 15, windowKey }),
+      });
+    } else {
+      await client.variable.variableControllerCreate({
+        key: `casino_window:${windowKey}`,
+        value: JSON.stringify({ wagered: 15, lost: 15, windowKey }),
+        gameServerId: ctx.gameServer.id,
+        moduleId,
+        playerId: player.playerId,
+      });
+    }
+
+    const blocked = await triggerCommand(player.playerId, `${prefix}flip 6 heads`);
+    assert.equal(blocked.success, false, 'expected oversized bet to be rejected before it can exceed loss cap');
+    assert.ok(blocked.logs.some((msg) => /loss cap/i.test(msg) && /remaining/i.test(msg)), `expected actionable loss-cap message, logs=${JSON.stringify(blocked.logs)}`);
   });
 
   it('uses weekly cap windows and cleans up stale weekly rows', async () => {

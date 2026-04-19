@@ -222,12 +222,14 @@ export function getRequiredVotes(voteState, fallbackOnlineCount, percent) {
   return Number(voteState?.requiredVotes ?? computeThreshold(fallbackOnlineCount, percent));
 }
 
-export function getEligiblePool(voteState, eligiblePlayers) {
-  const snapshot = Array.isArray(voteState?.eligiblePlayerIds) ? voteState.eligiblePlayerIds : eligiblePlayers.map((p) => p.playerId);
+export function getEligiblePool(voteState, eligiblePlayers = []) {
+  const snapshot = Array.isArray(voteState?.eligiblePlayerIds) && voteState.eligiblePlayerIds.length > 0
+    ? voteState.eligiblePlayerIds
+    : eligiblePlayers.map((p) => p.playerId);
   return [...new Set(snapshot)];
 }
 
-export function getEffectiveVotes(voteState, eligiblePlayers) {
+export function getEffectiveVotes(voteState, eligiblePlayers = []) {
   const eligibleIds = new Set(getEligiblePool(voteState, eligiblePlayers));
-  return (voteState?.voters ?? []).filter((id) => eligibleIds.has(id)).length;
+  return [...new Set(voteState?.voters ?? [])].filter((id) => eligibleIds.has(id)).length;
 }

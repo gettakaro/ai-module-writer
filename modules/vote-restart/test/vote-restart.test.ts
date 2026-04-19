@@ -563,6 +563,72 @@ describe('vote-restart recovery paths and locked thresholds', () => {
       for (const row of vars.data.data) await client3.variable.variableControllerDelete(row.id);
     }
   });
+
+  it('still counts yes-voters from the locked snapshot even if their live immunity changes later', async () => {
+    const extraImmuneRoleId = await assignPermissions(client3, ctx3.players[1].playerId, ctx3.gameServer.id, ['VOTE_RESTART_IMMUNE']);
+    await client3.variable.variableControllerCreate({
+      key: 'vr_vote_state',
+      value: JSON.stringify({
+        startedAt: new Date().toISOString(),
+        initiatorName: 'TestPlayer',
+        voters: [ctx3.players[0].playerId, ctx3.players[1].playerId],
+        status: 'active',
+        requiredVotes: 2,
+        eligiblePlayerIds: [ctx3.players[0].playerId, ctx3.players[1].playerId],
+        eligibleCountAtStart: 2,
+      }),
+      gameServerId: ctx3.gameServer.id,
+      moduleId: moduleId3,
+    });
+
+    try {
+      const cron = await triggerCronjob3();
+      assert.equal(cron.success, true, `Expected cronjob success, logs=${JSON.stringify(cron.logs)}`);
+      assert.ok(cron.logs.some((l) => l.includes('Vote passed')), `Expected locked snapshot to preserve yes-votes, logs=${JSON.stringify(cron.logs)}`);
+    } finally {
+      await cleanupRole(client3, extraImmuneRoleId);
+      const vars = await client3.variable.variableControllerSearch({ filters: { key: ['vr_vote_state', 'vr_restart_state'], gameServerId: [ctx3.gameServer.id], moduleId: [moduleId3] } as any });
+      for (const row of vars.data.data) await client3.variable.variableControllerDelete(row.id);
+    }
+  });
+
+  it('recovers from stale locks and corrupt persisted state', async () => {
+    await client3.variable.variableControllerCreate({
+      key: 'vr_state_lock',
+      value: JSON.stringify({ owner: 'stale-lock', expiresAt: new Date(Date.now() - 60_000).toISOString() }),
+      gameServerId: ctx3.gameServer.id,
+      moduleId: moduleId3,
+    });
+    await client3.variable.variableControllerCreate({
+      key: 'vr_vote_state',
+      value: '{bad json',
+      gameServerId: ctx3.gameServer.id,
+      moduleId: moduleId3,
+    });
+    await client3.variable.variableControllerCreate({
+      key: 'vr_restart_state',
+      value: '{also bad json',
+      gameServerId: ctx3.gameServer.id,
+      moduleId: moduleId3,
+    });
+
+    const start = await triggerCommand3(ctx3.players[0].playerId, 'voterestart');
+    const startResult = getResult3(start);
+    assert.equal(startResult.success, true, `Expected recovery start success, logs=${JSON.stringify(startResult.logs)}`);
+    assert.ok(startResult.logs.some((l) => l.includes('vote started')), `Expected recovery start log, logs=${JSON.stringify(startResult.logs)}`);
+
+    const voteStateRows = await client3.variable.variableControllerSearch({ filters: { key: ['vr_vote_state'], gameServerId: [ctx3.gameServer.id], moduleId: [moduleId3] } });
+    assert.equal(voteStateRows.data.data.length, 1, 'Expected a single recovered vote state row');
+    const recoveredState = JSON.parse(voteStateRows.data.data[0]!.value);
+    assert.equal(recoveredState.status, 'active', `Expected active recovered vote state, state=${JSON.stringify(recoveredState)}`);
+
+    const lockRows = await client3.variable.variableControllerSearch({ filters: { key: ['vr_state_lock'], gameServerId: [ctx3.gameServer.id], moduleId: [moduleId3] } });
+    assert.equal(lockRows.data.data.length, 0, 'Expected stale lock to be released after recovery');
+
+    const restartRows = await client3.variable.variableControllerSearch({ filters: { key: ['vr_restart_state'], gameServerId: [ctx3.gameServer.id], moduleId: [moduleId3] } });
+    assert.equal(restartRows.data.data.length, 1, 'Expected corrupt restart row to remain as the single stored row');
+    assert.equal(restartRows.data.data[0]!.value, '{also bad json', 'Expected corrupt restart row to be ignored rather than used');
+  });
 });
 
 describe('vote-restart immune initiator behavior', () => {

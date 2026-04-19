@@ -35,6 +35,11 @@ export function formatCurrency(value) {
   return `${roundCurrency(value)}`;
 }
 
+export async function sendPlayerMessage(pog, message) {
+  console.log(message);
+  await pog.pm(message);
+}
+
 export function nowIso() {
   return new Date().toISOString();
 }
@@ -661,6 +666,10 @@ export async function placeBet({ gameServerId, moduleId, pog, player, config, ga
       if (windowData.lost >= lossCap) {
         throw new TakaroUserError(`You already reached your ${config.capWindow} loss cap of ${formatCurrency(lossCap)}. Use /casinostats to see when your window resets.`);
       }
+      const remainingLossRoom = Math.max(0, lossCap - windowData.lost);
+      if (betAmount > remainingLossRoom) {
+        throw new TakaroUserError(`That bet would exceed your ${config.capWindow} loss cap of ${formatCurrency(lossCap)} if it lost. You have ${formatCurrency(remainingLossRoom)} of loss room remaining. Use /casinostats to check your limits.`);
+      }
     }
 
     try {
@@ -675,6 +684,11 @@ export async function placeBet({ gameServerId, moduleId, pog, player, config, ga
     try {
       windowData.wagered += betAmount;
       await setWindowData(gameServerId, moduleId, player.id, windowData.windowKey, windowData);
+
+      const existingStats = await getPlayerStats(gameServerId, moduleId, player.id);
+      existingStats.lastVipTier = vipTier;
+      existingStats.lastVipMultiplier = vipMultiplier;
+      await setPlayerStats(gameServerId, moduleId, player.id, existingStats);
 
       if (config.cooldownSeconds > 0) {
         await writeVariable(gameServerId, moduleId, KEY_COOLDOWN, { until: new Date(Date.now() + (config.cooldownSeconds * 1000)).toISOString() }, player.id);
@@ -1164,6 +1178,20 @@ export async function handleDisconnect(gameServerId, moduleId, playerId, config)
   }
 
   return refunds;
+}
+
+export async function removePlayerFromRacePool(gameServerId, moduleId, playerId) {
+  let removedEntries = [];
+  await mutateRacePool(gameServerId, moduleId, async (pool) => {
+    const participants = Array.isArray(pool?.participants) ? pool.participants : [];
+    removedEntries = participants.filter((entry) => entry.playerId === playerId);
+    if (removedEntries.length === 0) return pool;
+    return {
+      ...pool,
+      participants: participants.filter((entry) => entry.playerId !== playerId),
+    };
+  });
+  return removedEntries;
 }
 
 export async function cancelPlayerCasinoState(gameServerId, moduleId, playerId, config) {

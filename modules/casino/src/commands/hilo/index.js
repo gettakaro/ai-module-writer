@@ -15,6 +15,7 @@ import {
   parsePositiveNumberLike,
   ensureInteractivePlayAllowed,
   withCasinoLocks,
+  sendPlayerMessage,
 } from './casino-helpers.js';
 
 async function main() {
@@ -45,7 +46,7 @@ async function main() {
         await refund({ gameServerId, moduleId: mod.moduleId, playerId: player.id, amount: placed.amount, config, skipLock: true });
         throw new TakaroUserError('Your hilo streak could not be started, so your stake was refunded. Please try again.');
       }
-      await pog.pm(`🎴 Starting card: ${cardLabel(currentCard)}. /hilo higher or /hilo lower (1.00x).`);
+      await sendPlayerMessage(pog, `🎴 Starting card: ${cardLabel(currentCard)}. Equal cards count as losses. /hilo higher or /hilo lower (1.00x).`);
       return;
     }
 
@@ -65,7 +66,7 @@ async function main() {
       const payout = roundCurrency(existing.stake * existing.multiplier);
       const result = await settle({ gameServerId, moduleId: mod.moduleId, player, config, game: 'hilo', betAmount: existing.stake, payout, skipLock: true });
       await deletePlayerSession(gameServerId, mod.moduleId, KEY_HILO_SESSION, player.id);
-      await pog.pm(`🎴 Cashed out at ${existing.multiplier.toFixed(2)}x — won ${formatCurrency(payout)} coin. (Balance: ${formatCurrency(result.balance)})`);
+      await sendPlayerMessage(pog, `🎴 Cashed out at ${existing.multiplier.toFixed(2)}x — won ${formatCurrency(payout)} coin. (Balance: ${formatCurrency(result.balance)})`);
       return;
     }
 
@@ -78,7 +79,7 @@ async function main() {
       const payout = roundCurrency(existing.stake * existing.multiplier);
       const result = await settle({ gameServerId, moduleId: mod.moduleId, player, config, game: 'hilo', betAmount: existing.stake, payout, skipLock: true });
       await deletePlayerSession(gameServerId, mod.moduleId, KEY_HILO_SESSION, player.id);
-      await pog.pm(`🎴 Deck cleared! Auto-cashed out ${formatCurrency(payout)} coin. (Balance: ${formatCurrency(result.balance)})`);
+      await sendPlayerMessage(pog, `🎴 Deck cleared! Auto-cashed out ${formatCurrency(payout)} coin. (Balance: ${formatCurrency(result.balance)})`);
       return;
     }
 
@@ -91,7 +92,7 @@ async function main() {
       const result = await settle({ gameServerId, moduleId: mod.moduleId, player, config, game: 'hilo', betAmount: existing.stake, payout: 0, skipLock: true });
       await deletePlayerSession(gameServerId, mod.moduleId, KEY_HILO_SESSION, player.id);
       const tieNote = nextCard.rank === existing.currentCard.rank ? ' Equal cards count as losses in hilo.' : '';
-      await pog.pm(`🎴 ${cardLabel(nextCard)}. Wrong — lost ${formatCurrency(existing.stake)} coin.${tieNote} (Balance: ${formatCurrency(result.balance)})`);
+      await sendPlayerMessage(pog, `🎴 ${cardLabel(nextCard)}. Wrong — lost ${formatCurrency(existing.stake)} coin.${tieNote} (Balance: ${formatCurrency(result.balance)})`);
       return;
     }
 
@@ -99,7 +100,7 @@ async function main() {
     existing.multiplier = Number((existing.multiplier * ((1 - (config.houseEdgePct / 100)) / probability)).toFixed(2));
     existing.startedAt = new Date().toISOString();
     await setPlayerSession(gameServerId, mod.moduleId, KEY_HILO_SESSION, player.id, existing);
-    await pog.pm(`🎴 ${cardLabel(nextCard)}! Correct (${existing.multiplier.toFixed(2)}x). /hilo higher, /hilo lower, or /hilo cashout to lock in ${formatCurrency(existing.stake * existing.multiplier)} coin.`);
+    await sendPlayerMessage(pog, `🎴 ${cardLabel(nextCard)}! Correct (${existing.multiplier.toFixed(2)}x). /hilo higher, /hilo lower, or /hilo cashout to lock in ${formatCurrency(existing.stake * existing.multiplier)} coin.`);
   });
 }
 

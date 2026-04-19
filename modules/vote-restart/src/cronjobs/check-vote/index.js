@@ -115,7 +115,9 @@ async function main() {
     });
     console.log('check-vote: restart command executed successfully');
   } catch (cmdErr) {
-    console.error(`check-vote: failed to execute restart command "${config.restartCommand}": ${cmdErr}`);
+    const failureMessage = `check-vote: failed to execute restart command "${config.restartCommand}": ${cmdErr}`;
+    console.error(failureMessage);
+    console.log(failureMessage);
     const cooldownUntil = new Date(Date.now() + config.cooldownDuration * 1000).toISOString();
     await withVoteLock(gameServerId, moduleId, async () => {
       await setCooldownUntil(gameServerId, moduleId, cooldownUntil);
@@ -127,6 +129,7 @@ async function main() {
       message: '[Vote Restart] Failed to execute restart command. Please try again later.',
       opts: {},
     });
+    console.log('[Vote Restart] Failed to execute restart command. Please try again later.');
   }
 }
 

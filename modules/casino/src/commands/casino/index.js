@@ -1,5 +1,5 @@
 import { data, TakaroUserError, checkPermission } from '@takaro/helpers';
-import { getDefaultConfig } from './casino-helpers.js';
+import { getDefaultConfig, sendPlayerMessage } from './casino-helpers.js';
 
 async function main() {
   const { pog, arguments: args, module: mod } = data;
@@ -10,10 +10,10 @@ async function main() {
     flip: '🪙 /flip <amount> <heads|tails> — fast 50/50 coin flip.',
     dice: '🎲 /dice <amount> <over|under> <2-98> — higher risk, higher payout.',
     hilo: '🎴 /hilo <amount> to start, then /hilo higher, /hilo lower, or /hilo cashout.',
-    roulette: '🎡 Roulette uses /bet <amount> <red|black|odd|even|green|0-36>.',
+    roulette: '🎡 Roulette uses /bet <amount> <red|black|odd|even|green|0-36> — the trigger is /bet, not /casino roulette.',
     bet: '🎡 /bet <amount> <red|black|odd|even|green|0-36> — European roulette.',
     slots: '🎰 /slots <amount> — 3 reels, pairs pay, triple 7s hit the jackpot.',
-    blackjack: '🃏 Blackjack uses /bj <amount> to deal, then /bj hit, /bj stand, or /bj double.',
+    blackjack: '🃏 Blackjack uses /bj <amount> to deal, then /bj hit, /bj stand, or /bj double — the trigger is /bj.',
     bj: '🃏 /bj <amount> to deal, then /bj hit, /bj stand, or /bj double.',
     crash: '🚀 /crash <amount> <cashoutAt> — auto-cashout crash game.',
     duel: '⚔️ /duel <player> <amount> to challenge, then accept/decline and pick rock/paper/scissors.',
@@ -39,7 +39,7 @@ async function main() {
     if (normalizedGame && config.games?.[normalizedGame] === false) {
       throw new TakaroUserError(`The ${normalizedGame} game is disabled on this server.`);
     }
-    await pog.pm(gameHelp[game]);
+    await sendPlayerMessage(pog, gameHelp[game]);
     return;
   }
 
@@ -68,8 +68,8 @@ async function main() {
     lines.push('Admin commands: /casinoreport [days], /casinoban <player> [hours], /casinounban <player>, /casinoresetstats <player>, /setjackpot <amount>');
   }
 
-  lines.push('Tip: /casino <game> shows focused help for one game.');
-  await pog.pm(lines.join('\n'));
+  lines.push('Tip: /casino <game> shows focused help for one game. Roulette is /bet and blackjack is /bj.');
+  await sendPlayerMessage(pog, lines.join('\n'));
 }
 
 await main();

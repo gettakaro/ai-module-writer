@@ -1,5 +1,5 @@
 import { data, TakaroUserError } from '@takaro/helpers';
-import { requireManagePermission, setJackpot, getJackpot, formatCurrency } from './casino-helpers.js';
+import { requireManagePermission, setJackpot, getJackpot, formatCurrency, sendPlayerMessage } from './casino-helpers.js';
 
 async function main() {
   const { pog, gameServerId, arguments: args, module: mod } = data;
@@ -9,7 +9,7 @@ async function main() {
   const current = await getJackpot(gameServerId, mod.moduleId);
   current.amount = Math.round(amount);
   await setJackpot(gameServerId, mod.moduleId, current);
-  await pog.pm(`💰 Jackpot set to ${formatCurrency(current.amount)} coin.`);
+  await sendPlayerMessage(pog, `💰 Jackpot set to ${formatCurrency(current.amount)} coin.`);
 }
 
 await main();

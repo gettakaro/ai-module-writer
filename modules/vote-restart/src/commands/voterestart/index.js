@@ -53,7 +53,7 @@ async function main() {
       );
     }
 
-    const initiatorIsImmune = checkPermission(pog, 'VOTE_RESTART_IMMUNE');
+    const initiatorIsImmune = Boolean(checkPermission(pog, 'VOTE_RESTART_IMMUNE'));
     const initialVoters = initiatorIsImmune ? [] : [pog.playerId];
     const threshold = computeThreshold(eligiblePlayers.length, config.passThreshold);
     const voteState = {

@@ -1,5 +1,5 @@
 import { data, TakaroUserError } from '@takaro/helpers';
-import { getLeaderboardCache, formatCurrency, formatPastTime } from './casino-helpers.js';
+import { getLeaderboardCache, formatCurrency, formatPastTime, sendPlayerMessage } from './casino-helpers.js';
 
 async function main() {
   const { pog, gameServerId, arguments: args, module: mod } = data;
@@ -27,7 +27,7 @@ async function main() {
   }
   if (rows.length === 0) {
     lines.push('No casino leaderboard data is ready yet. Play a few rounds and check back in a moment.');
-    await pog.pm(lines.join('\n'));
+    await sendPlayerMessage(pog, lines.join('\n'));
     return;
   }
   rows.forEach((row, index) => {
@@ -35,7 +35,7 @@ async function main() {
     const value = field === 'roi' || field === 'winrate' ? `${raw}%` : formatCurrency(raw);
     lines.push(`#${index + 1} ${row.name} — ${value}`);
   });
-  await pog.pm(lines.join('\n'));
+  await sendPlayerMessage(pog, lines.join('\n'));
 }
 
 await main();
