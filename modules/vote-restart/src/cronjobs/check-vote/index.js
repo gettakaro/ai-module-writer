@@ -90,7 +90,7 @@ async function main() {
 
   if (outcome.type === 'passed') {
     await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-      message: `[Vote Restart] Vote passed! (${outcome.effectiveVotes}/${outcome.threshold}) Server will restart in ${config.restartDelay}s. Required votes were locked when the vote started.`,
+      message: `[Vote Restart] Vote passed! (${outcome.effectiveVotes}/${outcome.threshold}) Server will restart in ${config.restartDelay}s. Only the non-immune players who were online when the vote started were counted.`,
       opts: {},
     });
     return;

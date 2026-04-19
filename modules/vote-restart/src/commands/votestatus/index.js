@@ -27,11 +27,11 @@ async function main() {
     const remainingDelay = Math.ceil(config.restartDelay - elapsedSincePassed);
 
     if (remainingDelay <= 0) {
-      console.log('vote-status: passed, restart already initiated');
-      await pog.pm('[Vote Restart] Vote passed. Server restart is imminent or has already been initiated. If the server hasn\'t restarted, please contact an admin.');
+      console.log('vote-status: Vote passed; restart already initiated or imminent');
+      await pog.pm('[Vote Restart] Vote passed. Server restart is imminent or has already been initiated. If the server has not restarted yet, please contact an admin.');
     } else {
-      console.log(`vote-status: passed, restarting in ${remainingDelay}s`);
-      await pog.pm(`[Vote Restart] Vote passed! Server restarting in ${remainingDelay}s. Required votes were locked when the vote started.`);
+      console.log(`vote-status: Vote passed; server restarting in ${remainingDelay}s`);
+      await pog.pm(`[Vote Restart] Vote passed! Server restarting in ${remainingDelay}s. The restart countdown started when the vote passed.`);
     }
     return;
   }
@@ -43,9 +43,10 @@ async function main() {
   const threshold = getRequiredVotes(voteState, eligiblePlayers.length, config.passThreshold);
   const effectiveVotes = getEffectiveVotes(voteState, eligiblePlayers);
 
-  console.log(`vote-status: active, effectiveVotes=${effectiveVotes}/${threshold}, ${remaining}s remaining`);
+  const lockedPool = voteState.eligibleCountAtStart ?? eligiblePlayers.length;
+  console.log(`vote-status: active vote ${effectiveVotes}/${threshold}; ${remaining}s remaining; counted players locked at ${lockedPool}`);
 
-  await pog.pm(`[Vote Restart] Restart vote in progress: ${effectiveVotes}/${threshold} votes. ${remaining}s remaining. Snapshot at start: ${voteState.eligibleCountAtStart ?? eligiblePlayers.length} eligible players.`);
+  await pog.pm(`[Vote Restart] Restart vote in progress: ${effectiveVotes}/${threshold} votes. ${remaining}s remaining. Only the ${lockedPool} non-immune players who were online when the vote started are counted.`);
 }
 
 await main();

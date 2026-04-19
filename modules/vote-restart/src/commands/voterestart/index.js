@@ -75,8 +75,12 @@ async function main() {
   );
 
   // 6. Broadcast
+  const initiatorNote = initiatorIsImmune
+    ? ' Their own vote does not count because they are immune, so the vote starts at 0.'
+    : '';
+
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-    message: `[Vote Restart] ${player.name} started a restart vote! /voteyes to agree. (${currentVotes}/${threshold}, ${config.voteDuration}s remaining, threshold locked at start)`,
+    message: `[Vote Restart] ${player.name} started a restart vote! /voteyes to agree. (${currentVotes}/${threshold}, ${config.voteDuration}s remaining. Only the non-immune players who were online when the vote started are counted.)${initiatorNote}`,
     opts: {},
   });
 }

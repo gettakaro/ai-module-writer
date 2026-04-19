@@ -400,6 +400,27 @@ describe('casino module', () => {
     await new Promise((resolve) => setTimeout(resolve, 1500));
   });
 
+  it('expires abandoned blackjack sessions through the cleanup cronjob and refunds doubled stakes', async () => {
+    const player = ctx.players[0]!;
+    const beforeBalance = await getPlayerCurrency(player.playerId);
+
+    const start = await triggerCommand(player.playerId, `${prefix}bj 20`);
+    assert.equal(start.success, true, `expected blackjack start success, logs=${JSON.stringify(start.logs)}`);
+
+    await client.playerOnGameserver.playerOnGameServerControllerDeductCurrency(ctx.gameServer.id, player.playerId, { currency: 20 });
+    await updateVariable('casino_session_blackjack', player.playerId, (session) => ({
+      ...session,
+      stake: 40,
+      doubled: true,
+      startedAt: new Date(Date.now() - 16 * 60 * 1000).toISOString(),
+    }));
+
+    const cleanup = await triggerCronjob(expireSessionsCronjobId);
+    assert.equal(cleanup.success, true, `expected blackjack cleanup success, logs=${JSON.stringify(cleanup.logs)}`);
+    assert.equal(await getVariable('casino_session_blackjack', player.playerId), null, 'expected blackjack session deletion after expiry');
+    assert.equal(await getPlayerCurrency(player.playerId), beforeBalance, 'expected doubled blackjack stake refund to restore balance');
+  });
+
   it('emits a compatible big-win chat-message event for qualifying wins', async () => {
     const player = ctx.players[0]!;
     const after = new Date();
@@ -455,6 +476,19 @@ describe('casino module', () => {
 
     const allowed = await triggerCommand(player.playerId, `${prefix}flip 10 heads`);
     assert.equal(allowed.success, true, `expected play after unban, logs=${JSON.stringify(allowed.logs)}`);
+  });
+
+  it('denies play when the explicit CASINO_BANNED permission is assigned', async () => {
+    const player = ctx.players[2]!;
+    await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(ctx.gameServer.id, player.playerId, { currency: 100 });
+    const bannedRoleId = await assignPermissions(client, player.playerId, ctx.gameServer.id, ['CASINO_BANNED']);
+    try {
+      const blocked = await triggerCommand(player.playerId, `${prefix}flip 10 heads`);
+      assert.equal(blocked.success, false, 'expected CASINO_BANNED permission to deny play');
+      assert.ok(blocked.logs.some((msg) => /banned from the casino/i.test(msg)), `expected banned wording, logs=${JSON.stringify(blocked.logs)}`);
+    } finally {
+      await cleanupRole(client, bannedRoleId);
+    }
   });
 
   it('sets and reads the jackpot and report commands', async () => {
@@ -525,6 +559,42 @@ describe('casino module', () => {
     const stats = await triggerCommand(ctx.players[0]!.playerId, `${prefix}casinostats`);
     assert.equal(stats.success, true, `expected casinostats success, logs=${JSON.stringify(stats.logs)}`);
     assert.ok(stats.logs.some((msg) => /remaining/i.test(msg)), `expected actionable cap feedback, logs=${JSON.stringify(stats.logs)}`);
+  });
+
+  it('expires pending and accepted duels through the cleanup cronjob with full refunds', async () => {
+    const challenger = ctx.players[0]!;
+    const target = ctx.players[1]!;
+    const targetName = (await client.player.playerControllerGetOne(target.playerId)).data.data.name;
+
+    const beforePending = await getPlayerCurrency(challenger.playerId);
+    const pending = await triggerCommand(challenger.playerId, `${prefix}duel ${targetName} 12`);
+    assert.equal(pending.success, true, `expected pending duel success, logs=${JSON.stringify(pending.logs)}`);
+    await updateVariable('casino_duel', challenger.playerId, (duel) => ({
+      ...duel,
+      startedAt: new Date(Date.now() - 2 * 60 * 1000).toISOString(),
+    }));
+    const cleanupPending = await triggerCronjob(expireSessionsCronjobId);
+    assert.equal(cleanupPending.success, true, `expected pending duel cleanup success, logs=${JSON.stringify(cleanupPending.logs)}`);
+    assert.equal(await getVariable('casino_duel', challenger.playerId), null, 'expected pending duel deletion after expiry');
+    assert.equal(await getPlayerCurrency(challenger.playerId), beforePending, 'expected pending duel refund for challenger');
+
+    const beforeAccepted1 = await getPlayerCurrency(challenger.playerId);
+    const beforeAccepted2 = await getPlayerCurrency(target.playerId);
+    const accepted = await triggerCommand(challenger.playerId, `${prefix}duel ${targetName} 14`);
+    assert.equal(accepted.success, true, `expected accepted duel challenge success, logs=${JSON.stringify(accepted.logs)}`);
+    const accept = await triggerCommand(target.playerId, `${prefix}duel accept`);
+    assert.equal(accept.success, true, `expected duel accept success, logs=${JSON.stringify(accept.logs)}`);
+    await updateVariable('casino_duel', challenger.playerId, (duel) => ({
+      ...duel,
+      state: 'accepted',
+      acceptedStakePlaced: true,
+      startedAt: new Date(Date.now() - 4 * 60 * 1000).toISOString(),
+    }));
+    const cleanupAccepted = await triggerCronjob(expireSessionsCronjobId);
+    assert.equal(cleanupAccepted.success, true, `expected accepted duel cleanup success, logs=${JSON.stringify(cleanupAccepted.logs)}`);
+    assert.equal(await getVariable('casino_duel', challenger.playerId), null, 'expected accepted duel deletion after expiry');
+    assert.equal(await getPlayerCurrency(challenger.playerId), beforeAccepted1, 'expected accepted duel refund for challenger');
+    assert.equal(await getPlayerCurrency(target.playerId), beforeAccepted2, 'expected accepted duel refund for opponent');
   });
 
   it('expires temporary bans and old windows via cronjobs', async () => {

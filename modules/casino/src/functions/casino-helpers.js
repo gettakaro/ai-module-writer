@@ -28,7 +28,7 @@ export const DEFAULT_STATS = {
 };
 
 export function roundCurrency(value) {
-  return Math.max(0, Math.round(Number(value) || 0));
+  return Math.round(Number(value) || 0);
 }
 
 export function formatCurrency(value) {
@@ -39,8 +39,8 @@ export function nowIso() {
   return new Date().toISOString();
 }
 
-export function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+export function sleep() {
+  return Promise.resolve();
 }
 
 export function formatUtcTimestamp(value) {
@@ -784,11 +784,13 @@ export async function refreshLeaderboardCache(gameServerId, moduleId) {
     winrate: Number(entry.stats.gamesPlayed ?? 0) > 0 ? Number((((Number(entry.stats.wins ?? 0)) / Number(entry.stats.gamesPlayed ?? 0)) * 100).toFixed(2)) : 0,
   })));
 
+  const roiEligible = [...enriched].filter((e) => e.gamesPlayed >= 3);
+  const winrateEligible = [...enriched].filter((e) => e.gamesPlayed >= 3);
   const cache = {
     topWager: [...enriched].sort((a, b) => b.wagered - a.wagered).slice(0, 10),
     topWon: [...enriched].sort((a, b) => b.won - a.won).slice(0, 10),
-    topRoi: [...enriched].filter((e) => e.gamesPlayed >= 3).sort((a, b) => b.roi - a.roi).slice(0, 10),
-    topWinrate: [...enriched].filter((e) => e.gamesPlayed >= 3).sort((a, b) => b.winrate - a.winrate).slice(0, 10),
+    topRoi: (roiEligible.length > 0 ? roiEligible : [...enriched]).sort((a, b) => b.roi - a.roi).slice(0, 10),
+    topWinrate: (winrateEligible.length > 0 ? winrateEligible : [...enriched]).sort((a, b) => b.winrate - a.winrate).slice(0, 10),
     topBiggest: [...enriched].sort((a, b) => b.biggest - a.biggest).slice(0, 10),
     refreshedAt: nowIso(),
   };
@@ -1023,9 +1025,15 @@ export async function sweepExpiredSessions(gameServerId, moduleId, config) {
           const session = JSON.parse(row.value);
           const startedAt = new Date(session.startedAt).getTime();
           if (startedAt && now - startedAt >= 15 * 60 * 1000) {
-            await refund({ gameServerId, moduleId, playerId: row.playerId, amount: session.stake, config });
-            await takaro.variable.variableControllerDelete(row.id);
-            actions.push({ type: 'refund', playerId: row.playerId, key, amount: session.stake });
+            await withCasinoLocks(gameServerId, moduleId, [`player:${row.playerId}`], async () => {
+              const current = await getPlayerSession(gameServerId, moduleId, key, row.playerId);
+              if (!current) return;
+              const currentStartedAt = new Date(current.startedAt).getTime();
+              if (!(currentStartedAt && now - currentStartedAt >= 15 * 60 * 1000)) return;
+              await refund({ gameServerId, moduleId, playerId: row.playerId, amount: current.stake, config, skipLock: true });
+              await deletePlayerSession(gameServerId, moduleId, key, row.playerId);
+              actions.push({ type: 'refund', playerId: row.playerId, key, amount: current.stake });
+            });
           }
         } catch (err) {
           console.error(`casino-helpers: failed to parse session ${row.id}: ${err}`);
@@ -1051,12 +1059,19 @@ export async function sweepExpiredSessions(gameServerId, moduleId, config) {
         const startedAt = new Date(duel.startedAt).getTime();
         const ttlMs = duel.state === 'accepted' ? 3 * 60 * 1000 : 60 * 1000;
         if (startedAt && now - startedAt >= ttlMs) {
-          await refund({ gameServerId, moduleId, playerId: row.playerId, amount: duel.amount, config });
-          if (duel.acceptedStakePlaced && duel.opponentId) {
-            await refund({ gameServerId, moduleId, playerId: duel.opponentId, amount: duel.amount, config });
-          }
-          await takaro.variable.variableControllerDelete(row.id);
-          actions.push({ type: 'duel-expired', challengerId: row.playerId, opponentId: duel.opponentId, amount: duel.amount });
+          await withCasinoLocks(gameServerId, moduleId, ['duel-registry', `player:${row.playerId}`, `player:${duel.opponentId}`], async () => {
+            const current = await getDuel(gameServerId, moduleId, row.playerId);
+            if (!current) return;
+            const currentStartedAt = new Date(current.startedAt).getTime();
+            const currentTtlMs = current.state === 'accepted' ? 3 * 60 * 1000 : 60 * 1000;
+            if (!(currentStartedAt && now - currentStartedAt >= currentTtlMs)) return;
+            await refund({ gameServerId, moduleId, playerId: row.playerId, amount: current.amount, config, skipLock: true });
+            if (current.acceptedStakePlaced && current.opponentId) {
+              await refund({ gameServerId, moduleId, playerId: current.opponentId, amount: current.amount, config, skipLock: true });
+            }
+            await deleteDuel(gameServerId, moduleId, row.playerId);
+            actions.push({ type: 'duel-expired', challengerId: row.playerId, opponentId: current.opponentId, amount: current.amount });
+          });
         }
       } catch (err) {
         console.error(`casino-helpers: failed to parse duel row ${row.id}: ${err}`);
@@ -1071,23 +1086,29 @@ export async function sweepExpiredSessions(gameServerId, moduleId, config) {
 
 export async function handleDisconnect(gameServerId, moduleId, playerId, config) {
   const refunds = [];
-  for (const key of [KEY_HILO_SESSION, KEY_BLACKJACK_SESSION]) {
-    const session = await getPlayerSession(gameServerId, moduleId, key, playerId);
-    if (session) {
-      await refund({ gameServerId, moduleId, playerId, amount: session.stake, config });
+
+  await withCasinoLocks(gameServerId, moduleId, [`player:${playerId}`], async () => {
+    for (const key of [KEY_HILO_SESSION, KEY_BLACKJACK_SESSION]) {
+      const session = await getPlayerSession(gameServerId, moduleId, key, playerId);
+      if (!session) continue;
+      await refund({ gameServerId, moduleId, playerId, amount: session.stake, config, skipLock: true });
       await deletePlayerSession(gameServerId, moduleId, key, playerId);
       refunds.push({ key, amount: session.stake });
     }
-  }
+  });
 
   const duelRecord = await findDuelForPlayer(gameServerId, moduleId, playerId);
   if (duelRecord) {
-    await refund({ gameServerId, moduleId, playerId: duelRecord.challengerId, amount: duelRecord.duel.amount, config });
-    if (duelRecord.duel.acceptedStakePlaced && duelRecord.duel.opponentId) {
-      await refund({ gameServerId, moduleId, playerId: duelRecord.duel.opponentId, amount: duelRecord.duel.amount, config });
-    }
-    await deleteDuel(gameServerId, moduleId, duelRecord.challengerId);
-    refunds.push({ key: KEY_DUEL, amount: duelRecord.duel.amount });
+    await withCasinoLocks(gameServerId, moduleId, ['duel-registry', `player:${duelRecord.challengerId}`, `player:${duelRecord.duel.opponentId}`], async () => {
+      const current = await getDuel(gameServerId, moduleId, duelRecord.challengerId);
+      if (!current) return;
+      await refund({ gameServerId, moduleId, playerId: duelRecord.challengerId, amount: current.amount, config, skipLock: true });
+      if (current.acceptedStakePlaced && current.opponentId) {
+        await refund({ gameServerId, moduleId, playerId: current.opponentId, amount: current.amount, config, skipLock: true });
+      }
+      await deleteDuel(gameServerId, moduleId, duelRecord.challengerId);
+      refunds.push({ key: KEY_DUEL, amount: current.amount });
+    });
   }
 
   return refunds;

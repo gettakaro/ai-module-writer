@@ -25,12 +25,12 @@ async function main() {
 
   const [key, field, title] = map[category];
   const rows = cache[key] ?? [];
+  const lines = [`🏆 ${title}`];
   if (rows.length === 0) {
-    await pog.pm('No casino leaderboard data yet.');
+    lines.push('No casino leaderboard data yet.');
+    await pog.pm(lines.join('\n'));
     return;
   }
-
-  const lines = [`🏆 ${title}`];
   rows.forEach((row, index) => {
     const raw = row[field];
     const value = field === 'roi' || field === 'winrate' ? `${raw}%` : formatCurrency(raw);

@@ -67,9 +67,9 @@ async function main() {
         await setDuel(gameServerId, mod.moduleId, found.challengerId, current);
         await announce(
           gameServerId,
-          `⚔️ ${current.opponentName} accepted ${current.challengerName}'s duel for ${formatCurrency(current.amount)} coin. Both players: /duel rock, /duel paper, or /duel scissors.`,
+          `⚔️ ${current.opponentName} accepted ${current.challengerName}'s duel for ${formatCurrency(current.amount)} coin. Both players: /duel rock, /duel paper, or /duel scissors within 3 minutes or the duel expires and both stakes are refunded.`,
         );
-        await pog.pm('⚔️ Duel accepted. Both players: /duel rock, /duel paper, or /duel scissors.');
+        await pog.pm('⚔️ Duel accepted. Both players: /duel rock, /duel paper, or /duel scissors within 3 minutes or the duel expires and both stakes are refunded.');
         return;
       }
 
