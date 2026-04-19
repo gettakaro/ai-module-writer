@@ -50,11 +50,17 @@ async function main() {
         if (rewardRollback.reason === 'item-rewards-cannot-be-clawed-back-automatically') {
           throw new TakaroUserError('This paid referral granted item rewards, so it cannot be unlinked automatically. Please compensate players manually instead.');
         }
+        if (rewardRollback.reason === 'insufficient-currency-for-clawback') {
+          throw new TakaroUserError('This paid referral cannot be unlinked automatically because the referrer no longer has the full reward amount available for clawback. Please resolve the currency difference manually first.');
+        }
       }
 
       let welcomeBonusRolledBack = 0;
       if (welcomeBonusAmount > 0) {
         welcomeBonusRolledBack = await rollbackWelcomeBonus(gameServerId, referee.id, welcomeBonusAmount);
+        if (welcomeBonusRolledBack !== welcomeBonusAmount) {
+          throw new TakaroUserError('This referral cannot be unlinked automatically because the referee no longer has the full welcome bonus available for clawback. Please resolve the currency difference manually first.');
+        }
       }
 
       await adjustReferrerStatsForLink(gameServerId, moduleId, link.referrerId, link, -1);

@@ -9,6 +9,9 @@ import {
   getNormalizedConfig,
   getPog,
   getPlaytimeMinutes,
+  describeReferralStatusForPlayer,
+  describeReferralProblemForPlayer,
+  requireCommandPermission,
 } from './referral-helpers.js';
 
 function formatMinutes(value) {
@@ -17,6 +20,8 @@ function formatMinutes(value) {
 
 async function main() {
   const { pog, gameServerId, module: mod } = data;
+
+  requireCommandPermission(pog, 'REFERRAL_USE', 'You do not have permission to use referral commands.');
 
   const [codeInfo, link, stats, currentPog] = await Promise.all([
     getReferralCode(gameServerId, mod.moduleId, pog.playerId),
@@ -39,7 +44,7 @@ async function main() {
   ];
 
   if (link) {
-    lines.push(`Your referral status: ${link.status}`);
+    lines.push(`Your referral status: ${describeReferralStatusForPlayer(link)}`);
     if (link.status === 'pending') {
       const currentPlaytimeMinutes = getPlaytimeMinutes(currentPog);
       const earnedSinceLink = Math.max(0, currentPlaytimeMinutes - (Number(link.playtimeAtLink ?? 0) || 0));
@@ -48,8 +53,8 @@ async function main() {
         `Qualifying progress: ${formatMinutes(earnedSinceLink)}/${formatMinutes(config.playtimeThresholdMinutes)} minutes (${formatMinutes(remainingMinutes)} remaining)`,
       );
     }
-    if (link.status === 'rejected' && link.rejectionReason) {
-      lines.push(`Last payout error: ${link.rejectionReason}`);
+    if (link.status === 'rejected') {
+      lines.push(`Payout issue: ${describeReferralProblemForPlayer(link.rejectionReason)}`);
     }
   }
 

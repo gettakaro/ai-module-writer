@@ -1,8 +1,10 @@
 import { data } from '@takaro/helpers';
-import { ensureReferralCode, getCommandPrefix } from './referral-helpers.js';
+import { ensureReferralCode, getCommandPrefix, requireCommandPermission } from './referral-helpers.js';
 
 async function main() {
   const { pog, player, gameServerId, module: mod } = data;
+
+  requireCommandPermission(pog, 'REFERRAL_USE', 'You do not have permission to use referral commands.');
 
   const code = await ensureReferralCode(gameServerId, mod.moduleId, pog.playerId);
   const prefix = await getCommandPrefix(gameServerId);

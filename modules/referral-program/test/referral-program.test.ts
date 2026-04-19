@@ -460,7 +460,7 @@ describe('referral-program module — currency flow and admin repair', () => {
         harness.client,
         harness.ctx.players[0].playerId,
         harness.ctx.gameServer.id,
-        [{ code: 'REFERRAL_VIP', count: 3 } as PermissionInput],
+        [{ code: 'REFERRAL_VIP', count: 9 } as PermissionInput],
       ),
     );
 
@@ -477,7 +477,7 @@ describe('referral-program module — currency flow and admin repair', () => {
     assert.equal(parseSuccess(sweepEvent), true, 'Expected sweep cronjob to succeed for VIP payout');
 
     const aliceCurrencyAfter = await harness.getCurrency(harness.ctx.players[0].playerId);
-    assert.equal(aliceCurrencyAfter, aliceCurrencyBefore + 575, 'Expected VIP payout');
+    assert.equal(aliceCurrencyAfter, aliceCurrencyBefore + 625, 'Expected VIP payout capped at +25%');
 
     const leaderboard = await harness.triggerCommand(harness.ctx.players[0].playerId, 'reftop');
     assert.equal(parseSuccess(leaderboard), true, 'Expected /reftop to succeed');
@@ -533,15 +533,16 @@ describe('referral-program module — permission denials', () => {
     await harness.cleanup();
   });
 
-  it('allows public referral commands without provisioning a custom REFERRAL_USE role', async () => {
-    const refcode = await harness.triggerCommand(harness.ctx.players[0].playerId, 'refcode');
-    assert.equal(parseSuccess(refcode), true, 'Expected /refcode to be usable on a fresh install');
+  it('denies REFERRAL_USE commands without the permission', async () => {
+    for (const command of ['refcode', 'refstats', 'reftop']) {
+      const event = await harness.triggerCommand(harness.ctx.players[0].playerId, command);
+      assert.equal(parseSuccess(event), false, `Expected /${command} denial`);
+      assert.ok(parseLogs(event).some((msg) => msg.includes('do not have permission')));
+    }
 
-    const refstats = await harness.triggerCommand(harness.ctx.players[0].playerId, 'refstats');
-    assert.equal(parseSuccess(refstats), true, 'Expected /refstats to be usable on a fresh install');
-
-    const reftop = await harness.triggerCommand(harness.ctx.players[0].playerId, 'reftop');
-    assert.equal(parseSuccess(reftop), true, 'Expected /reftop to be usable on a fresh install');
+    const referral = await harness.triggerCommand(harness.ctx.players[0].playerId, 'referral ABC123');
+    assert.equal(parseSuccess(referral), false, 'Expected /referral denial');
+    assert.ok(parseLogs(referral).some((msg) => msg.includes('do not have permission')));
   });
 
   it('denies REFERRAL_ADMIN commands without the permission', async () => {
@@ -696,7 +697,7 @@ describe('referral-program module — admin command validation and repair flows'
     await harness.cleanup(roleIds);
   });
 
-  it('covers missing arguments, lookup failures, self-link rejection, duplicate-link rejection, and missing-link unlink rejection', async () => {
+  it('covers missing arguments, lookup failures, self-link rejection, cap enforcement, duplicate-link rejection, and missing-link unlink rejection', async () => {
     const usage = await harness.triggerCommand(harness.ctx.players[0].playerId, 'reflink "" ""');
     assert.equal(parseSuccess(usage), false);
     assert.ok(parseLogs(usage).some((msg) => msg.includes('Usage: /reflink <referee> <referrer>') || msg.includes('Usage: reflink <referee> <referrer>')));
@@ -720,6 +721,24 @@ describe('referral-program module — admin command validation and repair flows'
     const noLink = await harness.triggerCommand(harness.ctx.players[0].playerId, `refunlink ${bobName}`);
     assert.equal(parseSuccess(noLink), false);
     assert.ok(parseLogs(noLink).some((msg) => msg.includes('does not have a referral link')));
+
+    await harness.upsertVariableValue(
+      `${REFERRAL_STATS_PREFIX}${harness.ctx.players[2].playerId}`,
+      defaultStats({
+        referralsToday: 5,
+        lastReferralDay: new Date().toISOString().slice(0, 10),
+      }),
+      harness.ctx.players[2].playerId,
+    );
+    const cappedReflink = await harness.triggerCommand(harness.ctx.players[0].playerId, `reflink ${bobName} ${malloryName}`);
+    assert.equal(parseSuccess(cappedReflink), false);
+    assert.ok(parseLogs(cappedReflink).some((msg) => msg.includes('daily referral limit')));
+
+    await harness.setVariableValue(
+      `${REFERRAL_STATS_PREFIX}${harness.ctx.players[2].playerId}`,
+      defaultStats(),
+      harness.ctx.players[2].playerId,
+    );
 
     const initialLink = await harness.triggerCommand(harness.ctx.players[0].playerId, `reflink ${bobName} ${malloryName}`);
     assert.equal(parseSuccess(initialLink), true);
@@ -817,6 +836,35 @@ describe('referral-program module — admin command validation and repair flows'
     assert.equal(statsAfterPaidUnlink?.referralsTotal, 0);
     assert.equal(statsAfterPaidUnlink?.referralsPaid, 0);
     assert.equal(statsAfterPaidUnlink?.currencyEarned, 0);
+  });
+
+  it('refuses to unlink a paid referral when the full reward cannot be clawed back', async () => {
+    const paidLink = await harness.triggerCommand(harness.ctx.players[0].playerId, `reflink ${malloryName} ${bobName}`);
+    assert.equal(parseSuccess(paidLink), true, 'Expected setup /reflink to succeed');
+
+    await harness.client.playerOnGameserver.playerOnGameServerControllerSetCurrency(
+      harness.ctx.gameServer.id,
+      harness.ctx.players[1].playerId,
+      { currency: 0 },
+    );
+
+    const partialUnlink = await harness.triggerCommand(harness.ctx.players[0].playerId, `refunlink ${malloryName}`);
+    assert.equal(parseSuccess(partialUnlink), false, 'Expected /refunlink to fail when clawback would be partial');
+    assert.ok(parseLogs(partialUnlink).some((msg) => msg.includes('full reward amount available for clawback')));
+
+    const linkAfterFailure = await harness.getVariableValue<ReferralLink>(
+      `${REFERRAL_LINK_PREFIX}${harness.ctx.players[2].playerId}`,
+      harness.ctx.players[2].playerId,
+    );
+    assert.equal(linkAfterFailure?.status, 'paid');
+
+    await harness.client.playerOnGameserver.playerOnGameServerControllerAddCurrency(
+      harness.ctx.gameServer.id,
+      harness.ctx.players[1].playerId,
+      { currency: 500 },
+    );
+    const cleanup = await harness.triggerCommand(harness.ctx.players[0].playerId, `refunlink ${malloryName}`);
+    assert.equal(parseSuccess(cleanup), true, 'Expected cleanup unlink once clawback is possible again');
   });
 
   it('keeps admin repair flows consistent when payouts are in progress or explicitly deferred', async () => {
@@ -1293,6 +1341,9 @@ describe('referral-program module — item payout retries and rejection', () => 
     const refstats = await harness.triggerCommand(harness.ctx.players[0].playerId, 'refstats');
     assert.equal(parseSuccess(refstats), true, 'Expected /refstats to succeed after rejection');
     assert.ok(parseLogs(refstats).some((msg) => msg.includes('Referrals: total=0, paid=0, pending=0')));
+    assert.ok(parseLogs(refstats).some((msg) => msg.includes('Your referral status: needs admin help')));
+    assert.ok(parseLogs(refstats).some((msg) => msg.includes('Payout issue: Reward delivery failed because the configured referral item is unavailable.')));
+    assert.ok(!parseLogs(refstats).some((msg) => msg.includes('Configured referral reward item "definitely_not_a_real_item"')));
   });
 });
 
@@ -1326,7 +1377,7 @@ describe('referral-program module — real Paper + bot verification', () => {
     }
   });
 
-  it('executes /refcode and /referral through the real bot chat path', async () => {
+  it('exercises every referral command plus hook and cron through the real Paper server', async () => {
     await fetchJson(`${botBaseUrl}/status`);
 
     client = await createClient();
@@ -1353,6 +1404,9 @@ describe('referral-program module — real Paper + bot verification', () => {
     });
 
     const prefix = await getCommandPrefix(client, realGameServerId);
+    const sweepCronjobId = mod.latestVersion.cronJobs.find((c) => c.name === 'sweep-pending-referrals')!.id;
+    const resetCronjobId = mod.latestVersion.cronJobs.find((c) => c.name === 'reset-daily-counters')!.id;
+    const disconnectHookId = mod.latestVersion.hooks.find((h) => h.name === 'on-player-disconnect')!.id;
 
     for (const name of botNames) {
       await fetchJson(`${botBaseUrl}/bots`, {
@@ -1368,11 +1422,14 @@ describe('referral-program module — real Paper + bot verification', () => {
       waitForRealPlayer(client, realGameServerId, `Bot_${botNames[1]}`),
     ]);
 
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    roleIds.push(await assignPermissions(client, referrerReal.playerId, realGameServerId, ['REFERRAL_USE', 'REFERRAL_ADMIN']));
+    roleIds.push(await assignPermissions(client, refereeReal.playerId, realGameServerId, ['REFERRAL_USE']));
+
+    await new Promise((resolve) => setTimeout(resolve, 8000));
 
     const sendBotCommand = async (botName: string, message: string) => {
       let lastError: unknown;
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      for (let attempt = 1; attempt <= 4; attempt++) {
         const startedAt = new Date();
         await fetchJson(`${botBaseUrl}/bot/${botName}/chat`, {
           method: 'POST',
@@ -1385,15 +1442,27 @@ describe('referral-program module — real Paper + bot verification', () => {
             eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
             gameserverId: realGameServerId,
             after: startedAt,
-            timeout: 15000,
+            timeout: 20000,
           });
         } catch (err) {
           lastError = err;
-          await new Promise((resolve) => setTimeout(resolve, 3000));
+          await new Promise((resolve) => setTimeout(resolve, 4000));
         }
       }
 
       throw lastError instanceof Error ? lastError : new Error(`Timed out waiting for command event for ${message}`);
+    };
+
+    const getLinkVariable = async () => {
+      const result = await client.variable.variableControllerSearch({
+        filters: {
+          key: [`${REFERRAL_LINK_PREFIX}${refereeReal.playerId}`],
+          gameServerId: [realGameServerId],
+          moduleId: [moduleId!],
+          playerId: [refereeReal.playerId],
+        },
+      });
+      return result.data.data[0] ?? null;
     };
 
     const refcodeEvent = await sendBotCommand(botNames[0], `${prefix}refcode`);
@@ -1403,15 +1472,108 @@ describe('referral-program module — real Paper + bot verification', () => {
       filters: {
         key: [`${REFERRAL_CODE_PREFIX}${referrerReal.playerId}`],
         gameServerId: [realGameServerId],
-        moduleId: [moduleId],
+        moduleId: [moduleId!],
         playerId: [referrerReal.playerId],
       },
     });
     const code = JSON.parse(referrerCode.data.data[0].value).code as string;
     assert.ok(code, 'Expected real bot referrer code to be stored');
 
+    const emptyTop = await sendBotCommand(botNames[0], `${prefix}reftop`);
+    assert.equal(parseSuccess(emptyTop), true, 'Expected real bot /reftop to work before any payouts');
+
     const referralEvent = await sendBotCommand(botNames[1], `${prefix}referral ${code}`);
     assert.equal(parseSuccess(referralEvent), true, 'Expected real bot /referral to execute through Takaro');
     assert.ok(parseLogs(referralEvent).some((msg) => msg.includes('linked referee')));
+
+    const pendingStats = await sendBotCommand(botNames[1], `${prefix}refstats`);
+    assert.equal(parseSuccess(pendingStats), true, 'Expected real bot /refstats to work for the referee');
+    assert.ok(parseLogs(pendingStats).some((msg) => msg.includes('pending qualification')));
+
+    const linkVariable = await getLinkVariable();
+    assert.ok(linkVariable, 'Expected real referral link to exist after /referral');
+    const linkPayload = JSON.parse(linkVariable!.value) as Record<string, unknown>;
+    await client.variable.variableControllerUpdate(linkVariable!.id, {
+      value: JSON.stringify({
+        ...linkPayload,
+        playtimeAtLink: -61,
+      }),
+    });
+
+    const hookStartedAt = new Date();
+    await client.hook.hookControllerTrigger({
+      gameServerId: realGameServerId,
+      moduleId: moduleId!,
+      playerId: refereeReal.playerId,
+      eventType: HookTriggerDTOEventTypeEnum.PlayerDisconnected,
+      eventMeta: {},
+      hookId: disconnectHookId,
+    } as never);
+    const hookEvent = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.HookExecuted,
+      gameserverId: realGameServerId,
+      after: hookStartedAt,
+      timeout: 20000,
+    });
+    assert.equal(parseSuccess(hookEvent), true, 'Expected real disconnect hook execution');
+    assert.ok(parseLogs(hookEvent).some((msg) => msg.includes('disconnect hook') && msg.includes('"paid":true')));
+
+    const paidTop = await sendBotCommand(botNames[0], `${prefix}reftop`);
+    assert.equal(parseSuccess(paidTop), true, 'Expected real bot /reftop to reflect the paid referral');
+    assert.ok(parseLogs(paidTop).some((msg) => msg.includes('paid=1')));
+
+    const unlinkEvent = await sendBotCommand(botNames[0], `${prefix}refunlink Bot_${botNames[1]}`);
+    assert.equal(parseSuccess(unlinkEvent), true, 'Expected real bot /refunlink to work after a paid referral');
+
+    const relinkClaim = await sendBotCommand(botNames[1], `${prefix}referral ${code}`);
+    assert.equal(parseSuccess(relinkClaim), true, 'Expected referee to be able to claim again after /refunlink');
+
+    const relinkVar = await getLinkVariable();
+    assert.ok(relinkVar, 'Expected new pending link before real cron verification');
+    const relinkPayload = JSON.parse(relinkVar!.value) as Record<string, unknown>;
+    await client.variable.variableControllerUpdate(relinkVar!.id, {
+      value: JSON.stringify({
+        ...relinkPayload,
+        playtimeAtLink: -61,
+      }),
+    });
+
+    const cronStartedAt = new Date();
+    await client.cronjob.cronJobControllerTrigger({
+      gameServerId: realGameServerId,
+      cronjobId: sweepCronjobId,
+      moduleId: moduleId!,
+    });
+    const sweepEvent = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CronjobExecuted,
+      gameserverId: realGameServerId,
+      after: cronStartedAt,
+      timeout: 20000,
+    });
+    assert.equal(parseSuccess(sweepEvent), true, 'Expected real sweep cronjob execution');
+    assert.ok(parseLogs(sweepEvent).some((msg) => msg.includes('"paid":true')));
+
+    const secondUnlink = await sendBotCommand(botNames[0], `${prefix}refunlink Bot_${botNames[1]}`);
+    assert.equal(parseSuccess(secondUnlink), true, 'Expected second real /refunlink cleanup to work');
+
+    const reflinkEvent = await sendBotCommand(botNames[0], `${prefix}reflink Bot_${botNames[1]} Bot_${botNames[0]}`);
+    assert.equal(parseSuccess(reflinkEvent), true, 'Expected real bot /reflink repair flow to work');
+
+    const postRepairStats = await sendBotCommand(botNames[0], `${prefix}refstats`);
+    assert.equal(parseSuccess(postRepairStats), true, 'Expected real bot /refstats to work after /reflink');
+
+    const resetStartedAt = new Date();
+    await client.cronjob.cronJobControllerTrigger({
+      gameServerId: realGameServerId,
+      cronjobId: resetCronjobId,
+      moduleId: moduleId!,
+    });
+    const resetEvent = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CronjobExecuted,
+      gameserverId: realGameServerId,
+      after: resetStartedAt,
+      timeout: 20000,
+    });
+    assert.equal(parseSuccess(resetEvent), true, 'Expected real reset cronjob execution');
   });
 });

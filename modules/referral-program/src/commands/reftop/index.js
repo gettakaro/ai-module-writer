@@ -1,8 +1,10 @@
 import { data } from '@takaro/helpers';
-import { listStatsEntries, getPlayerName } from './referral-helpers.js';
+import { listStatsEntries, getPlayerName, requireCommandPermission } from './referral-helpers.js';
 
 async function main() {
   const { pog, gameServerId, module: mod } = data;
+
+  requireCommandPermission(pog, 'REFERRAL_USE', 'You do not have permission to use referral commands.');
 
   const entries = await listStatsEntries(gameServerId, mod.moduleId);
   const ranked = entries

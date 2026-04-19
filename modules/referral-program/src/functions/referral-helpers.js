@@ -1,5 +1,11 @@
 import { takaro, checkPermission, TakaroUserError } from '@takaro/helpers';
 
+export function requireCommandPermission(pog, permission, message) {
+  if (!checkPermission(pog, permission)) {
+    throw new TakaroUserError(message);
+  }
+}
+
 export const REFERRAL_CODE_PREFIX = 'referral_code:';
 export const REFERRAL_CODE_LOOKUP_PREFIX = 'referral_code_lookup:';
 export const REFERRAL_LINK_PREFIX = 'referral_link:';
@@ -506,6 +512,20 @@ function normalizeConfiguredItem(item) {
   };
 }
 
+async function validateConfiguredItemExists(gameServerId, itemName) {
+  const result = await takaro.item.itemControllerSearch({
+    filters: {
+      name: [itemName],
+      gameserverId: [gameServerId],
+    },
+    limit: 1,
+  });
+
+  if (!result.data.data.length) {
+    throw new TakaroUserError(`Configured referral reward item "${itemName}" was not found for this game server.`);
+  }
+}
+
 function serializePreparedRewardFields(reward, multiplierInfo, reason, retries = 0) {
   return {
     rewardType: reward.rewardType,
@@ -573,6 +593,8 @@ export async function planReferrerReward(gameServerId, referrerId, config, multi
     throw new TakaroUserError('A referral reward item is missing item, amount, or quality.');
   }
 
+  await validateConfiguredItemExists(gameServerId, chosen.item);
+
   return {
     rewardType: 'item',
     item: chosen.item,
@@ -613,7 +635,12 @@ export async function awardWelcomeBonus(gameServerId, refereeId, config) {
 export async function rollbackWelcomeBonus(gameServerId, refereeId, amount) {
   const normalized = Math.max(0, Math.floor(Number(amount) || 0));
   if (!normalized) return 0;
-  return changeCurrency(gameServerId, refereeId, -normalized);
+
+  const pog = await getPog(gameServerId, refereeId);
+  const currentCurrency = Math.max(0, Math.floor(Number(pog?.currency) || 0));
+  if (currentCurrency < normalized) return 0;
+
+  return Math.abs(await changeCurrency(gameServerId, refereeId, -normalized));
 }
 
 export async function rollbackReferrerReward(gameServerId, referrerId, link) {
@@ -628,10 +655,26 @@ export async function rollbackReferrerReward(gameServerId, referrerId, link) {
 
   if (reward.rewardType === 'currency') {
     const amount = Math.max(0, Math.floor(Number(reward.amount) || 0));
+    const pog = await getPog(gameServerId, referrerId);
+    const currentCurrency = Math.max(0, Math.floor(Number(pog?.currency) || 0));
+
+    if (currentCurrency < amount) {
+      return {
+        rolledBack: false,
+        skipped: true,
+        rewardType: 'currency',
+        amount,
+        currentCurrency,
+        fullRollback: false,
+        reason: 'insufficient-currency-for-clawback',
+      };
+    }
+
     if (amount > 0) {
       await changeCurrency(gameServerId, referrerId, -amount);
     }
-    return { rolledBack: amount > 0, rewardType: 'currency', amount };
+
+    return { rolledBack: amount > 0, rewardType: 'currency', amount, currentCurrency, fullRollback: true };
   }
 
   return {
@@ -674,15 +717,65 @@ function describeReward(reward) {
   return `${Math.max(1, Math.floor(Number(reward.amount) || 1))}x ${reward.item}${reward.quality ? ` (${reward.quality})` : ''}`;
 }
 
+export function describePayoutDelayReason(reason) {
+  switch (reason) {
+    case 'payout-in-progress':
+      return 'another payout update is already in progress';
+    case 'payout-finalization-pending':
+      return 'the reward was prepared and will be finalized on the next retry';
+    case 'payout-failed':
+      return 'reward delivery failed and will be retried automatically';
+    case 'rejected-after-retries':
+      return 'reward delivery failed repeatedly and now needs admin attention';
+    default:
+      return 'the reward could not be paid immediately and will be retried automatically';
+  }
+}
+
+export function describeReferralStatusForPlayer(link) {
+  switch (link?.status) {
+    case 'pending':
+      return 'pending qualification';
+    case 'paid':
+      return 'reward paid';
+    case 'rejected':
+      return 'needs admin help';
+    case 'paying':
+      return 'reward processing';
+    default:
+      return 'not linked';
+  }
+}
+
+export function describeReferralProblemForPlayer(reason) {
+  if (!reason) return 'Reward delivery ran into a problem. Please ask an admin to review the referral setup.';
+  if (/item .*not found/i.test(reason) || /missing item/i.test(reason)) {
+    return 'Reward delivery failed because the configured referral item is unavailable. Please ask an admin to review the reward setup.';
+  }
+  if (/no items are configured/i.test(reason)) {
+    return 'Reward delivery failed because referral items are not configured. Please ask an admin to review the reward setup.';
+  }
+  return 'Reward delivery failed repeatedly. Please ask an admin to review this referral.';
+}
+
 async function notifyReferralPayout(gameServerId, referrerId, refereeId, reward) {
   try {
     const [referrerName, refereeName] = await Promise.all([
       getPlayerName(referrerId),
       getPlayerName(refereeId),
     ]);
+    const summary = `${referrerName} earned ${describeReward(reward)} thanks to ${refereeName}'s completed referral.`;
     console.log(
       `referral-program: payout notification referrer=${referrerName} (${referrerId}), referee=${refereeName} (${refereeId}), reward=${describeReward(reward)}`,
     );
+
+    try {
+      await takaro.gameserver.gameServerControllerExecuteCommand(gameServerId, {
+        command: `say [Referral] ${summary}`,
+      });
+    } catch (broadcastErr) {
+      console.warn(`referral-program: failed to broadcast payout notification in-game: ${broadcastErr}`);
+    }
   } catch (err) {
     console.error(`referral-program: failed to record payout notification for referrer=${referrerId}, referee=${refereeId}: ${err}`);
   }
@@ -696,6 +789,7 @@ export async function applyPaidReferral({
   link,
   config,
   reason,
+  lockScopes,
 }) {
   const ownerToken = `${reason}:${new Date().toISOString()}:${Math.random().toString(36).slice(2, 10)}`;
   const lock = await tryAcquirePayoutLock(gameServerId, moduleId, refereeId, ownerToken);
@@ -704,11 +798,11 @@ export async function applyPaidReferral({
   }
 
   try {
-    return await withReferralLocks(
-      gameServerId,
-      moduleId,
-      [`referee-link:${refereeId}`, `referrer-quota:${referrerId}`],
-      async () => {
+    const mutationScopes = Array.isArray(lockScopes)
+      ? lockScopes
+      : [`referee-link:${refereeId}`, `referrer-quota:${referrerId}`];
+
+    const runPayout = async () => {
         const currentLink = await getReferralLink(gameServerId, moduleId, refereeId) ?? link;
         if (!currentLink) {
           return { paid: false, reason: 'missing-link' };
@@ -814,7 +908,17 @@ export async function applyPaidReferral({
         );
 
         return { paid: true, reward, multiplierInfo, link: updatedLink };
-      },
+      };
+
+    if (!mutationScopes.length) {
+      return await runPayout();
+    }
+
+    return await withReferralLocks(
+      gameServerId,
+      moduleId,
+      mutationScopes,
+      runPayout,
       {
         ownerTokenPrefix: `referral-payout:${refereeId}`,
         busyMessage: 'Another referral update is already in progress. Please try again in a moment.',

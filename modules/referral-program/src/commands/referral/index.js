@@ -17,6 +17,7 @@ import {
   rollbackWelcomeBonus,
   getTodayKey,
   getCommandPrefix,
+  requireCommandPermission,
   withReferralLocks,
 } from './referral-helpers.js';
 
@@ -31,6 +32,8 @@ function getWelcomeMessage(welcomeBonus, thresholdMinutes) {
 async function main() {
   const { pog, gameServerId, arguments: args, module: mod } = data;
   const moduleId = mod.moduleId;
+
+  requireCommandPermission(pog, 'REFERRAL_USE', 'You do not have permission to use referral commands.');
 
   const code = String(args.code || '').trim().toUpperCase();
   if (!code) {

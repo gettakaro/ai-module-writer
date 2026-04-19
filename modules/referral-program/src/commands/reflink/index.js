@@ -15,6 +15,7 @@ import {
   deleteReferralLink,
   getTodayKey,
   getCommandPrefix,
+  describePayoutDelayReason,
   withReferralLocks,
 } from './referral-helpers.js';
 
@@ -58,6 +59,12 @@ async function main() {
 
       const referrerStatsRaw = await getReferralStats(gameServerId, moduleId, referrer.id);
       const referrerStats = resetDailyCounterIfNeeded(referrerStatsRaw);
+      if (referrerStats.referralsToday >= config.maxReferralsPerDay) {
+        throw new TakaroUserError(`Player "${referrer.name}" has already reached the daily referral limit.`);
+      }
+      if (referrerStats.referralsTotal >= config.maxReferralsLifetime) {
+        throw new TakaroUserError(`Player "${referrer.name}" has already reached the lifetime referral limit.`);
+      }
 
       const baseLink = {
         referrerId: referrer.id,
@@ -104,6 +111,7 @@ async function main() {
           link: pendingLink,
           config,
           reason: 'admin-link',
+          lockScopes: [],
         });
 
         if (payout.paid) {
@@ -112,8 +120,9 @@ async function main() {
           return;
         }
 
+        const deferredReason = describePayoutDelayReason(payout.reason);
         console.warn(`referral-program: admin link created for referee=${referee.name}, referrer=${referrer.name}, payout deferred=${payout.reason}`);
-        await pog.pm(`Referral link created: ${referee.name} -> ${referrer.name}. Immediate payout was deferred (${payout.reason}); the sweep job will retry it.`);
+        await pog.pm(`Referral link created: ${referee.name} -> ${referrer.name}. Immediate payout was deferred because ${deferredReason}. The sweep job will retry it.`);
       } catch (err) {
         if (pendingAdded) {
           await removePendingReferee(gameServerId, moduleId, referee.id);
