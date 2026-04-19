@@ -121,14 +121,15 @@
     "kick": {
       "trigger": "kick",
       "description": "Kick an online player",
-      "helpText": "Usage: /kick <player-name-or-id> [reason] — target must be online on this server.",
+      "helpText": "Usage: /kick <player> [reason] — target must be online on this server.",
       "function": "src/commands/kick/index.js",
       "arguments": [
         {
           "name": "player",
-          "type": "string",
-          "helpText": "Takaro player name or ID for the online player to kick",
-          "position": 0
+          "type": "player",
+          "helpText": "The online player to kick",
+          "position": 0,
+          "defaultValue": null
         },
         {
           "name": "reason",
@@ -142,14 +143,15 @@
     "ban": {
       "trigger": "ban",
       "description": "Ban a Takaro-resolvable player temporarily or permanently",
-      "helpText": "Usage: /ban <player-name-or-id> <duration> [reason] — works for players already known to Takaro, including offline players it can resolve.",
+      "helpText": "Usage: /ban <player> <duration> [reason] — works for players already known to Takaro, including offline players it can resolve.",
       "function": "src/commands/ban/index.js",
       "arguments": [
         {
           "name": "player",
-          "type": "string",
-          "helpText": "Takaro player name or ID for the player to ban",
-          "position": 0
+          "type": "player",
+          "helpText": "The player to ban",
+          "position": 0,
+          "defaultValue": null
         },
         {
           "name": "duration",
@@ -169,14 +171,15 @@
     "givecurrency": {
       "trigger": "givecurrency",
       "description": "Grant currency to a player",
-      "helpText": "Usage: /givecurrency <player-name-or-id> <amount>",
+      "helpText": "Usage: /givecurrency <player> <amount> — target must currently be online on this server.",
       "function": "src/commands/givecurrency/index.js",
       "arguments": [
         {
           "name": "player",
-          "type": "string",
-          "helpText": "Takaro player name or ID for the player to receive currency",
-          "position": 0
+          "type": "player",
+          "helpText": "The online player who should receive currency",
+          "position": 0,
+          "defaultValue": null
         },
         {
           "name": "amount",
@@ -193,6 +196,9 @@
     },
     "utils-formatters": {
       "function": "src/functions/utils-formatters.js"
+    },
+    "utils-pure": {
+      "function": "src/functions/utils-pure.js"
     }
   }
 }

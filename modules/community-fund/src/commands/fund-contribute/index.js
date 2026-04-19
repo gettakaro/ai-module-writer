@@ -71,6 +71,10 @@ async function main() {
     }
 
     try {
+      if (config.debugForceStateWriteFailureAfterDeduct) {
+        throw new Error('Debug-forced contribution state failure after deduct');
+      }
+
       currentTotal = await getFundTotal(gameServerId, moduleId);
       newTotal = currentTotal + amount;
 

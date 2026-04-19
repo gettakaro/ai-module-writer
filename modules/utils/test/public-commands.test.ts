@@ -15,8 +15,7 @@ import {
   cleanupTestModules,
   cleanupTestGameServers,
 } from '../../../test/helpers/modules.js';
-import { formatOnlinePlayersLine } from '../src/functions/utils-formatters.js';
-import { collapsePlayersById, collectPaginatedResults } from '../src/functions/utils-helpers.js';
+import { collapsePlayersById, collectPaginatedResults, formatOnlinePlayersLine } from '../src/functions/utils-pure.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -141,7 +140,7 @@ describe('utils: public commands', () => {
 
   it('online pagination helper walks multiple pages until the reported total is reached', async () => {
     const requestedPages: number[] = [];
-    const players = await collectPaginatedResults(async ({ page, limit }) => {
+    const players = await collectPaginatedResults(async ({ page, limit }: { page: number; limit: number }) => {
       requestedPages.push(page);
       assert.equal(limit, 2);
 
@@ -175,7 +174,7 @@ describe('utils: public commands', () => {
     ]);
 
     assert.deepEqual(
-      unique.map((player) => ({ playerId: player.playerId, playerName: player.playerName, gameId: player.gameId })),
+      unique.map((player: { playerId?: string; playerName?: string; gameId?: string }) => ({ playerId: player.playerId, playerName: player.playerName, gameId: player.gameId })),
       [
         { playerId: '1', playerName: 'Amy', gameId: 'game-1' },
         { playerId: '2', playerName: 'Bea', gameId: 'game-2' },

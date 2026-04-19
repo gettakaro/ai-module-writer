@@ -90,7 +90,7 @@ function makeCronjobHelper(
 }
 
 // Test setup:
-//   voteDuration=120s, cooldownDuration=60s, restartDelay=0, passThreshold=51, minimumPlayers=2
+//   voteDuration=120s, cooldownDuration=60s, restartDelay=5, passThreshold=51, minimumPlayers=2
 //
 // Mock server provides 3 players:
 //   players[0] — has VOTE_RESTART_INITIATE (can start votes; also used as regular voter)
@@ -108,7 +108,7 @@ function makeCronjobHelper(
 //   6. /votestatus → shows active vote count + threshold
 //   7. players[1] /voteyes → 2/2 → immediate pass
 //   8. /votestatus → shows "restarting in Xs"
-//   9. Cronjob: restartDelay=0 elapsed → executes restart, clears state
+//   9. Cronjob: after we age passedAt beyond restartDelay, restart executes and clears state
 //   10. /voteyes with no active vote → rejected
 //   11. /votestatus with no active vote → "No active restart vote"
 //   12. Start new vote, manipulate state to simulate expiry, trigger cronjob, cooldown enforced
@@ -137,7 +137,7 @@ describe('vote-restart module', () => {
       userConfig: {
         voteDuration: 120,
         cooldownDuration: 60,
-        restartDelay: 0,
+        restartDelay: 5,
         restartCommand: 'say restart-test',
         passThreshold: 51,
         minimumPlayers: 2,
@@ -318,7 +318,7 @@ describe('vote-restart module', () => {
   });
 
   // ── Test 8: /votestatus shows passed vote with time remaining ─────────────
-  // Vote just passed with restartDelay=0, should show passed state
+  // Vote just passed with restartDelay=5, should show passed state
 
   it('should show passed vote status after vote passes', async () => {
     const event = await triggerCommand(ctx.players[0].playerId, 'votestatus');
@@ -326,15 +326,30 @@ describe('vote-restart module', () => {
 
     assert.equal(success, true, `Expected success=true, logs: ${JSON.stringify(logs)}`);
     assert.ok(
-      logs.some((l) => l.includes('restart already initiated') || l.includes('restarting in')),
-      `Expected "restart already initiated" or "restarting in" in logs, got: ${JSON.stringify(logs)}`,
+      logs.some((l) => l.includes('restarting in')),
+      `Expected "restarting in" in logs, got: ${JSON.stringify(logs)}`,
     );
   });
 
-  // ── Test 9: Restart executes after delay=0 (via cronjob) ──────────────────
-  // Vote is in "passed" state. With restartDelay=0, cronjob should execute restart.
+  // ── Test 9: Restart executes after delay elapses (via cronjob) ─────────────
+  // Vote is in "passed" state. Age passedAt beyond restartDelay, then cronjob should execute restart.
 
   it('should execute the restart command when restartDelay has elapsed', async () => {
+    const varSearch = await client.variable.variableControllerSearch({
+      filters: {
+        key: ['vr_vote_state'],
+        gameServerId: [ctx.gameServer.id],
+        moduleId: [moduleId],
+      },
+    });
+    assert.ok(varSearch.data.data.length > 0, 'Expected vr_vote_state variable to exist before restart cronjob');
+    const varRecord = varSearch.data.data[0]!;
+    const currentState = JSON.parse(varRecord.value);
+    currentState.passedAt = new Date(Date.now() - 6 * 1000).toISOString();
+    await client.variable.variableControllerUpdate(varRecord.id, {
+      value: JSON.stringify(currentState),
+    });
+
     const { success, logs } = await triggerCronjob();
 
     assert.equal(success, true, `Expected cronjob to succeed, logs: ${JSON.stringify(logs)}`);

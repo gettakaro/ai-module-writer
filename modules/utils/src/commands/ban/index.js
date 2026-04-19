@@ -1,11 +1,12 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
   extractReason,
+  getCommandArgumentTokens,
+  getCommandTargetPlayer,
   getPlayerName,
   normalizeReason,
   parseBanDurationToken,
   renderTemplate,
-  resolvePlayerTarget,
   safeBroadcast,
   safePrivateMessage,
 } from './utils-helpers.js';
@@ -17,7 +18,7 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const target = await resolvePlayerTarget(args.player);
+  const target = getCommandTargetPlayer(args.player);
   if (!target) {
     throw new TakaroUserError('Please specify a valid player.');
   }
@@ -35,17 +36,29 @@ async function main() {
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),
   ]);
-  const reason = normalizeReason(extractReason(args.reason, chatMessage, [targetName, args.duration]), 'Banned by an admin.');
+  const [targetToken] = getCommandArgumentTokens(chatMessage);
+  const reason = normalizeReason(extractReason(args.reason, chatMessage, [targetToken, args.duration]), 'Banned by an admin.');
 
   const payload = {
+    gameServerId,
+    playerId: target.playerId,
     reason,
+    isGlobal: false,
+    takaroManaged: true,
   };
   if (!parsedDuration.isPermanent) {
-    payload.expiresAt = parsedDuration.expiresAt;
+    payload.until = parsedDuration.expiresAt;
   }
 
   console.log(`utils:ban payload=${JSON.stringify(payload)}`);
-  const banResult = await takaro.gameserver.gameServerControllerBanPlayer(gameServerId, target.playerId, payload);
+
+  let banResult;
+  try {
+    banResult = await takaro.player.banControllerCreate(payload);
+  } catch (err) {
+    console.error(`utils:ban failed for target=${target.playerId}: ${err}`);
+    throw new TakaroUserError('The ban could not be created right now. Please try again or check the server logs.');
+  }
 
   console.log(`utils:ban result=${JSON.stringify(banResult.data.data)}`);
   console.log(`utils:ban admin=${adminName} target=${targetName} duration=${parsedDuration.humanDuration} reason=${reason}`);

@@ -1,4 +1,5 @@
 import { takaro } from '@takaro/helpers';
+import { collapsePlayersById, collectPaginatedResults } from './utils-pure.js';
 
 export function isBlank(value) {
   return value === undefined || value === null || String(value).trim() === '';
@@ -58,22 +59,6 @@ export function compactRules(rules) {
   return rules
     .map((rule) => trimOrEmpty(rule))
     .filter((rule) => rule !== '');
-}
-
-export function formatOnlinePlayersLine(players) {
-  const names = players
-    .map((player) => trimOrEmpty(player.name || player.playerName))
-    .filter((name) => name !== '')
-    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-
-  if (names.length === 0) {
-    return 'No players are currently online.';
-  }
-
-  const visible = names.slice(0, 10);
-  const suffix = names.length > 10 ? ', ...' : '';
-  const noun = names.length === 1 ? 'player' : 'players';
-  return `${names.length} ${noun} online: ${visible.join(', ')}${suffix}`;
 }
 
 export function getCommandTargetPlayer(target) {
@@ -143,83 +128,10 @@ export function parseBanDurationToken(token) {
   };
 }
 
-export function collapsePlayersById(players) {
-  const seen = new Set();
-  const uniquePlayers = [];
-
-  for (const player of players) {
-    const playerId = trimOrEmpty(player?.playerId);
-    if (playerId === '' || seen.has(playerId)) continue;
-    seen.add(playerId);
-    uniquePlayers.push(player);
-  }
-
-  return uniquePlayers;
-}
-
-export async function collectPaginatedResults(fetchPage, { limit = 100, maxIterations = 100 } = {}) {
-  const items = [];
-  let page = 0;
-  let iterations = 0;
-
-  while (true) {
-    iterations += 1;
-    if (iterations > maxIterations) {
-      console.error(`utils-helpers: collectPaginatedResults exceeded ${maxIterations} iterations, aborting pagination`);
-      break;
-    }
-
-    const result = await fetchPage({ page, limit });
-    const batch = Array.isArray(result?.data) ? result.data : [];
-    const total = typeof result?.total === 'number' ? result.total : undefined;
-
-    items.push(...batch);
-
-    if (batch.length === 0) break;
-    if (total !== undefined && items.length >= total) break;
-    if (batch.length < limit && total === undefined) break;
-
-    page += 1;
-  }
-
-  return items;
-}
-
-async function searchPlayerByIdOrName(rawTarget) {
-  const normalizedTarget = trimOrEmpty(rawTarget);
-  if (normalizedTarget === '') return null;
-
-  try {
-    const byId = await takaro.player.playerControllerGetOne(normalizedTarget);
-    if (byId?.data?.data?.id) {
-      return byId.data.data;
-    }
-  } catch {
-    // Not a resolvable player ID; fall through to name search.
-  }
-
-  const searchedName = await takaro.player.playerControllerSearch({
-    search: {
-      name: [normalizedTarget],
-    },
-    limit: 10,
-  });
-  return searchedName.data.data.find((candidate) => trimOrEmpty(candidate.name).toLowerCase() === normalizedTarget.toLowerCase()) ?? null;
-}
-
-export async function resolvePlayerTarget(rawTarget) {
-  try {
-    const target = await searchPlayerByIdOrName(rawTarget);
-    if (!target) return null;
-
-    return {
-      playerId: target.id,
-      name: trimOrEmpty(target.name) || 'Unknown Player',
-    };
-  } catch (err) {
-    console.error(`utils-helpers: failed to resolve player target "${trimOrEmpty(rawTarget)}": ${err}`);
-    throw err;
-  }
+export function getCommandArgumentTokens(chatMessage) {
+  const text = trimOrEmpty(getChatMessageText(chatMessage));
+  if (text === '') return [];
+  return text.split(/\s+/).slice(1);
 }
 
 export async function fetchOnlinePlayers(gameServerId) {

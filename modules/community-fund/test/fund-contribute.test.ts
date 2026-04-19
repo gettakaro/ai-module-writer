@@ -601,3 +601,126 @@ describe('community-fund: fund-contribute command', () => {
     );
   });
 });
+
+describe('community-fund: refund handling after state-write failure', () => {
+  let client: Client;
+  let ctx: MockServerContext;
+  let moduleId: string;
+  let versionId: string;
+  let prefix: string;
+  let contributeRoleId: string;
+
+  before(async () => {
+    client = await createClient();
+    await cleanupTestModules(client);
+    await cleanupTestGameServers(client);
+    ctx = await startMockServer(client);
+
+    await client.settings.settingsControllerSet('economyEnabled', {
+      gameServerId: ctx.gameServer.id,
+      value: 'true',
+    });
+
+    const mod = await pushModule(client, MODULE_DIR);
+    moduleId = mod.id;
+    versionId = mod.latestVersion.id;
+
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        fundThreshold: 100,
+        minimumContribution: 10,
+        completionMessage: 'The community fund reached {threshold}!',
+        completionCommands: [],
+        broadcastContributions: false,
+        debugForceStateWriteFailureAfterDeduct: true,
+      },
+    });
+    prefix = await getCommandPrefix(client, ctx.gameServer.id);
+
+    contributeRoleId = await assignPermissions(
+      client,
+      ctx.players[0].playerId,
+      ctx.gameServer.id,
+      ['COMMUNITY_FUND_CONTRIBUTE'],
+    );
+
+    await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(ctx.gameServer.id, ctx.players[0].playerId, {
+      currency: 50,
+    });
+  });
+
+  after(async () => {
+    await cleanupRole(client, contributeRoleId);
+    try {
+      await uninstallModule(client, moduleId, ctx.gameServer.id);
+    } catch (err) {
+      console.error('Cleanup: failed to uninstall refund-test module:', err);
+    }
+    try {
+      await deleteModule(client, moduleId);
+    } catch (err) {
+      console.error('Cleanup: failed to delete refund-test module:', err);
+    }
+    await stopMockServer(ctx.server, client, ctx.gameServer.id);
+  });
+
+  async function getPog(playerId: string) {
+    const result = await client.playerOnGameserver.playerOnGameServerControllerSearch({
+      filters: {
+        gameServerId: [ctx.gameServer.id],
+        playerId: [playerId],
+      },
+    });
+    return result.data.data[0];
+  }
+
+  it('refunds the player and leaves fund state unchanged when persistence fails after deduction', async () => {
+    const player = ctx.players[0]!;
+    const beforePog = await getPog(player.playerId);
+    assert.ok(beforePog, 'Expected player POG before refund-path test');
+    const beforeCurrency = beforePog?.currency ?? 0;
+    const before = new Date();
+
+    await client.command.commandControllerTrigger(ctx.gameServer.id, {
+      msg: `${prefix}fund 20`,
+      playerId: player.playerId,
+    });
+
+    const event = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(meta?.result?.success, false, 'Expected contribution to fail after the forced state-write error');
+
+    const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
+    assert.ok(
+      logs.some((msg) => msg.includes('failed to persist contribution state')),
+      `Expected state-write failure to be logged, got: ${JSON.stringify(logs)}`,
+    );
+    assert.ok(
+      logs.some((msg) => msg.includes('rolled back 20 currency')),
+      `Expected refund success to be logged, got: ${JSON.stringify(logs)}`,
+    );
+    assert.ok(
+      logs.some((msg) => msg.includes('currency was refunded')),
+      `Expected player-facing refund message, got: ${JSON.stringify(logs)}`,
+    );
+
+    const afterPog = await getPog(player.playerId);
+    assert.ok(afterPog, 'Expected player POG after refund-path test');
+    assert.equal(afterPog?.currency, beforeCurrency, `Expected refunded currency balance, got: ${JSON.stringify(afterPog)}`);
+
+    const totalVariable = await client.variable.variableControllerSearch({
+      filters: {
+        key: ['fund_total'],
+        gameServerId: [ctx.gameServer.id],
+        moduleId: [moduleId],
+      },
+    });
+    assert.equal(totalVariable.data.data.length, 0, `Expected no persisted fund_total after rollback, got: ${JSON.stringify(totalVariable.data.data)}`);
+  });
+});

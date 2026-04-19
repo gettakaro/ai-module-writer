@@ -334,6 +334,40 @@ describe('utils: admin commands', () => {
     await waitForOnline(target.playerId, true);
   });
 
+  it('preserves multi-word /ban reasons when the admin targets by player ID', async () => {
+    const target = ctx.players[1];
+    const reason = 'repeat xray abuse';
+    await clearBans(target.playerId);
+
+    const res = await trigger(ctx.players[0].playerId, `${prefix}ban ${target.playerId} 10m ${reason}`);
+
+    assert.equal(res.success, true, `Expected ID-targeted /ban to succeed, logs: ${JSON.stringify(res.logs)}`);
+    assert.ok(res.logs.some((msg) => msg.includes(`Reason: ${reason}`)), JSON.stringify(res.logs));
+    assert.ok(!res.logs.some((msg) => msg.includes(target.playerId) && msg.includes(`Reason: ${reason}`)), JSON.stringify(res.logs));
+
+    await clearBans(target.playerId);
+    await ctx.server.executeConsoleCommand('connectAll');
+    await waitForOnline(target.playerId, true);
+  });
+
+  it('allows banning an offline player that Takaro can still resolve', async () => {
+    const target = otherCtx.players[2];
+    const targetName = await getPlayerName(target.playerId);
+    await clearBans(target.playerId);
+    await otherCtx.server.executeConsoleCommand('disconnectAll');
+
+    const res = await trigger(ctx.players[0].playerId, `${prefix}ban ${targetName} 10m offline test`);
+
+    assert.equal(res.success, true, `Expected offline /ban to succeed, logs: ${JSON.stringify(res.logs)}`);
+    assert.ok(res.logs.some((msg) => msg.includes(`Banned ${targetName} for 10 minutes. Reason: offline test`)), JSON.stringify(res.logs));
+
+    const bans = await getBans(target.playerId);
+    assert.ok(bans.length > 0, `Expected a ban record for offline player, got: ${JSON.stringify(bans)}`);
+
+    await clearBans(target.playerId);
+    await otherCtx.server.executeConsoleCommand('connectAll');
+  });
+
   it('creates a permanent ban when using perm', async () => {
     const target = ctx.players[2];
     const targetName = await getPlayerName(target.playerId);
@@ -412,5 +446,22 @@ describe('utils: admin commands', () => {
 
     const pog = await waitForOnline(target.playerId, false);
     assert.equal(pog?.online, false, 'Expected target to be offline after multi-word kick');
+  });
+
+  it('preserves multi-word /kick reasons when the admin targets by player ID', async () => {
+    const target = ctx.players[1];
+    const reason = 'breaking spawn rules again';
+    await ctx.server.executeConsoleCommand('connectAll');
+    await waitForOnline(target.playerId, true);
+
+    const res = await trigger(ctx.players[0].playerId, `${prefix}kick ${target.playerId} ${reason}`);
+
+    assert.equal(res.success, true, `Expected ID-targeted /kick to succeed, logs: ${JSON.stringify(res.logs)}`);
+    assert.ok(res.logs.some((msg) => msg.includes(`reason=${reason}`)), JSON.stringify(res.logs));
+    assert.ok(res.logs.some((msg) => msg.includes(`Reason: ${reason}`)), JSON.stringify(res.logs));
+    assert.ok(!res.logs.some((msg) => msg.includes(target.playerId) && msg.includes(`Reason: ${reason}`)), JSON.stringify(res.logs));
+
+    const pog = await waitForOnline(target.playerId, false);
+    assert.equal(pog?.online, false, 'Expected target to be offline after ID-targeted kick');
   });
 });
