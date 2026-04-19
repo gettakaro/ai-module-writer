@@ -1,5 +1,5 @@
 import { data, takaro } from '@takaro/helpers';
-import { getDefaultConfig, mutateRacePool, pickWeightedWinner, settle, refund, formatCurrency } from './casino-helpers.js';
+import { getDefaultConfig, getRacePool, setRacePool, withCasinoLocks, pickWeightedWinner, settle, refund, formatCurrency } from './casino-helpers.js';
 
 function emptyPool() {
   return {
@@ -9,46 +9,42 @@ function emptyPool() {
   };
 }
 
-function getParticipantEntryKey(participant, index) {
-  return participant?.ticketId ?? `${participant?.playerId ?? 'unknown'}:${index}`;
-}
-
 async function main() {
   const { gameServerId, module: mod } = data;
   const config = getDefaultConfig(mod.userConfig);
 
-  let snapshot = await mutateRacePool(gameServerId, mod.moduleId, async (pool) => {
+  const snapshot = await withCasinoLocks(gameServerId, mod.moduleId, ['race-pool'], async () => {
+    const pool = await getRacePool(gameServerId, mod.moduleId);
     const participants = Array.isArray(pool.participants) ? [...pool.participants] : [];
     const due = pool.drawAt && new Date(pool.drawAt).getTime() <= Date.now();
-    const recoverableDrawing = pool.status === 'drawing' && participants.length > 0;
-    const settledEntryKeys = new Set(Array.isArray(pool.settledEntryKeys) ? pool.settledEntryKeys : []);
-    if (!recoverableDrawing && !due) {
-      return undefined;
-    }
 
-    if (recoverableDrawing) {
-      return {
-        ...pool,
-        participants,
-        settledEntryKeys: [...settledEntryKeys],
-      };
+    if (!due || participants.length === 0) {
+      return null;
     }
 
     const totalPot = participants.reduce((sum, p) => sum + Number(p.amount ?? 0), 0);
     const cancelled = participants.length < 2;
     const winner = cancelled ? null : pickWeightedWinner(participants);
     const payout = cancelled ? 0 : Math.round(totalPot * (1 - (config.houseEdgePct / 100)));
-    return {
+
+    await setRacePool(gameServerId, mod.moduleId, {
       ...pool,
       participants,
       status: 'drawing',
-      drawId: pool.drawId ?? `${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      totalPot,
+      cancelled,
       winnerId: winner?.playerId ?? null,
       winnerName: winner?.name ?? null,
       payout,
+    });
+
+    return {
+      participants,
       totalPot,
-      settledEntryKeys: Array.isArray(pool.settledEntryKeys) ? [...pool.settledEntryKeys] : [],
       cancelled,
+      winnerId: winner?.playerId ?? null,
+      winnerName: winner?.name ?? null,
+      payout,
     };
   });
 
@@ -58,44 +54,27 @@ async function main() {
   }
 
   try {
-    const participants = Array.isArray(snapshot.participants) ? snapshot.participants : [];
-
-    for (const [index, participant] of participants.entries()) {
-      let shouldProcess = false;
-      snapshot = await mutateRacePool(gameServerId, mod.moduleId, async (pool) => {
-        const settled = new Set(Array.isArray(pool.settledEntryKeys) ? pool.settledEntryKeys : []);
-        const entryKey = getParticipantEntryKey(participant, index);
-        if (settled.has(entryKey)) return { ...pool, settledEntryKeys: [...settled] };
-        settled.add(entryKey);
-        shouldProcess = true;
-        return {
-          ...pool,
-          settledEntryKeys: [...settled],
-        };
-      });
-
-      if (!shouldProcess) continue;
-
+    for (const participant of snapshot.participants) {
       if (snapshot.cancelled) {
         await refund({ gameServerId, moduleId: mod.moduleId, playerId: participant.playerId, amount: participant.amount, config });
-      } else {
-        const participantPayout = participant.playerId === snapshot.winnerId ? Number(snapshot.payout ?? 0) : 0;
-        await settle({
-          gameServerId,
-          moduleId: mod.moduleId,
-          player: { id: participant.playerId, name: participant.name },
-          config,
-          game: 'race',
-          betAmount: participant.amount,
-          payout: participantPayout,
-        });
+        continue;
       }
+
+      await settle({
+        gameServerId,
+        moduleId: mod.moduleId,
+        player: { id: participant.playerId, name: participant.name },
+        config,
+        game: 'race',
+        betAmount: participant.amount,
+        payout: participant.playerId === snapshot.winnerId ? Number(snapshot.payout ?? 0) : 0,
+      });
     }
 
     if (snapshot.cancelled) {
       try {
         await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-          message: `🏁 Race cancelled — only ${participants.length} ${participants.length === 1 ? 'entry was' : 'entries were'} in the pot, so everyone was refunded.`,
+          message: `🏁 Race cancelled — only ${snapshot.participants.length} ${snapshot.participants.length === 1 ? 'entry was' : 'entries were'} in the pot, so everyone was refunded.`,
           opts: {},
         });
       } catch (err) {
@@ -105,7 +84,7 @@ async function main() {
     } else {
       try {
         await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-          message: `🏁 DRAW: ${participants.length} players, pot ${formatCurrency(snapshot.totalPot)} coin. Winner: ${snapshot.winnerName} (won ${formatCurrency(snapshot.payout)} coin)!`,
+          message: `🏁 DRAW: ${snapshot.participants.length} players, pot ${formatCurrency(snapshot.totalPot)} coin. Winner: ${snapshot.winnerName} (won ${formatCurrency(snapshot.payout)} coin)!`,
           opts: {},
         });
       } catch (err) {
@@ -114,9 +93,11 @@ async function main() {
       console.log(`casino.drawRace: winner=${snapshot.winnerName} payout=${formatCurrency(snapshot.payout)} totalPot=${formatCurrency(snapshot.totalPot)}`);
     }
 
-    await mutateRacePool(gameServerId, mod.moduleId, async () => emptyPool());
+    await withCasinoLocks(gameServerId, mod.moduleId, ['race-pool'], async () => {
+      await setRacePool(gameServerId, mod.moduleId, emptyPool());
+    });
   } catch (err) {
-    console.error(`casino.drawRace: draw failed, preserved pool progress for retry: ${err}`);
+    console.error(`casino.drawRace: draw failed, preserved pool for retry: ${err}`);
     throw err;
   }
 }

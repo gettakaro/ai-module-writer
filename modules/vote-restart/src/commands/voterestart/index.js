@@ -76,7 +76,7 @@ async function main() {
 
   // 6. Broadcast
   const snapshotNote = initiatorIsImmune
-    ? ` ${player.name}'s vote does not count, so the vote starts at 0.`
+    ? ` ${player.name} is immune, so the vote starts at 0/${threshold}.`
     : '';
 
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {

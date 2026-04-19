@@ -351,10 +351,11 @@ export async function getWindowData(gameServerId, moduleId, playerId, config) {
     lossCap: Number(config.lossCap ?? 0),
   };
   const previousCapConfig = data?.capConfig ?? null;
-  const capConfigChanged = !previousCapConfig
-    || previousCapConfig.capWindow !== currentCapConfig.capWindow
-    || Number(previousCapConfig.wagerCap ?? 0) !== currentCapConfig.wagerCap
-    || Number(previousCapConfig.lossCap ?? 0) !== currentCapConfig.lossCap;
+  const capConfigChanged = previousCapConfig
+    ? previousCapConfig.capWindow !== currentCapConfig.capWindow
+      || Number(previousCapConfig.wagerCap ?? 0) !== currentCapConfig.wagerCap
+      || Number(previousCapConfig.lossCap ?? 0) !== currentCapConfig.lossCap
+    : false;
 
   if (capConfigChanged) {
     return { wagered: 0, lost: 0, windowKey, capConfig: currentCapConfig };
@@ -502,15 +503,48 @@ export async function getPlayerOnGameserver(gameServerId, playerId) {
   return pogSearch.data.data[0] ?? null;
 }
 
+export async function getPlayerOnGameserverByGameId(gameServerId, gameId) {
+  if (!gameId) return null;
+  const pogSearch = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
+    filters: {
+      gameId: [String(gameId)],
+      gameServerId: [gameServerId],
+    },
+    limit: 1,
+  });
+  return pogSearch.data.data[0] ?? null;
+}
+
 export async function resolvePlayerByName(name, gameServerId) {
   const normalized = String(name).trim().toLowerCase();
+  if (!normalized) return null;
+
   const playerSearch = await takaro.player.playerControllerSearch({ search: { name: [name] }, limit: 100 });
-  const exact = playerSearch.data.data.find((p) => p.name.toLowerCase() === normalized);
-  if (!exact) return null;
-  const pog = await getPlayerOnGameserver(gameServerId, exact.id);
+  const candidates = playerSearch.data.data.filter((p) => p.name?.trim());
+  const exact = candidates.find((p) => p.name.toLowerCase() === normalized);
+  const startsWith = candidates.filter((p) => p.name.toLowerCase().startsWith(normalized));
+  const contains = candidates.filter((p) => p.name.toLowerCase().includes(normalized));
+
+  let chosen = exact ?? null;
+  if (!chosen && startsWith.length === 1) chosen = startsWith[0];
+  if (!chosen && contains.length === 1) chosen = contains[0];
+
+  if (!chosen) {
+    const ambiguous = startsWith.length > 1 ? startsWith : contains.length > 1 ? contains : [];
+    if (ambiguous.length > 1) {
+      const sample = ambiguous.slice(0, 5).map((p) => p.name).join(', ');
+      throw new TakaroUserError(`Multiple players match "${name}": ${sample}. Please be more specific.`);
+    }
+    const suggestions = candidates.slice(0, 5).map((p) => p.name).join(', ');
+    throw new TakaroUserError(suggestions
+      ? `Player "${name}" not found. Try one of: ${suggestions}.`
+      : `Player "${name}" not found.`);
+  }
+
+  const pog = await getPlayerOnGameserver(gameServerId, chosen.id);
   return {
-    playerId: exact.id,
-    player: exact,
+    playerId: chosen.id,
+    player: chosen,
     pog: pog ?? null,
     isOnlineOnGameServer: Boolean(pog),
     gameServerId,
@@ -596,17 +630,6 @@ export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, pl
     occurredAt: nowIso(),
     message: `${prefix} ${playerName} won ${formatCurrency(net)} on ${game}!`,
   };
-  const payload = {
-    // The real Takaro API currently validates eventName against the built-in event enum.
-    // Emit a standard event name and carry the custom semantic type in meta so downstream
-    // consumers and tests can still reliably detect casino big wins.
-    eventName: 'chat-message',
-    gameserverId: gameServerId,
-    moduleId,
-    actingModuleId: moduleId,
-    playerId,
-    meta,
-  };
 
   try {
     await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
@@ -617,18 +640,46 @@ export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, pl
     console.error(`casino-helpers: failed to announce big win for ${playerName}: ${err}`);
   }
 
+  const payload = {
+    eventName: 'chat-message',
+    gameserverId: gameServerId,
+    moduleId,
+    actingModuleId: moduleId,
+    playerId,
+    meta,
+  };
+
   try {
     if (takaro.event?.eventControllerCreate) {
       await takaro.event.eventControllerCreate(payload);
+      console.log(`casino-helpers: emitted casino-big-win event for ${playerName}`);
       return;
     }
     if (takaro.axios?.post) {
       await takaro.axios.post('/event', payload);
+      console.log(`casino-helpers: emitted casino-big-win event for ${playerName}`);
       return;
     }
-    console.error(`casino-helpers: failed to emit casino-big-win event for ${playerName}: no event client available`);
+    await writeVariable(gameServerId, moduleId, 'casino_big_win_event', {
+      eventName: 'casino-big-win',
+      gameserverId: gameServerId,
+      moduleId,
+      meta,
+    });
+    console.error(`casino-helpers: fell back to variable-backed casino-big-win marker for ${playerName}: no event client available`);
   } catch (err) {
     console.error(`casino-helpers: failed to emit casino-big-win event for ${playerName}: ${err}`);
+    try {
+      await writeVariable(gameServerId, moduleId, 'casino_big_win_event', {
+        eventName: 'casino-big-win',
+        gameserverId: gameServerId,
+        moduleId,
+        meta,
+      });
+      console.error(`casino-helpers: stored variable-backed casino-big-win marker for ${playerName} after event failure`);
+    } catch (fallbackErr) {
+      console.error(`casino-helpers: failed to persist casino-big-win fallback marker for ${playerName}: ${fallbackErr}`);
+    }
   }
 }
 
@@ -980,6 +1031,7 @@ export function parsePositiveNumberLike(value) {
 
 export async function ensureInteractivePlayAllowed(gameServerId, moduleId, pog, player, config, game) {
   requirePlayPermission(pog);
+  await assertNoLegacyCasinoModules(gameServerId, moduleId);
   await ensurePlayerNotBanned(gameServerId, moduleId, player.id);
   if (!getGameEnabled(config, game)) {
     throw new TakaroUserError(`The ${game} game is disabled on this server.`);
@@ -1150,6 +1202,29 @@ export async function sweepExpiredSessions(gameServerId, moduleId, config) {
   return actions;
 }
 
+export async function resolveCasinoPlayerId(gameServerId, player, eventData) {
+  const directId = player?.id ?? player?.playerId ?? eventData?.playerId ?? eventData?.player?.id ?? eventData?.player?.playerId ?? eventData?.playerOnGameServer?.playerId ?? eventData?.pog?.playerId;
+  if (directId) return directId;
+
+  const gameId = player?.gameId ?? eventData?.player?.gameId ?? eventData?.playerOnGameServer?.gameId ?? eventData?.pog?.gameId;
+  if (gameId) {
+    const pog = await getPlayerOnGameserverByGameId(gameServerId, gameId);
+    if (pog?.playerId) return pog.playerId;
+  }
+
+  const name = player?.name ?? eventData?.playerName ?? eventData?.player?.name ?? eventData?.playerOnGameServer?.name ?? eventData?.pog?.name;
+  if (name) {
+    try {
+      const resolved = await resolvePlayerByName(name, gameServerId);
+      return resolved?.playerId ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
 export async function handleDisconnect(gameServerId, moduleId, playerId, config) {
   const refunds = [];
 
@@ -1186,9 +1261,12 @@ export async function removePlayerFromRacePool(gameServerId, moduleId, playerId)
     const participants = Array.isArray(pool?.participants) ? pool.participants : [];
     removedEntries = participants.filter((entry) => entry.playerId === playerId);
     if (removedEntries.length === 0) return pool;
+    const remaining = participants.filter((entry) => entry.playerId !== playerId);
     return {
       ...pool,
-      participants: participants.filter((entry) => entry.playerId !== playerId),
+      participants: remaining,
+      drawAt: remaining.length > 0 ? pool.drawAt : null,
+      status: remaining.length > 0 ? (pool.status ?? 'open') : 'open',
     };
   });
   return removedEntries;

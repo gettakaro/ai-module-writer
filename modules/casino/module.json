@@ -172,7 +172,7 @@
     "race": {
       "trigger": "race",
       "description": "Join the next weighted race pot",
-      "helpText": "Usage: /race <amount>",
+      "helpText": "Usage: /race [amount]",
       "function": "src/commands/race/index.js",
       "arguments": [
         { "name": "amount", "type": "number", "helpText": "Bet amount", "position": 0 }
@@ -190,7 +190,7 @@
     "casinotop": {
       "trigger": "casinotop",
       "description": "Show cached casino leaderboards",
-      "helpText": "Usage: /casinotop <wager|won|winrate|roi|biggest>",
+      "helpText": "Usage: /casinotop [wager|won|winrate|roi|biggest]",
       "function": "src/commands/casinotop/index.js",
       "arguments": [
         { "name": "category", "type": "string", "helpText": "Leaderboard category: wager, won, winrate, roi, or biggest", "position": 0, "defaultValue": "wager" }

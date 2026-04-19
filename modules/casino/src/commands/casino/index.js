@@ -17,7 +17,7 @@ async function main() {
     bj: '🃏 /bj <amount> to deal, then /bj hit, /bj stand, or /bj double.',
     crash: '🚀 /crash <amount> <cashoutAt> — auto-cashout crash game.',
     duel: '⚔️ /duel <player> <amount> to challenge, then accept/decline and pick rock/paper/scissors.',
-    race: '🏁 /race <amount> — enter the shared weighted race pot.',
+    race: '🏁 /race [amount] — view the current weighted race pot or join it with a stake.',
   };
 
   const gameAliases = {

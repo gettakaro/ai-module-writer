@@ -1,9 +1,24 @@
 import { data, TakaroUserError } from '@takaro/helpers';
-import { getDefaultConfig, getRacePool, setRacePool, placeBet, refund, formatCurrency, formatFutureTime, withCasinoLocks } from './casino-helpers.js';
+import { getDefaultConfig, getRacePool, setRacePool, placeBet, refund, formatCurrency, formatFutureTime, parsePositiveNumberLike, withCasinoLocks } from './casino-helpers.js';
 
 async function main() {
   const { gameServerId, pog, player, arguments: args, module: mod } = data;
   const config = getDefaultConfig(mod.userConfig);
+  const amount = parsePositiveNumberLike(args.amount);
+
+  if (!amount) {
+    const pool = await getRacePool(gameServerId, mod.moduleId);
+    const participants = Array.isArray(pool.participants) ? pool.participants : [];
+    const totalPot = participants.reduce((sum, entry) => sum + Number(entry.amount ?? 0), 0);
+    const uniquePlayers = new Set(participants.map((entry) => entry.playerId)).size;
+    if (participants.length === 0) {
+      await pog.pm('🏁 No race is currently open. Start one with /race <amount>.');
+      return;
+    }
+    await pog.pm(`🏁 Current race pot: ${formatCurrency(totalPot)} coin across ${participants.length} entr${participants.length === 1 ? 'y' : 'ies'} from ${uniquePlayers} player${uniquePlayers === 1 ? '' : 's'}. Draw in about ${formatFutureTime(pool.drawAt)}. Join with /race <amount>.`);
+    return;
+  }
+
   const pool = await withCasinoLocks(gameServerId, mod.moduleId, ['race-pool', `player:${player.id}`], async () => {
     const currentPool = await getRacePool(gameServerId, mod.moduleId);
     if (currentPool.status === 'drawing') {
@@ -13,7 +28,7 @@ async function main() {
       throw new TakaroUserError('The previous race draw is overdue and still needs to be settled. Please wait for the draw before joining the next round.');
     }
 
-    const placed = await placeBet({ gameServerId, moduleId: mod.moduleId, pog, player, config, game: 'race', amount: args.amount, skipLock: true });
+    const placed = await placeBet({ gameServerId, moduleId: mod.moduleId, pog, player, config, game: 'race', amount, skipLock: true });
     try {
       const next = {
         participants: Array.isArray(currentPool.participants) ? [...currentPool.participants] : [],

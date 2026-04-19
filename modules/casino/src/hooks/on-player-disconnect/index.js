@@ -1,15 +1,10 @@
 import { data } from '@takaro/helpers';
-import { getDefaultConfig, handleDisconnect } from './casino-helpers.js';
+import { getDefaultConfig, handleDisconnect, resolveCasinoPlayerId } from './casino-helpers.js';
 
 async function main() {
   const { gameServerId, player, eventData, module: mod } = data;
   const config = getDefaultConfig(mod.userConfig);
-  const playerId = player?.id
-    ?? eventData?.playerId
-    ?? eventData?.player?.id
-    ?? eventData?.player?.playerId
-    ?? eventData?.playerOnGameServer?.playerId
-    ?? eventData?.pog?.playerId;
+  const playerId = await resolveCasinoPlayerId(gameServerId, player, eventData);
   const playerName = player?.name
     ?? eventData?.playerName
     ?? eventData?.player?.name
