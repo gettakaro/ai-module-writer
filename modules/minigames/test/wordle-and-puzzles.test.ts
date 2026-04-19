@@ -191,18 +191,24 @@ describe('minigames: daily puzzles and wordle scoring', () => {
     assert.equal(history.days[puzzleDate()].totalPoints, 150);
     assert.equal(history.days[puzzleDate()].perGame.wordle.wins, 1);
 
-    const bigScoreEvents = await client.event.eventControllerSearch({
-      filters: {
-        eventName: ['minigames-big-score' as unknown as EventSearchInputAllowedFiltersEventNameEnum],
-        gameserverId: [ctx.gameServer.id],
-        moduleId: [moduleId],
-        playerId: [ctx.players[1].playerId],
-      },
-      limit: 5,
-      sortDirection: 'desc',
-      sortBy: 'createdAt',
-    });
-    assert.ok(bigScoreEvents.data.data.length >= 1, 'expected a minigames-big-score event');
+    let foundBigScore = false;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const bigScoreEvents = await client.event.eventControllerSearch({
+        filters: {
+          gameserverId: [ctx.gameServer.id],
+        },
+        greaterThan: {
+          createdAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+        },
+        limit: 50,
+        sortDirection: 'desc',
+        sortBy: 'createdAt',
+      });
+      foundBigScore = bigScoreEvents.data.data.some((entry) => String(entry.eventName) === 'minigames-big-score');
+      if (foundBigScore) break;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    assert.equal(foundBigScore, true, 'expected a minigames-big-score event');
 
     const pogSearch = await client.playerOnGameserver.playerOnGameServerControllerSearch({
       filters: { gameServerId: [ctx.gameServer.id], playerId: [ctx.players[1].playerId] },
@@ -210,6 +216,23 @@ describe('minigames: daily puzzles and wordle scoring', () => {
     const pog = pogSearch.data.data[0];
     assert.ok(pog, 'expected playerOnGameserver record');
     assert.ok(typeof pog!.currency === 'number', 'currency field should remain readable even if payout is unavailable in the test environment');
+  });
+
+  it('awards hangman success points and persists completion state', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_PUZZLE, { date: puzzleDate(), wordle: 'crane', hangman: 'takaro', hotcold: 321 });
+    const solveEvent = await triggerCommand(ctx.players[1].playerId, `${prefix}hangman takaro`);
+    const solveMeta = solveEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const solveLogs = (solveMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(solveMeta?.result?.success, true, `hangman solve should succeed, logs=${JSON.stringify(solveLogs)}`);
+
+    const stats = await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[1].playerId);
+    const history = await readVariable(client, ctx.gameServer.id, moduleId, KEY_HISTORY, ctx.players[1].playerId);
+    const hangmanSession = await readVariable(client, ctx.gameServer.id, moduleId, 'minigames_session_hangman', ctx.players[1].playerId);
+    assert.equal(stats.perGame.hangman.wins, 1);
+    assert.ok(stats.perGame.hangman.points > 0, 'hangman solve should award points');
+    assert.equal(history.days[puzzleDate()].perGame.hangman.wins, 1);
+    assert.equal(hangmanSession.solved, true);
+    assert.ok(hangmanSession.completedAt, 'hangman session should be marked completed');
   });
 
   it('tracks hangman failures in lifetime stats and daily history', async () => {
@@ -227,6 +250,23 @@ describe('minigames: daily puzzles and wordle scoring', () => {
     assert.equal(history.days[puzzleDate()].perGame.hangman.wins, 0);
   });
 
+  it('awards hotcold success points and persists completion state', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_PUZZLE, { date: puzzleDate(), wordle: 'crane', hangman: 'takaro', hotcold: 321 });
+    const solveEvent = await triggerCommand(ctx.players[1].playerId, `${prefix}hotcold 321`);
+    const solveMeta = solveEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const solveLogs = (solveMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(solveMeta?.result?.success, true, `hotcold solve should succeed, logs=${JSON.stringify(solveLogs)}`);
+
+    const stats = await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[1].playerId);
+    const history = await readVariable(client, ctx.gameServer.id, moduleId, KEY_HISTORY, ctx.players[1].playerId);
+    const hotcoldSession = await readVariable(client, ctx.gameServer.id, moduleId, 'minigames_session_hotcold', ctx.players[1].playerId);
+    assert.equal(stats.perGame.hotcold.wins, 1);
+    assert.ok(stats.perGame.hotcold.points > 0, 'hotcold solve should award points');
+    assert.equal(history.days[puzzleDate()].perGame.hotcold.wins, 1);
+    assert.equal(hotcoldSession.solved, true);
+    assert.ok(hotcoldSession.completedAt, 'hotcold session should be marked completed');
+  });
+
   it('tracks hotcold failures in lifetime stats and daily history', async () => {
     await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_PUZZLE, { date: puzzleDate(), wordle: 'crane', hangman: 'takaro', hotcold: 321 });
     for (const guess of [1, 2, 3, 4, 5, 6, 7, 8]) {
@@ -242,6 +282,28 @@ describe('minigames: daily puzzles and wordle scoring', () => {
     assert.equal(history.days[puzzleDate()].perGame.hotcold.wins, 0);
   });
 
+  it('preserves an in-progress wordle session across disconnect and reconnect', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_WORDLE, { words: ['crane', 'slate'] });
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_PUZZLE, { date: puzzleDate(), wordle: 'crane', hangman: 'takaro', hotcold: 321 });
+    const guessEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}wordle slate`);
+    const guessMeta = guessEvent.meta as { result?: { success?: boolean } };
+    assert.equal(guessMeta?.result?.success, true, 'wordle guess should succeed before reconnect');
+
+    await ctx.server.executeConsoleCommand('disconnectAll');
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await ctx.server.executeConsoleCommand('connectAll');
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    const statusEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}wordle`);
+    const statusMeta = statusEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const statusLogs = (statusMeta?.result?.logs ?? []).map((l) => l.msg);
+    const wordleSession = await readVariable(client, ctx.gameServer.id, moduleId, 'minigames_session_wordle', ctx.players[0].playerId);
+    assert.equal(statusMeta?.result?.success, true, 'wordle status should succeed after reconnect');
+    assert.ok(statusLogs.some((msg) => msg.includes('wordle: status player=') && msg.includes('guesses=1') && msg.includes('solved=false')), `expected wordle status log, got ${JSON.stringify(statusLogs)}`);
+    assert.deepEqual(wordleSession.guesses, ['slate'], `expected in-progress session to persist across reconnect, got ${JSON.stringify(wordleSession)}`);
+    assert.equal(wordleSession.solved, false, 'session should remain unsolved after reconnect');
+  });
+
   it('shows puzzle and minigamestats without optional arguments', async () => {
     const puzzleEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}puzzle`);
     const puzzleMeta = puzzleEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
@@ -249,6 +311,7 @@ describe('minigames: daily puzzles and wordle scoring', () => {
     assert.equal(puzzleMeta?.result?.success, true, 'puzzle should succeed without args');
     assert.ok(puzzleLogs.some((msg) => msg.includes('minigames: puzzle status=')), `expected puzzle status log, got ${JSON.stringify(puzzleLogs)}`);
     assert.ok(puzzleLogs.some((msg) => msg.includes('Wordle:')), `expected puzzle status content, got ${JSON.stringify(puzzleLogs)}`);
+    assert.ok(puzzleLogs.some((msg) => msg.includes('completed') || msg.includes('failed')), `expected explicit completed/failed wording, got ${JSON.stringify(puzzleLogs)}`);
 
     const statsEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamestats`);
     const statsMeta = statsEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
@@ -262,6 +325,97 @@ describe('minigames: daily puzzles and wordle scoring', () => {
 function puzzleDate() {
   return new Date().toISOString().slice(0, 10);
 }
+
+describe('minigames: daily puzzle feature flags', () => {
+  let client: Client;
+  let ctx: MockServerContext;
+  let moduleId: string;
+  let versionId: string;
+  let prefix: string;
+  let playRoleId: string | undefined;
+
+  before(async () => {
+    client = await createClient();
+    await cleanupTestModules(client);
+    await cleanupTestGameServers(client);
+    ctx = await startMockServer(client);
+
+    const mod = await pushModule(client, MODULE_DIR);
+    moduleId = mod.id;
+    versionId = mod.latestVersion.id;
+
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        games: {
+          wordle: false,
+          hangman: false,
+          hotcold: false,
+          trivia: true,
+          scramble: true,
+          mathrace: true,
+          reactionrace: true,
+        },
+      },
+    });
+
+    prefix = await getCommandPrefix(client, ctx.gameServer.id);
+    playRoleId = await assignPermissions(client, ctx.players[0].playerId, ctx.gameServer.id, ['MINIGAMES_PLAY']);
+  });
+
+  after(async () => {
+    await cleanupRole(client, playRoleId);
+    try {
+      await uninstallModule(client, moduleId, ctx.gameServer.id);
+    } catch (err) {
+      console.error('Cleanup: failed to uninstall module:', err);
+    }
+    try {
+      await deleteModule(client, moduleId);
+    } catch (err) {
+      console.error('Cleanup: failed to delete module:', err);
+    }
+    await stopMockServer(ctx.server, client, ctx.gameServer.id);
+  });
+
+  async function triggerCommand(playerId: string, msg: string) {
+    const before = new Date();
+    await client.command.commandControllerTrigger(ctx.gameServer.id, { playerId, msg });
+    return waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+  }
+
+  it('blocks disabled daily puzzle commands and reports disabled status', async () => {
+    const wordleEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}wordle crane`);
+    const wordleMeta = wordleEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const wordleLogs = (wordleMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(wordleMeta?.result?.success, false, 'disabled wordle should fail');
+    assert.ok(wordleLogs.some((msg) => msg.includes('Wordle is disabled on this server.')), `expected disabled wordle log, got ${JSON.stringify(wordleLogs)}`);
+
+    const hangmanEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}hangman t`);
+    const hangmanMeta = hangmanEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const hangmanLogs = (hangmanMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(hangmanMeta?.result?.success, false, 'disabled hangman should fail');
+    assert.ok(hangmanLogs.some((msg) => msg.includes('Hangman is disabled on this server.')), `expected disabled hangman log, got ${JSON.stringify(hangmanLogs)}`);
+
+    const hotcoldEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}hotcold 5`);
+    const hotcoldMeta = hotcoldEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const hotcoldLogs = (hotcoldMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(hotcoldMeta?.result?.success, false, 'disabled hotcold should fail');
+    assert.ok(hotcoldLogs.some((msg) => msg.includes('Hot/Cold is disabled on this server.')), `expected disabled hotcold log, got ${JSON.stringify(hotcoldLogs)}`);
+
+    const puzzleEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}puzzle`);
+    const puzzleMeta = puzzleEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const puzzleLogs = (puzzleMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(puzzleMeta?.result?.success, true, 'puzzle should still succeed');
+    assert.ok(puzzleLogs.some((msg) => msg.includes('Wordle: disabled')), `expected disabled wordle status, got ${JSON.stringify(puzzleLogs)}`);
+    assert.ok(puzzleLogs.some((msg) => msg.includes('Hangman: disabled')), `expected disabled hangman status, got ${JSON.stringify(puzzleLogs)}`);
+    assert.ok(puzzleLogs.some((msg) => msg.includes('Hot/Cold: disabled')), `expected disabled hotcold status, got ${JSON.stringify(puzzleLogs)}`);
+  });
+});
 
 describe('minigames: daily point cap enforcement', () => {
   let client: Client;

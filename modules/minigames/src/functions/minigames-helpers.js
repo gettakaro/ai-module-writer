@@ -5,6 +5,7 @@ export const CONTENT_WORDLIST_KEY = 'minigames_content_wordlist';
 export const CONTENT_TRIVIA_KEY = 'minigames_content_trivia';
 export const PUZZLE_TODAY_KEY = 'minigames_puzzle_today';
 export const ACTIVE_ROUND_KEY = 'minigames_active_round';
+export const ACTIVE_ROUND_LOCK_KEY = 'minigames_active_round_lock';
 export const LAST_ROUND_KEY = 'minigames_last_round_fired_at';
 export const LEADERBOARD_KEY = 'minigames_leaderboard_cache';
 export const WARNINGS_KEY = 'minigames_admin_warned_empty_bank';
@@ -257,6 +258,16 @@ export function requireTargetName(targetName, usage) {
   return normalized;
 }
 
+export function requireGameEnabled(config, game, label) {
+  if (!config?.games?.[game]) {
+    throw new TakaroUserError(`${label} is disabled on this server.`);
+  }
+}
+
+export async function requireDailyPuzzleAttempt({ gameServerId, moduleId, playerId, config }) {
+  await checkCap(gameServerId, moduleId, playerId, config);
+}
+
 export async function getBanRecord(gameServerId, moduleId, playerId) {
   const record = await readJsonVariable(gameServerId, moduleId, BAN_KEY, null, playerId);
   if (!record) return null;
@@ -408,23 +419,43 @@ export async function awardPoints({ gameServerId, moduleId, pog, playerId, playe
 
   if (actualPoints >= (Number(config.bigScoreThreshold) || 500)) {
     try {
+      const eventPayload = {
+        eventName: 'minigames-big-score',
+        moduleId,
+        gameserverId: gameServerId,
+        playerId,
+        meta: {
+          playerName,
+          game,
+          points: actualPoints,
+          context: context || null,
+        },
+      };
+
+      const createBigScoreEvent = async () => {
+        try {
+          if (takaro.event?.eventControllerCreate) {
+            await takaro.event.eventControllerCreate(eventPayload);
+            return;
+          }
+        } catch (err) {
+          console.log(`minigames: eventControllerCreate rejected custom big-score event, retrying with raw axios. Error: ${err}`);
+        }
+
+        if (takaro.axios?.post) {
+          await takaro.axios.post('/event', eventPayload);
+          return;
+        }
+
+        throw new Error('No event creation transport available for big-score event');
+      };
+
       await Promise.all([
         takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
           message: `🏆 BIG SCORE! ${playerName} earned ${actualPoints} points in ${game}${context ? ` (${context})` : ''}.`,
           opts: {},
         }),
-        takaro.event?.eventControllerCreate?.({
-          eventName: 'minigames-big-score',
-          moduleId,
-          gameserverId: gameServerId,
-          playerId,
-          meta: {
-            playerName,
-            game,
-            points: actualPoints,
-            context: context || null,
-          },
-        }),
+        createBigScoreEvent(),
       ]);
     } catch (err) {
       console.error(`minigames: failed to broadcast big score for ${playerName}. Error: ${err}`);
@@ -578,6 +609,7 @@ export async function getWordleSession(gameServerId, moduleId, playerId) {
 
 export async function playWordle({ gameServerId, moduleId, player, pog, config, guess }) {
   await requirePlayable({ gameServerId, moduleId, pog, playerId: player.id });
+  requireGameEnabled(config, 'wordle', 'Wordle');
   const puzzle = await getPuzzleToday(gameServerId, moduleId);
   if (!puzzle.wordle) throw new TakaroUserError('🟩 Wordle is not configured yet. Ask an admin to seed minigames_content_wordle.');
 
@@ -595,6 +627,8 @@ export async function playWordle({ gameServerId, moduleId, player, pog, config, 
     console.log(`wordle: status player=${player.name} guesses=${session.guesses.length} solved=${session.solved}`);
     return;
   }
+
+  await requireDailyPuzzleAttempt({ gameServerId, moduleId, playerId: player.id, config });
 
   const normalized = String(guess).trim().toLowerCase();
   if (!/^[a-z]{5}$/.test(normalized)) throw new TakaroUserError('Wordle guesses must be exactly 5 letters.');
@@ -684,6 +718,7 @@ export function maskHangman(answer, lettersTried) {
 
 export async function playHangman({ gameServerId, moduleId, player, pog, config, letterOrWord }) {
   await requirePlayable({ gameServerId, moduleId, pog, playerId: player.id });
+  requireGameEnabled(config, 'hangman', 'Hangman');
   const puzzle = await getPuzzleToday(gameServerId, moduleId);
   if (!puzzle.hangman) throw new TakaroUserError('🎪 Hangman is not configured yet. Ask an admin to seed minigames_content_wordlist.');
 
@@ -695,6 +730,7 @@ export async function playHangman({ gameServerId, moduleId, player, pog, config,
   }
 
   if (session.solved || session.completedAt) throw new TakaroUserError('You already finished today\'s Hangman.');
+  await requireDailyPuzzleAttempt({ gameServerId, moduleId, playerId: player.id, config });
 
   const attempt = String(letterOrWord).trim().toLowerCase();
   if (!/^[a-z]+$/.test(attempt)) throw new TakaroUserError('Hangman guesses must use letters only.');
@@ -774,6 +810,7 @@ export function describeHotCold(secret, previous, current) {
 
 export async function playHotCold({ gameServerId, moduleId, player, pog, config, number }) {
   await requirePlayable({ gameServerId, moduleId, pog, playerId: player.id });
+  requireGameEnabled(config, 'hotcold', 'Hot/Cold');
   const puzzle = await getPuzzleToday(gameServerId, moduleId);
   if (!Number.isInteger(puzzle.hotcold)) throw new TakaroUserError('🌡️ Hot/Cold is not ready yet.');
 
@@ -786,6 +823,7 @@ export async function playHotCold({ gameServerId, moduleId, player, pog, config,
   }
 
   if (session.solved || session.completedAt) throw new TakaroUserError('You already finished today\'s Hot/Cold puzzle.');
+  await requireDailyPuzzleAttempt({ gameServerId, moduleId, playerId: player.id, config });
   const guess = Number(number);
   if (!Number.isInteger(guess) || guess < 1 || guess > 1000) throw new TakaroUserError('Hot/Cold guesses must be an integer from 1 to 1000.');
 
@@ -1119,8 +1157,42 @@ export async function announceRound(gameServerId, round, config) {
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, { message, opts: {} });
 }
 
+export async function acquireLiveRoundLock(gameServerId, moduleId) {
+  const token = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  try {
+    await takaro.variable.variableControllerCreate({
+      key: ACTIVE_ROUND_LOCK_KEY,
+      value: JSON.stringify({ token, createdAt: new Date().toISOString() }),
+      gameServerId,
+      moduleId,
+    });
+    return token;
+  } catch (err) {
+    console.log(`minigames: live round lock busy for module=${moduleId}. Error: ${err}`);
+    return null;
+  }
+}
+
+export async function releaseLiveRoundLock(gameServerId, moduleId, token) {
+  const existing = await findVariable(gameServerId, moduleId, ACTIVE_ROUND_LOCK_KEY, null);
+  if (!existing) return;
+  try {
+    const value = JSON.parse(existing.value || '{}');
+    if (token && value.token && value.token !== token) return;
+  } catch (err) {
+    console.error(`minigames: failed to parse live round lock while releasing. Error: ${err}`);
+  }
+  await takaro.variable.variableControllerDelete(existing.id);
+}
+
 export async function maybeFireLiveRound({ gameServerId, moduleId, config, forcedGame, ignoreThresholds = false }) {
-  const stored = await getStoredActiveRound(gameServerId, moduleId);
+  const lockToken = await acquireLiveRoundLock(gameServerId, moduleId);
+  if (!lockToken) {
+    return null;
+  }
+
+  try {
+    const stored = await getStoredActiveRound(gameServerId, moduleId);
   if (stored) {
     if (new Date(stored.expiresAt).getTime() > Date.now()) {
       console.log(`minigames: fire skipped because round ${stored.game} is already active`);
@@ -1147,14 +1219,17 @@ export async function maybeFireLiveRound({ gameServerId, moduleId, config, force
     }
   }
 
-  const round = await createLiveRound({ gameServerId, moduleId, config, forcedGame });
-  if (!round) return null;
+    const round = await createLiveRound({ gameServerId, moduleId, config, forcedGame });
+    if (!round) return null;
 
-  await setActiveRound(gameServerId, moduleId, round);
-  await writeVariable(gameServerId, moduleId, LAST_ROUND_KEY, { firedAt: new Date().toISOString(), game: round.game });
-  await announceRound(gameServerId, round, config);
-  console.log(`minigames: live round fired game=${round.game} answer=${round.answer}`);
-  return round;
+    await setActiveRound(gameServerId, moduleId, round);
+    await writeVariable(gameServerId, moduleId, LAST_ROUND_KEY, { firedAt: new Date().toISOString(), game: round.game });
+    await announceRound(gameServerId, round, config);
+    console.log(`minigames: live round fired game=${round.game} answer=${round.answer}`);
+    return round;
+  } finally {
+    await releaseLiveRoundLock(gameServerId, moduleId, lockToken);
+  }
 }
 
 export async function closeExpiredRound({ gameServerId, moduleId, reason = 'expired' }) {
@@ -1234,11 +1309,21 @@ export async function handleAnswerCommand({ gameServerId, moduleId, player, pog,
   }
 }
 
+export async function getPlayerOnGameServer(gameServerId, playerId) {
+  const res = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
+    filters: { gameServerId: [gameServerId], playerId: [playerId] },
+    limit: 1,
+  });
+  return res.data.data[0] || null;
+}
+
 export async function processReactionMessage({ gameServerId, moduleId, player, pog, config, message }) {
   const round = await getActiveRound(gameServerId, moduleId);
   if (!round || round.game !== 'reactionrace') return false;
-  if (!player || !pog) return false;
-  return settleLiveRound({ gameServerId, moduleId, player, pog, config, round, response: message, source: 'chat' });
+  if (!player) return false;
+  const effectivePog = pog || await getPlayerOnGameServer(gameServerId, player.id);
+  if (!effectivePog) return false;
+  return settleLiveRound({ gameServerId, moduleId, player, pog: effectivePog, config, round, response: message, source: 'chat' });
 }
 
 export async function getAllStats(gameServerId, moduleId) {

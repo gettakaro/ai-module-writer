@@ -9,13 +9,13 @@ async function main() {
 
   const game = normalizeOptionalStringArg(args.game).toLowerCase();
   const lines = {
-    wordle: '🟩 /wordle [guess] — 6 guesses to solve the daily 5-letter word.',
-    hangman: '🎪 /hangman [letterOrWord] — reveal the daily word before 6 wrong guesses.',
-    hotcold: '🌡️ /hotcold [number] — guess today\'s number from 1 to 1000.',
-    trivia: '❓ Live round — use /answer <response> when trivia fires.',
-    scramble: '🔤 Live round — use /answer <word> when a scramble fires.',
-    mathrace: '➗ Live round — use /answer <number> when mathrace fires.',
-    reactionrace: '⚡ Live round — type the token directly in chat.',
+    wordle: config.games.wordle ? '🟩 /wordle [guess] — 6 guesses to solve the daily 5-letter word.' : '🟩 Wordle is disabled on this server.',
+    hangman: config.games.hangman ? '🎪 /hangman [letterOrWord] — reveal the daily word before 6 wrong guesses.' : '🎪 Hangman is disabled on this server.',
+    hotcold: config.games.hotcold ? '🌡️ /hotcold [number] — guess today\'s number from 1 to 1000.' : '🌡️ Hot/Cold is disabled on this server.',
+    trivia: config.games.trivia ? '❓ Live round — use /answer <response> when trivia fires.' : '❓ Trivia is disabled on this server.',
+    scramble: config.games.scramble ? '🔤 Live round — use /answer <word> when a scramble fires.' : '🔤 Scramble is disabled on this server.',
+    mathrace: config.games.mathrace ? '➗ Live round — use /answer <number> when mathrace fires.' : '➗ Math race is disabled on this server.',
+    reactionrace: config.games.reactionrace ? '⚡ Live round — type the token directly in chat.' : '⚡ Reaction race is disabled on this server.',
   };
 
   if (game) {
@@ -25,11 +25,13 @@ async function main() {
     return;
   }
 
+  const enabledDaily = [config.games.wordle && '/wordle', config.games.hangman && '/hangman', config.games.hotcold && '/hotcold'].filter(Boolean);
+  const enabledLive = [config.games.trivia && 'trivia', config.games.scramble && 'scramble', config.games.mathrace && 'mathrace', config.games.reactionrace && 'reaction-race'].filter(Boolean);
   const message = [
     '🎮 miniGames',
-    'Daily puzzles: /wordle, /hangman, /hotcold, /puzzle',
-    'Live rounds: /answer, reaction-race in raw chat',
-    'Stats: /minigamestats [player], /minigamestop <points|wordle|hangman|streak>',
+    `Daily puzzles: ${enabledDaily.length > 0 ? `${enabledDaily.join(', ')}, /puzzle` : '/puzzle (all daily puzzle games are disabled)'}`,
+    `Live rounds: ${enabledLive.length > 0 ? `/answer, raw chat for reaction-race (${enabledLive.join(', ')})` : 'all live round games are disabled'}`,
+    'Stats: /minigamestats [player], /minigamesleaderboard <points|wordle|hangman|streak> (legacy: /minigamestop)',
     `Live round cadence: every ~${config.liveRoundIntervalMinutes} min when enough players are online.`,
   ].join('\n');
   await pog.pm(message);

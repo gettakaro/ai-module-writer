@@ -31,6 +31,7 @@ const KEY_BAN = 'minigames_ban';
 const KEY_STATS = 'minigames_stats';
 const KEY_WINDOW = 'minigames_window';
 const KEY_HISTORY = 'minigames_daily_history';
+const KEY_LAST = 'minigames_last_round_fired_at';
 
 async function upsertVariable(client: Client, gameServerId: string, moduleId: string, key: string, value: unknown, playerId?: string) {
   const res = await client.variable.variableControllerSearch({
@@ -61,6 +62,20 @@ async function readVariable(client: Client, gameServerId: string, moduleId: stri
   });
   const existing = res.data.data[0];
   return existing ? JSON.parse(existing.value) : null;
+}
+
+async function emitChatMessage(client: Client, ctx: MockServerContext, playerId: string, msg: string, moduleId?: string) {
+  await client.hook.hookControllerTrigger({
+    gameServerId: ctx.gameServer.id,
+    playerId,
+    moduleId,
+    eventType: 'chat-message',
+    eventMeta: {
+      msg,
+      channel: 'global',
+      playerId,
+    },
+  });
 }
 
 describe('minigames: live rounds, leaderboards, and admin controls', () => {
@@ -249,14 +264,20 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
   });
 
   it('does not fire scheduled rounds below the online-player threshold', async () => {
+    const staleLast = { firedAt: '2000-01-01T00:00:00.000Z' };
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_LAST, staleLast);
     await ctx.server.executeConsoleCommand('disconnectAll');
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
     const event = await triggerCron(fireCronId);
-    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
-    const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
+    const meta = event.meta as { result?: { success?: boolean } };
     assert.equal(meta?.result?.success, true, 'fireLiveRound cron should execute');
-    assert.ok(logs.some((msg) => msg.includes('fire skipped due to onlinePlayers=0')), `expected threshold skip log, got ${JSON.stringify(logs)}`);
+
     const round = await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE);
+    const last = await readVariable(client, ctx.gameServer.id, moduleId, KEY_LAST);
     assert.equal(round, null, 'no active round should be created below threshold');
+    assert.equal(last.firedAt, staleLast.firedAt, 'last-fired timestamp should remain unchanged when below threshold');
+
     await ctx.server.executeConsoleCommand('connectAll');
   });
 
@@ -450,11 +471,7 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
     assert.ok(commandLogs.some((msg) => msg.includes('This round is chat-only')), `expected chat-only rejection, got ${JSON.stringify(commandLogs)}`);
 
     const before = new Date();
-    (ctx.server as any).emitEvent('chat-message', {
-      player: ctx.players[1].gameId,
-      msg: '!go',
-      channel: 'global',
-    });
+    await emitChatMessage(client, ctx, ctx.players[1].playerId, '!go', moduleId);
     const hookEvent = await waitForEvent(client, {
       eventName: EventSearchInputAllowedFiltersEventNameEnum.HookExecuted,
       gameserverId: ctx.gameServer.id,
@@ -464,10 +481,16 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
     const hookMeta = hookEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
     const hookLogs = (hookMeta?.result?.logs ?? []).map((l) => l.msg);
     assert.equal(hookMeta?.result?.success, true, 'reactionrace hook should succeed');
-    assert.ok(hookLogs.some((msg) => msg.includes('live round settled game=reactionrace')), `expected reaction settlement log, got ${JSON.stringify(hookLogs)}`);
 
     const cleared = await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE);
+    let stats = null;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      stats = await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[1].playerId);
+      if (stats?.perGame?.reactionrace?.wins === 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
     assert.equal(cleared, null, 'reactionrace round should clear after chat win');
+    assert.equal(stats?.perGame?.reactionrace?.wins, 1, `expected reactionrace win to be recorded, hook logs=${JSON.stringify(hookLogs)}`);
   });
 
   it('closes an expired round via cronjob', async () => {
@@ -495,3 +518,117 @@ describe('minigames: live rounds, leaderboards, and admin controls', () => {
 function today() {
   return new Date().toISOString().slice(0, 10);
 }
+
+describe('minigames: trivia sources and live-round gating branches', () => {
+  let client: Client;
+  let ctx: MockServerContext;
+  let moduleId: string;
+  let versionId: string;
+  let prefix: string;
+  let adminRoleId: string | undefined;
+
+  before(async () => {
+    client = await createClient();
+    await cleanupTestModules(client);
+    await cleanupTestGameServers(client);
+    ctx = await startMockServer(client);
+
+    const mod = await pushModule(client, MODULE_DIR);
+    moduleId = mod.id;
+    versionId = mod.latestVersion.id;
+
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        triviaQuestionSource: 'api',
+        liveRoundIntervalMinutes: 5,
+        minPlayersForLiveRound: 1,
+        games: {
+          wordle: true,
+          hangman: true,
+          hotcold: true,
+          trivia: true,
+          scramble: true,
+          mathrace: true,
+          reactionrace: false,
+        },
+      },
+    });
+
+    prefix = await getCommandPrefix(client, ctx.gameServer.id);
+    adminRoleId = await assignPermissions(client, ctx.players[0].playerId, ctx.gameServer.id, [
+      'MINIGAMES_PLAY',
+      'MINIGAMES_MANAGE',
+    ]);
+
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_WORDLIST, { words: [] });
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_TRIVIA, {
+      questions: [{ question: 'Fallback question?', answer: 'fallback' }],
+    });
+  });
+
+  after(async () => {
+    await cleanupRole(client, adminRoleId);
+    try {
+      await uninstallModule(client, moduleId, ctx.gameServer.id);
+    } catch (err) {
+      console.error('Cleanup: failed to uninstall module:', err);
+    }
+    try {
+      await deleteModule(client, moduleId);
+    } catch (err) {
+      console.error('Cleanup: failed to delete module:', err);
+    }
+    await stopMockServer(ctx.server, client, ctx.gameServer.id);
+  });
+
+  async function triggerCommand(playerId: string, msg: string) {
+    const before = new Date();
+    await client.command.commandControllerTrigger(ctx.gameServer.id, { playerId, msg });
+    return waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+  }
+
+  it('fires an OpenTDB-backed trivia round when api mode is enabled', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_LAST, { firedAt: '2000-01-01T00:00:00.000Z' });
+    const event = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamesfirenow trivia`);
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(meta?.result?.success, true, `forced trivia round should fire, logs=${JSON.stringify(logs)}`);
+
+    const round = await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE);
+    assert.equal(round.game, 'trivia');
+    assert.ok(typeof round.prompt === 'string' && round.prompt.length > 0, 'trivia round should have a prompt');
+    assert.ok(typeof round.answer === 'string' && round.answer.length > 0, 'trivia round should have an answer');
+
+    const existing = await client.variable.variableControllerSearch({
+      filters: { key: [KEY_ACTIVE], gameServerId: [ctx.gameServer.id], moduleId: [moduleId] },
+    });
+    if (existing.data.data[0]) {
+      await client.variable.variableControllerDelete(existing.data.data[0].id);
+    }
+  });
+
+  it('refuses forced rounds for disabled games', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_LAST, { firedAt: '2000-01-01T00:00:00.000Z' });
+    const event = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamesfirenow reactionrace`);
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(meta?.result?.success, true, 'disabled forced round command should still complete with feedback');
+    assert.ok(logs.some((msg) => msg.includes('cannot create forced round for disabled game=reactionrace')), `expected disabled-game log, got ${JSON.stringify(logs)}`);
+  });
+
+  it('returns no scramble round when the word bank is empty', async () => {
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_LAST, { firedAt: '2000-01-01T00:00:00.000Z' });
+    const event = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamesfirenow scramble`);
+    const meta = event.meta as { result?: { success?: boolean } };
+    assert.equal(meta?.result?.success, true, 'empty-bank fire command should complete with feedback');
+    const round = await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE);
+    const warnings = await readVariable(client, ctx.gameServer.id, moduleId, 'minigames_admin_warned_empty_bank');
+    assert.ok(!round || round.game !== 'scramble', 'scramble should not become active when the bank is empty');
+    assert.ok(Array.isArray(warnings?.keys) && warnings.keys.includes(KEY_WORDLIST), `expected empty-bank warning to mention ${KEY_WORDLIST}, got ${JSON.stringify(warnings)}`);
+  });
+});

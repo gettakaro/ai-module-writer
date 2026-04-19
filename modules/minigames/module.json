@@ -130,11 +130,20 @@
     },
     "minigamestop": {
       "trigger": "minigamestop",
-      "description": "View cached mini-games leaderboards.",
+      "description": "Legacy alias for the mini-games leaderboard command.",
       "helpText": "Usage: /minigamestop <points|wordle|hangman|streak>",
       "function": "src/commands/minigamestop/index.js",
       "arguments": [
-        { "name": "category", "type": "string", "helpText": "points, wordle, hangman, or streak", "position": 0 }
+        { "name": "category", "type": "string", "helpText": "points, wordle, hangman, or streak", "position": 0, "defaultValue": "__MINIGAMES_NONE__" }
+      ]
+    },
+    "minigamesleaderboard": {
+      "trigger": "minigamesleaderboard",
+      "description": "View cached mini-games leaderboards.",
+      "helpText": "Usage: /minigamesleaderboard <points|wordle|hangman|streak>",
+      "function": "src/commands/minigamesleaderboard/index.js",
+      "arguments": [
+        { "name": "category", "type": "string", "helpText": "points, wordle, hangman, or streak", "position": 0, "defaultValue": "__MINIGAMES_NONE__" }
       ]
     },
     "puzzle": {
@@ -150,7 +159,7 @@
       "helpText": "Usage: /minigamesban <player> [hours]",
       "function": "src/commands/minigamesban/index.js",
       "arguments": [
-        { "name": "player", "type": "string", "helpText": "Player name", "position": 0 },
+        { "name": "player", "type": "string", "helpText": "Player name", "position": 0, "defaultValue": "__MINIGAMES_NONE__" },
         { "name": "hours", "type": "number", "helpText": "Optional duration in hours", "position": 1, "defaultValue": "0" }
       ]
     },
@@ -160,7 +169,7 @@
       "helpText": "Usage: /minigamesunban <player>",
       "function": "src/commands/minigamesunban/index.js",
       "arguments": [
-        { "name": "player", "type": "string", "helpText": "Player name", "position": 0 }
+        { "name": "player", "type": "string", "helpText": "Player name", "position": 0, "defaultValue": "__MINIGAMES_NONE__" }
       ]
     },
     "minigamesresetstats": {
@@ -169,7 +178,7 @@
       "helpText": "Usage: /minigamesresetstats <player>",
       "function": "src/commands/minigamesresetstats/index.js",
       "arguments": [
-        { "name": "player", "type": "string", "helpText": "Player name", "position": 0 }
+        { "name": "player", "type": "string", "helpText": "Player name", "position": 0, "defaultValue": "__MINIGAMES_NONE__" }
       ]
     },
     "minigamesskiproundnow": {

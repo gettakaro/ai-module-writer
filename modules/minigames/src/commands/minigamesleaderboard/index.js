@@ -6,7 +6,7 @@ async function main() {
   const moduleId = mod.moduleId;
   await requirePlayable({ gameServerId, moduleId, pog, playerId: player.id });
   const category = normalizeOptionalStringArg(args.category).toLowerCase();
-  if (!category) throw new TakaroUserError('Usage: /minigamestop <points|wordle|hangman|streak>');
+  if (!category) throw new TakaroUserError('Usage: /minigamesleaderboard <points|wordle|hangman|streak>');
 
   let cache = await getLeaderboardCache(gameServerId, moduleId);
   if (!cache.refreshedAt) cache = await refreshLeaderboards(gameServerId, moduleId);
