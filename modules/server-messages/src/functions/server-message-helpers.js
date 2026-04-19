@@ -7,9 +7,11 @@ export const MAX_MESSAGE_COUNT = 100;
 const LOCK_RETRY_DELAY_MS = 250;
 const LOCK_TTL_MS = 30000;
 const LOCK_TIMEOUT_MS = LOCK_TTL_MS + 5000;
+const MIN_HEARTBEAT_INTERVAL_MS = 1000;
 const PLAYER_COUNT_PAGE_SIZE = 100;
 const MAX_PLAYER_COUNT_PAGES = 100;
 const SUPPORTED_PLACEHOLDERS = ['playerCount', 'serverName'];
+const SERVER_NAME_FALLBACK = 'Unknown server';
 
 export function normalizeMessages(rawMessages) {
   if (!Array.isArray(rawMessages)) return [];
@@ -173,6 +175,10 @@ function createLockToken() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function buildLockPayload(token, now = new Date()) {
   return {
     token,
@@ -222,6 +228,7 @@ export function startExecutionLockHeartbeat(lock, options = {}) {
   }
 
   const ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : LOCK_TTL_MS;
+  const intervalMs = Math.max(MIN_HEARTBEAT_INTERVAL_MS, Math.floor(ttlMs / 3));
   let stopped = false;
   let inFlightBeat = Promise.resolve();
   let lastError = null;
@@ -239,17 +246,32 @@ export function startExecutionLockHeartbeat(lock, options = {}) {
     }
   };
 
+  const queueBeat = (label = 'checkpoint') => {
+    if (stopped || lastError) return inFlightBeat;
+    inFlightBeat = inFlightBeat.then(() => beatOnce(label));
+    return inFlightBeat;
+  };
+
+  const intervalId = setInterval(() => {
+    void queueBeat('background').catch(() => {
+      // The failure is surfaced via stop() or the next explicit beat().
+    });
+  }, intervalMs);
+
   return {
-    beat: async (label = 'checkpoint') => {
-      inFlightBeat = inFlightBeat.then(() => beatOnce(label));
-      return inFlightBeat;
-    },
+    beat: async (label = 'checkpoint') => queueBeat(label),
     stop: async () => {
       stopped = true;
+      clearInterval(intervalId);
+
       try {
         await inFlightBeat;
       } catch {
-        // Ignore: the original beat() caller already observed the error.
+        // Re-throw the normalized heartbeat error below.
+      }
+
+      if (lastError) {
+        throw lastError;
       }
     },
   };
@@ -284,13 +306,27 @@ export async function acquireExecutionLock(gameServerId, moduleId, options = {})
     } catch (err) {
       if (!isConflictError(err)) throw err;
 
+      let waitMs = retryDelayMs;
       const existingLock = await findVariable(gameServerId, moduleId, SERVER_MESSAGES_LOCK_KEY);
-      if (existingLock?.id && isLockStale(existingLock, ttlMs)) {
-        const deleted = await tryDeleteVariable(existingLock.id);
-        if (deleted) {
-          console.warn(`server-message-helpers: cleared stale execution lock ${existingLock.id}`);
+      if (existingLock?.id) {
+        const nowMs = Date.now();
+        if (isLockStale(existingLock, ttlMs, nowMs)) {
+          const deleted = await tryDeleteVariable(existingLock.id);
+          if (deleted) {
+            console.warn(`server-message-helpers: cleared stale execution lock ${existingLock.id}`);
+          }
+          continue;
+        }
+
+        const expiryMs = parseLockExpiryMs(existingLock, ttlMs);
+        if (expiryMs !== null) {
+          waitMs = Math.min(retryDelayMs, Math.max(1, expiryMs - nowMs));
         }
       }
+
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
+      await sleep(Math.max(1, Math.min(waitMs, remainingMs)));
     }
   }
 
@@ -372,10 +408,20 @@ export async function getOnlinePlayerCount(gameServerId) {
 export async function getServerName(gameServerId) {
   try {
     const res = await takaro.gameserver.gameServerControllerGetOne(gameServerId);
-    return res.data.data?.name ?? res.data.name ?? '';
+    const serverName = String(res.data.data?.name ?? res.data.name ?? '').trim();
+    if (serverName.length > 0) {
+      return serverName;
+    }
+
+    console.warn(
+      `server-message-helpers: server name for ${gameServerId} was blank; using fallback '${SERVER_NAME_FALLBACK}' instead of leaving {serverName} in chat`,
+    );
+    return SERVER_NAME_FALLBACK;
   } catch (err) {
-    console.error(`server-message-helpers: failed to load server name for ${gameServerId}; leaving {serverName} unchanged. Error: ${err}`);
-    return '';
+    console.error(
+      `server-message-helpers: failed to load server name for ${gameServerId}; using fallback '${SERVER_NAME_FALLBACK}'. Error: ${err}`,
+    );
+    return SERVER_NAME_FALLBACK;
   }
 }
 

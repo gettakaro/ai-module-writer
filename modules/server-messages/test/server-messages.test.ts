@@ -152,6 +152,17 @@ describe('server-messages: broadcast cronjob', () => {
     await wait(500);
   }
 
+  async function setGameServerAvailability(enabled: boolean, reachable: boolean): Promise<void> {
+    await client.gameserver.gameServerControllerUpdate(ctx.gameServer.id, {
+      name: ctx.gameServer.name,
+      connectionInfo: JSON.stringify(ctx.gameServer.connectionInfo),
+      type: ctx.gameServer.type,
+      enabled,
+      reachable,
+    });
+    await wait(500);
+  }
+
   async function triggerCronjob(): Promise<{ success: boolean; logs: string[]; cronEvent: EventOutputDTO }> {
     const before = new Date();
     await client.cronjob.cronJobControllerTrigger({
@@ -402,7 +413,7 @@ describe('server-messages: broadcast cronjob', () => {
     );
   });
 
-  it('leaves supported placeholders unchanged with a warning when runtime data is unavailable', async () => {
+  it('uses a readable fallback when the runtime server name is unavailable', async () => {
     await reinstall({
       order: 'sequential',
       messages: [{ text: 'Server={serverName}' }],
@@ -420,10 +431,10 @@ describe('server-messages: broadcast cronjob', () => {
     try {
       const result = await triggerCronjobAndCollectMessages();
       assert.equal(result.success, true, `Expected unavailable-placeholder run to succeed, logs: ${JSON.stringify(result.logs)}`);
-      assert.deepEqual(result.chatMessages, ['Server={serverName}']);
+      assert.deepEqual(result.chatMessages, ['Server=Unknown server']);
       assert.ok(
-        result.logs.some((log) => log.includes('left unavailable placeholders unchanged') && log.includes('serverName')),
-        `Expected unavailable-placeholder warning log, got: ${JSON.stringify(result.logs)}`,
+        result.logs.some((log) => log.includes("using fallback 'Unknown server'") && log.includes('{serverName}')),
+        `Expected fallback warning log, got: ${JSON.stringify(result.logs)}`,
       );
     } finally {
       await client.gameserver.gameServerControllerUpdate(ctx.gameServer.id, {
@@ -753,36 +764,67 @@ describe('server-messages: broadcast cronjob', () => {
     }
   });
 
-  it('does not advance persisted rotation state when broadcasting fails', async () => {
+  it('does not advance persisted rotation state when a later broadcast fails', async () => {
     await reinstall({
       order: 'sequential',
       messages: [{ text: 'Fail First' }, { text: 'Fail Second' }],
     });
 
-    await ctx.server.shutdown();
-    await wait(500);
+    const first = await triggerCronjobAndCollectMessages();
+    assert.equal(first.success, true, `Expected setup run to succeed, logs: ${JSON.stringify(first.logs)}`);
+    assert.deepEqual(first.chatMessages, ['Fail First']);
 
-    const failed = await triggerCronjob();
-    assert.equal(failed.success, false, `Expected failed broadcast run to report failure, logs: ${JSON.stringify(failed.logs)}`);
+    const stateBeforeFailure = await getStateVariable();
+    assert.ok(stateBeforeFailure, 'Expected state variable after first successful broadcast');
+    assert.equal(JSON.parse(stateBeforeFailure.value).sequentialIndex, 1);
 
-    const stateAfterFailure = await getStateVariable();
-    assert.equal(stateAfterFailure, null, 'Expected no rotation state to be persisted after a failed first broadcast');
+    await setGameServerAvailability(false, false);
+
+    try {
+      const failed = await triggerCronjob();
+      assert.equal(failed.success, false, `Expected failed broadcast run to report failure, logs: ${JSON.stringify(failed.logs)}`);
+      assert.ok(
+        !failed.logs.some((log) => log.includes('no online players')),
+        `Expected failure to happen after lock acquisition and player counting, got logs: ${JSON.stringify(failed.logs)}`,
+      );
+
+      const stateAfterFailure = await getStateVariable();
+      assert.ok(stateAfterFailure, 'Expected prior rotation state to remain after failed later broadcast');
+      assert.equal(
+        JSON.parse(stateAfterFailure.value).sequentialIndex,
+        1,
+        `Expected failed later broadcast to preserve sequential index, got ${stateAfterFailure.value}`,
+      );
+    } finally {
+      await setGameServerAvailability(ctx.gameServer.enabled, ctx.gameServer.reachable);
+    }
+
+    const retried = await triggerCronjobAndCollectMessages();
+    assert.equal(retried.success, true, `Expected retry after restoring server availability to succeed, logs: ${JSON.stringify(retried.logs)}`);
+    assert.deepEqual(retried.chatMessages, ['Fail Second']);
   });
 
-  it('removes the execution lock after a failed broadcast', async () => {
+  it('removes the execution lock after a failed broadcast send attempt', async () => {
     await reinstall({
       order: 'sequential',
       messages: [{ text: 'Recover First' }, { text: 'Recover Second' }],
     });
 
-    await ctx.server.shutdown();
-    await wait(500);
+    await setGameServerAvailability(false, false);
 
-    const failed = await triggerCronjob();
-    assert.equal(failed.success, false, `Expected failed broadcast run to report failure, logs: ${JSON.stringify(failed.logs)}`);
+    try {
+      const failed = await triggerCronjob();
+      assert.equal(failed.success, false, `Expected failed broadcast run to report failure, logs: ${JSON.stringify(failed.logs)}`);
+      assert.ok(
+        !failed.logs.some((log) => log.includes('no online players')),
+        `Expected send failure path instead of the zero-player fast path, got logs: ${JSON.stringify(failed.logs)}`,
+      );
 
-    const lockAfterFailure = await getVariable(LOCK_KEY);
-    assert.equal(lockAfterFailure, null, 'Expected failed run to release its execution lock');
+      const lockAfterFailure = await getVariable(LOCK_KEY);
+      assert.equal(lockAfterFailure, null, 'Expected failed run to release its execution lock');
+    } finally {
+      await setGameServerAvailability(ctx.gameServer.enabled, ctx.gameServer.reachable);
+    }
   });
 
   it('documents placeholder support, validation behavior, and bounded message lists in module.json', async () => {
