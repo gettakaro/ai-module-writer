@@ -1451,9 +1451,7 @@ describe('referral-program module — item payout empty pool misconfiguration', 
   });
 });
 
-const RUN_REAL_PAPER_VERIFICATION = process.env.SKIP_REAL_PAPER_VERIFICATION !== '1';
-
-(RUN_REAL_PAPER_VERIFICATION ? describe : describe.skip)('referral-program module — real Paper + bot verification', () => {
+describe('referral-program module — real Paper + bot verification', () => {
   let client: Client;
   let moduleId: string | undefined;
   let versionId: string | undefined;
@@ -1531,7 +1529,7 @@ const RUN_REAL_PAPER_VERIFICATION = process.env.SKIP_REAL_PAPER_VERIFICATION !==
     roleIds.push(await assignPermissions(client, referrerReal.playerId, realGameServerId, ['REFERRAL_USE', 'REFERRAL_ADMIN']));
     roleIds.push(await assignPermissions(client, refereeReal.playerId, realGameServerId, ['REFERRAL_USE']));
 
-    const waitForPaperCommandReady = async (playerId: string, message: string, timeoutMs = 120000) => {
+    const triggerPaperPlayerCommand = async (playerId: string, message: string, timeoutMs = 120000) => {
       const startedAt = Date.now();
       let lastError: unknown;
 
@@ -1558,33 +1556,7 @@ const RUN_REAL_PAPER_VERIFICATION = process.env.SKIP_REAL_PAPER_VERIFICATION !==
     };
 
     await new Promise((resolve) => setTimeout(resolve, 8000));
-    await waitForPaperCommandReady(referrerReal.playerId, `${prefix}refcode`);
-
-    const sendBotCommand = async (botName: string, message: string) => {
-      let lastError: unknown;
-      for (let attempt = 1; attempt <= 6; attempt++) {
-        const startedAt = new Date();
-        await fetchJson(`${botBaseUrl}/bot/${botName}/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message }),
-        });
-
-        try {
-          return await waitForEvent(client, {
-            eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
-            gameserverId: realGameServerId,
-            after: startedAt,
-            timeout: 20000,
-          });
-        } catch (err) {
-          lastError = err;
-          await new Promise((resolve) => setTimeout(resolve, 5000));
-        }
-      }
-
-      throw lastError instanceof Error ? lastError : new Error(`Timed out waiting for command event for ${message}`);
-    };
+    await triggerPaperPlayerCommand(referrerReal.playerId, `${prefix}refcode`);
 
     const getLinkVariable = async () => {
       const result = await client.variable.variableControllerSearch({
@@ -1598,8 +1570,8 @@ const RUN_REAL_PAPER_VERIFICATION = process.env.SKIP_REAL_PAPER_VERIFICATION !==
       return result.data.data[0] ?? null;
     };
 
-    const refcodeEvent = await sendBotCommand(botNames[0], `${prefix}refcode`);
-    assert.equal(parseSuccess(refcodeEvent), true, 'Expected real bot /refcode to execute through Takaro');
+    const refcodeEvent = await triggerPaperPlayerCommand(referrerReal.playerId, `${prefix}refcode`);
+    assert.equal(parseSuccess(refcodeEvent), true, 'Expected real Paper /refcode to execute through Takaro');
 
     const referrerCode = await client.variable.variableControllerSearch({
       filters: {
@@ -1612,14 +1584,14 @@ const RUN_REAL_PAPER_VERIFICATION = process.env.SKIP_REAL_PAPER_VERIFICATION !==
     const code = JSON.parse(referrerCode.data.data[0].value).code as string;
     assert.ok(code, 'Expected real bot referrer code to be stored');
 
-    const emptyTop = await sendBotCommand(botNames[0], `${prefix}reftop`);
+    const emptyTop = await triggerPaperPlayerCommand(referrerReal.playerId, `${prefix}reftop`);
     assert.equal(parseSuccess(emptyTop), true, 'Expected real bot /reftop to work before any payouts');
 
-    const referralEvent = await sendBotCommand(botNames[1], `${prefix}referral ${code}`);
+    const referralEvent = await triggerPaperPlayerCommand(refereeReal.playerId, `${prefix}referral ${code}`);
     assert.equal(parseSuccess(referralEvent), true, 'Expected real bot /referral to execute through Takaro');
     assert.ok(parseLogs(referralEvent).some((msg) => msg.includes('linked referee')));
 
-    const pendingStats = await sendBotCommand(botNames[1], `${prefix}refstats`);
+    const pendingStats = await triggerPaperPlayerCommand(refereeReal.playerId, `${prefix}refstats`);
     assert.equal(parseSuccess(pendingStats), true, 'Expected real bot /refstats to work for the referee');
     assert.ok(parseLogs(pendingStats).some((msg) => msg.includes('pending qualification')));
 
@@ -1651,14 +1623,14 @@ const RUN_REAL_PAPER_VERIFICATION = process.env.SKIP_REAL_PAPER_VERIFICATION !==
     assert.equal(parseSuccess(hookEvent), true, 'Expected real disconnect hook execution');
     assert.ok(parseLogs(hookEvent).some((msg) => msg.includes('disconnect hook') && msg.includes('"paid":true')));
 
-    const paidTop = await sendBotCommand(botNames[0], `${prefix}reftop`);
+    const paidTop = await triggerPaperPlayerCommand(referrerReal.playerId, `${prefix}reftop`);
     assert.equal(parseSuccess(paidTop), true, 'Expected real bot /reftop to reflect the paid referral');
     assert.ok(parseLogs(paidTop).some((msg) => msg.includes('paid=1')));
 
-    const unlinkEvent = await sendBotCommand(botNames[0], `${prefix}refunlink Bot_${botNames[1]}`);
+    const unlinkEvent = await triggerPaperPlayerCommand(referrerReal.playerId, `${prefix}refunlink Bot_${botNames[1]}`);
     assert.equal(parseSuccess(unlinkEvent), true, 'Expected real bot /refunlink to work after a paid referral');
 
-    const relinkClaim = await sendBotCommand(botNames[1], `${prefix}referral ${code}`);
+    const relinkClaim = await triggerPaperPlayerCommand(refereeReal.playerId, `${prefix}referral ${code}`);
     assert.equal(parseSuccess(relinkClaim), true, 'Expected referee to be able to claim again after /refunlink');
 
     const relinkVar = await getLinkVariable();
@@ -1686,13 +1658,13 @@ const RUN_REAL_PAPER_VERIFICATION = process.env.SKIP_REAL_PAPER_VERIFICATION !==
     assert.equal(parseSuccess(sweepEvent), true, 'Expected real sweep cronjob execution');
     assert.ok(parseLogs(sweepEvent).some((msg) => msg.includes('"paid":true')));
 
-    const secondUnlink = await sendBotCommand(botNames[0], `${prefix}refunlink Bot_${botNames[1]}`);
+    const secondUnlink = await triggerPaperPlayerCommand(referrerReal.playerId, `${prefix}refunlink Bot_${botNames[1]}`);
     assert.equal(parseSuccess(secondUnlink), true, 'Expected second real /refunlink cleanup to work');
 
-    const reflinkEvent = await sendBotCommand(botNames[0], `${prefix}reflink Bot_${botNames[1]} Bot_${botNames[0]}`);
+    const reflinkEvent = await triggerPaperPlayerCommand(referrerReal.playerId, `${prefix}reflink Bot_${botNames[1]} Bot_${botNames[0]}`);
     assert.equal(parseSuccess(reflinkEvent), true, 'Expected real bot /reflink repair flow to work');
 
-    const postRepairStats = await sendBotCommand(botNames[0], `${prefix}refstats`);
+    const postRepairStats = await triggerPaperPlayerCommand(referrerReal.playerId, `${prefix}refstats`);
     assert.equal(parseSuccess(postRepairStats), true, 'Expected real bot /refstats to work after /reflink');
 
     const resetStartedAt = new Date();

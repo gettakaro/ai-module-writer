@@ -62,6 +62,7 @@ async function main() {
     const affectedPlayerName = latestRejectedOutgoingReferral.refereePlayerId
       ? await getPlayerName(latestRejectedOutgoingReferral.refereePlayerId)
       : 'Unknown player';
+    lines.push('Your referral status: needs admin help');
     lines.push(`Latest referred player needing admin help: ${affectedPlayerName}`);
     lines.push(`Their referral status: ${describeReferralStatusForPlayer(latestRejectedOutgoingReferral)}`);
     lines.push(`Payout issue: ${describeReferralProblemForPlayer(latestRejectedOutgoingReferral.rejectionReason)}`);

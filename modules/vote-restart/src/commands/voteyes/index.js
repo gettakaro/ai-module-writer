@@ -5,6 +5,7 @@ import {
   getOnlineNonImmunePlayers,
   computeThreshold,
   getEffectiveRestartDelaySeconds,
+  getCommandPrefix,
 } from './vote-helpers.js';
 
 async function main() {
@@ -14,8 +15,9 @@ async function main() {
 
   // 1. Check if vote is active and not expired
   const voteState = await getVoteState(gameServerId, moduleId);
+  const prefix = await getCommandPrefix(gameServerId);
   if (!voteState) {
-    throw new TakaroUserError('There is no active restart vote. Use /voterestart to start one.');
+    throw new TakaroUserError(`There is no active restart vote. Use ${prefix}voterestart to start one.`);
   }
 
   if (voteState.status !== 'active') {
@@ -24,7 +26,7 @@ async function main() {
 
   const elapsed = (Date.now() - new Date(voteState.startedAt).getTime()) / 1000;
   if (elapsed >= config.voteDuration) {
-    throw new TakaroUserError('The restart vote has expired. Use /voterestart to start a new vote.');
+    throw new TakaroUserError(`The restart vote has expired. Use ${prefix}voterestart to start a new vote.`);
   }
 
   // 2. Check immunity

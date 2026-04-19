@@ -46,12 +46,12 @@ async function main() {
         moduleId,
         [`referrer-quota:${link.referrerId}`],
         async () => {
-          if (link.status === 'paying' && !link.rewardDeliveryAttemptedAt) {
+          if (link.status === 'paying' && !link.rewardGranted) {
             throw new TakaroUserError('This referral payout is still being finalized. Please retry in a moment.');
           }
 
           const welcomeBonusAmount = Math.max(0, Math.floor(Number(link.welcomeBonusAmount) || 0));
-          const rewardRollbackPreview = (link.status === 'paid' || (link.status === 'paying' && link.rewardDeliveryAttemptedAt))
+          const rewardRollbackPreview = (link.status === 'paid' || link.rewardGranted)
             ? await previewReferrerRewardRollback(gameServerId, link.referrerId, link)
             : { rolledBack: false, skipped: true, reason: 'not-paid' };
 
@@ -67,7 +67,7 @@ async function main() {
             throw new TakaroUserError('This referral cannot be unlinked automatically because the referee no longer has the full welcome bonus available for clawback. Please resolve the currency difference manually first.');
           }
 
-          const rewardRollback = (link.status === 'paid' || (link.status === 'paying' && link.rewardDeliveryAttemptedAt))
+          const rewardRollback = (link.status === 'paid' || link.rewardGranted)
             ? await rollbackReferrerReward(gameServerId, link.referrerId, link)
             : rewardRollbackPreview;
           const welcomeBonusRolledBack = welcomeBonusAmount > 0
@@ -87,8 +87,8 @@ async function main() {
             rewardRollback,
           });
 
-          const statusNote = (link.status === 'paid' || (link.status === 'paying' && link.rewardDeliveryAttemptedAt))
-            ? ` Paid or partially finalized referral rewards were rolled back${rewardRollback.rolledBack ? '' : ' where possible'}. ${referee.name} and the referrer were notified in-game.`
+          const statusNote = (link.status === 'paid' || link.rewardGranted)
+            ? ` Paid or finalized referral rewards were rolled back${rewardRollback.rolledBack ? '' : ' where possible'}. ${referee.name} and the referrer were notified in-game.`
             : ` Pending referral state was cleared. ${referee.name} and the referrer were notified in-game.`;
           await pog.pm(`Referral link removed for ${referee.name}. Welcome bonus rollback: ${welcomeBonusRolledBack}.${statusNote}`);
         },

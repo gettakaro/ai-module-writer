@@ -246,20 +246,29 @@ export async function ensureReferralCode(gameServerId, moduleId, playerId) {
   const existing = await getReferralCode(gameServerId, moduleId, playerId);
   if (existing?.code) {
     const lookupKey = getReferralCodeLookupKey(existing.code);
-    const lookup = await findVariable(gameServerId, moduleId, lookupKey);
+    const lookup = await getReferralCodeLookup(gameServerId, moduleId, existing.code);
+
+    if (lookup?.playerId === playerId) {
+      return existing;
+    }
+
     if (!lookup) {
       try {
         await createVariable(gameServerId, moduleId, lookupKey, { playerId });
+        return existing;
       } catch (err) {
         if (!looksLikeDuplicateVariableError(err)) throw err;
       }
     }
-    return existing;
+
+    console.warn(
+      `referral-program: stored referral code ${existing.code} for player=${playerId} is no longer safe to reuse; generating a replacement lookup owner=${lookup?.playerId ?? 'unknown'}`,
+    );
   }
 
   for (let attempt = 0; attempt < 25; attempt++) {
     const code = makeCode();
-    const payload = { code, createdAt: new Date().toISOString() };
+    const payload = { code, createdAt: existing?.createdAt ?? new Date().toISOString() };
     const lookupKey = getReferralCodeLookupKey(code);
 
     try {
@@ -270,16 +279,25 @@ export async function ensureReferralCode(gameServerId, moduleId, playerId) {
     }
 
     try {
-      await createVariable(gameServerId, moduleId, getReferralCodeKey(playerId), payload, playerId);
+      await writeVariable(gameServerId, moduleId, getReferralCodeKey(playerId), payload, playerId);
+      if (existing?.code && existing.code !== code) {
+        const oldLookup = await getReferralCodeLookup(gameServerId, moduleId, existing.code);
+        if (oldLookup?.playerId === playerId) {
+          await deleteVariable(gameServerId, moduleId, getReferralCodeLookupKey(existing.code));
+        }
+      }
       return payload;
     } catch (err) {
       if (looksLikeDuplicateVariableError(err)) {
         const settled = await getReferralCode(gameServerId, moduleId, playerId);
         if (settled?.code) {
-          if (settled.code !== code) {
-            await deleteVariable(gameServerId, moduleId, lookupKey);
+          const settledLookup = await getReferralCodeLookup(gameServerId, moduleId, settled.code);
+          if (settledLookup?.playerId === playerId) {
+            if (settled.code !== code) {
+              await deleteVariable(gameServerId, moduleId, lookupKey);
+            }
+            return settled;
           }
-          return settled;
         }
       }
 
@@ -641,8 +659,6 @@ export async function planReferrerReward(gameServerId, referrerId, config, multi
     throw new TakaroUserError('A referral reward item is missing item, amount, or quality.');
   }
 
-  await validateConfiguredItemExists(gameServerId, chosen.item);
-
   return {
     rewardType: 'item',
     item: chosen.item,
@@ -702,8 +718,8 @@ export async function rollbackWelcomeBonus(gameServerId, refereeId, amount) {
 }
 
 export async function previewReferrerRewardRollback(gameServerId, referrerId, link) {
-  const rewardWasPotentiallyDelivered = link?.status === 'paid' || (link?.status === 'paying' && !!link?.rewardDeliveryAttemptedAt);
-  if (!referrerId || !link || !rewardWasPotentiallyDelivered) {
+  const rewardWasConfirmed = link?.status === 'paid' || !!link?.rewardGranted;
+  if (!referrerId || !link || !rewardWasConfirmed) {
     return { rolledBack: false, skipped: true, reason: 'not-paid' };
   }
 
@@ -819,7 +835,7 @@ export function describeReferralStatusForPlayer(link) {
 
 export function describeReferralProblemForPlayer(reason) {
   if (!reason) return 'Reward delivery ran into a problem. Please ask an admin to review the referral setup.';
-  if (/item .*not found/i.test(reason) || /missing item/i.test(reason)) {
+  if (/item .*not found/i.test(reason) || /missing item/i.test(reason) || /configured referral reward item/i.test(reason)) {
     return 'Reward delivery failed because the configured referral item is unavailable. Please ask an admin to review the reward setup.';
   }
   if (/no items are configured/i.test(reason)) {
@@ -856,27 +872,45 @@ async function notifyReferralPayout(gameServerId, referrerId, refereeId, reward)
   }
 }
 
+async function sendPlayerMessage(gameServerId, playerId, message) {
+  const pog = await getPog(gameServerId, playerId);
+  if (!pog?.gameId) return false;
+
+  await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
+    message,
+    opts: {
+      recipient: {
+        gameId: pog.gameId,
+      },
+    },
+  });
+  return true;
+}
+
 export async function notifyReferralRollback(gameServerId, referrerId, refereeId, details) {
   try {
     const [referrerName, refereeName] = await Promise.all([
       getPlayerName(referrerId),
       getPlayerName(refereeId),
     ]);
-    const lines = [
-      `[Referral] Admin rollback: ${refereeName}'s referral link with ${referrerName} was removed.`,
-    ];
+
+    const referrerLines = [`[Referral] An admin removed the referral link with ${refereeName}.`];
+    const refereeLines = [`[Referral] An admin removed your referral link with ${referrerName}.`];
 
     if ((details?.welcomeBonusRolledBack ?? 0) > 0) {
-      lines.push(`${refereeName}'s welcome bonus rollback: ${details.welcomeBonusRolledBack}.`);
+      refereeLines.push(`[Referral] Your welcome bonus rollback: ${details.welcomeBonusRolledBack} currency.`);
     }
 
     if (details?.rewardRollback?.rewardType === 'currency' && (details.rewardRollback.amount ?? 0) > 0) {
-      lines.push(`${referrerName}'s referral reward rollback: ${details.rewardRollback.amount} currency.`);
+      referrerLines.push(`[Referral] Your referral reward rollback: ${details.rewardRollback.amount} currency.`);
     } else if (details?.rewardRollback?.rewardType === 'item') {
-      lines.push(`${referrerName}'s referral item reward could not be clawed back automatically.`);
+      referrerLines.push('[Referral] Your referral item reward could not be clawed back automatically.');
     }
 
-    await sendReferralMessage(gameServerId, lines.join(' '));
+    await Promise.allSettled([
+      sendPlayerMessage(gameServerId, referrerId, referrerLines.join(' ')),
+      sendPlayerMessage(gameServerId, refereeId, refereeLines.join(' ')),
+    ]);
   } catch (err) {
     console.error(`referral-program: failed to send rollback notification for referrer=${referrerId}, referee=${refereeId}: ${err}`);
   }

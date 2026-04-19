@@ -139,6 +139,18 @@ describe('afk-kick: check-afk cronjob', () => {
     return { success, logs };
   }
 
+  async function getTrackingState(): Promise<Record<string, { x?: number; y?: number; z?: number; idleCount?: number; warned?: boolean }>> {
+    const result = await client.variable.variableControllerSearch({
+      filters: {
+        key: ['afk_tracking'],
+        gameServerId: [ctx.gameServer.id],
+        moduleId: [moduleId],
+      },
+    });
+    if (result.data.data.length === 0) return {};
+    return JSON.parse(result.data.data[0]!.value) as Record<string, { idleCount?: number; warned?: boolean }>;
+  }
+
   it('first check stores positions without warnings', async () => {
     const { success, logs } = await triggerCronjob();
 
@@ -213,7 +225,7 @@ describe('afk-kick: check-afk cronjob', () => {
     );
   });
 
-  it('immune player is not kicked', async () => {
+  it('immune player is not kicked and the early-exit path resets their AFK counters', async () => {
     // player[2] has IMMUNE_TO_AFK_KICK — after multiple triggers they should be skipped.
     // Reset state: disconnect everyone, trigger once to prune tracking, then reconnect fresh.
     await ctx.server.executeConsoleCommand('disconnectAll');
@@ -248,8 +260,19 @@ describe('afk-kick: check-afk cronjob', () => {
     // With all players fresh in tracking (empty), run 3 triggers:
     // Trigger 1: first seen — idleCount=0 for all
     await triggerCronjob();
-    // Trigger 2: idleCount=1 for all (below warning threshold=2)
+    let tracking = await getTrackingState();
+    assert.deepEqual(
+      tracking[immunePlayerId],
+      { idleCount: 0, warned: false, x: tracking[immunePlayerId]?.x, y: tracking[immunePlayerId]?.y, z: tracking[immunePlayerId]?.z },
+      'Expected immune player tracking to be initialized with a clean AFK state on first check',
+    );
+
+    // Trigger 2: non-immune players increment, immune path should reset back to idleCount=0/warned=false
     await triggerCronjob();
+    tracking = await getTrackingState();
+    assert.equal(tracking[immunePlayerId]?.idleCount, 0, 'Expected immune early-exit to keep idleCount reset on second check');
+    assert.equal(tracking[immunePlayerId]?.warned, false, 'Expected immune early-exit to keep warned=false on second check');
+
     // Trigger 3: idleCount=2 for all → hits warning threshold=2
     //   - non-immune players get warned
     //   - player[2] (immune) → logs "immune" and resets idleCount
@@ -261,6 +284,10 @@ describe('afk-kick: check-afk cronjob', () => {
       logs.some((msg) => msg.toLowerCase().includes('immune')),
       `Expected a log mentioning "immune" for player[2], got: ${JSON.stringify(logs)}`,
     );
+
+    tracking = await getTrackingState();
+    assert.equal(tracking[immunePlayerId]?.idleCount, 0, 'Expected immune player idleCount to remain reset after repeated checks');
+    assert.equal(tracking[immunePlayerId]?.warned, false, 'Expected immune player warning state to remain cleared after repeated checks');
 
     // Verify player[2] is still online after the kick trigger
     await new Promise((resolve) => setTimeout(resolve, 1000));

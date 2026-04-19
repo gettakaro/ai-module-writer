@@ -17,11 +17,14 @@ import {
   assignPermissions,
   cleanupRole,
 } from '../../../test/helpers/modules.js';
-import { getEffectiveRestartDelaySeconds } from '../src/functions/vote-helpers.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const MODULE_DIR = path.resolve(__dirname, '..');
+
+function getEffectiveRestartDelaySeconds(config: { restartDelay?: unknown }) {
+  return Math.max(0, Math.ceil(Number(config?.restartDelay ?? 0) || 0));
+}
 
 // ── Shared helper factories ───────────────────────────────────────────────────
 
@@ -577,6 +580,134 @@ describe('vote-restart edge cases', () => {
 // We simulate this by injecting a vote state with 1 voter and using passThreshold=49
 // so that with 2 online eligible players, threshold=ceil(2*49/100)=1.
 // This validates the cronjob's dynamic threshold recalculation logic.
+
+describe('vote-restart fractional restartDelay integration', () => {
+  let client4: Client;
+  let ctx4: MockServerContext;
+  let moduleId4: string;
+  let versionId4: string;
+  let prefix4: string;
+  let cronjobId4: string;
+  let initiateRoleId4: string | undefined;
+
+  before(async () => {
+    client4 = await createClient();
+    ctx4 = await startMockServer(client4);
+
+    const mod = await pushModule(client4, MODULE_DIR);
+    moduleId4 = mod.id;
+    versionId4 = mod.latestVersion.id;
+
+    await installModule(client4, versionId4, ctx4.gameServer.id, {
+      userConfig: {
+        voteDuration: 120,
+        cooldownDuration: 60,
+        restartDelay: 2.2,
+        restartCommand: 'say restart-test',
+        passThreshold: 51,
+        minimumPlayers: 2,
+      },
+    });
+
+    prefix4 = await getCommandPrefix(client4, ctx4.gameServer.id);
+
+    const cronjob = mod.latestVersion.cronJobs[0];
+    if (!cronjob) throw new Error('Expected at least one cronjob in vote-restart module');
+    cronjobId4 = cronjob.id;
+
+    initiateRoleId4 = await assignPermissions(
+      client4,
+      ctx4.players[0].playerId,
+      ctx4.gameServer.id,
+      ['VOTE_RESTART_INITIATE'],
+    );
+  });
+
+  after(async () => {
+    await cleanupRole(client4, initiateRoleId4);
+    try {
+      await uninstallModule(client4, moduleId4, ctx4.gameServer.id);
+    } catch (err) {
+      console.error('Cleanup: failed to uninstall fractional-delay module:', err);
+    }
+    try {
+      await deleteModule(client4, moduleId4);
+    } catch (err) {
+      console.error('Cleanup: failed to delete fractional-delay module:', err);
+    }
+    await stopMockServer(ctx4.server, client4, ctx4.gameServer.id);
+  });
+
+  const { triggerCommand: triggerCommand4, getResult: getResult4 } = makeCommandHelpers(
+    () => client4,
+    () => ctx4.gameServer.id,
+    () => prefix4,
+  );
+
+  const triggerCronjob4 = makeCronjobHelper(
+    () => client4,
+    () => ctx4.gameServer.id,
+    () => cronjobId4,
+    () => moduleId4,
+  );
+
+  it('uses the normalized fractional restartDelay in voteyes, votestatus, and check-vote', async () => {
+    const startEvent = await triggerCommand4(ctx4.players[0].playerId, 'voterestart');
+    assert.equal(getResult4(startEvent).success, true, `Expected vote start to succeed, logs: ${JSON.stringify(getResult4(startEvent).logs)}`);
+
+    const yesEvent = await triggerCommand4(ctx4.players[1].playerId, 'voteyes');
+    const yesResult = getResult4(yesEvent);
+    assert.equal(yesResult.success, true, `Expected second vote to pass, logs: ${JSON.stringify(yesResult.logs)}`);
+    assert.ok(
+      yesResult.logs.some((l) => l.includes('Server will restart in 3s')),
+      `Expected normalized 3s restart message from /voteyes, got: ${JSON.stringify(yesResult.logs)}`,
+    );
+
+    const statusEvent = await triggerCommand4(ctx4.players[0].playerId, 'votestatus');
+    const statusResult = getResult4(statusEvent);
+    assert.equal(statusResult.success, true, `Expected /votestatus to succeed, logs: ${JSON.stringify(statusResult.logs)}`);
+    assert.ok(
+      statusResult.logs.some((l) => l.includes('restarting in 3s') || l.includes('restarting in 2s') || l.includes('restarting in 1s')),
+      `Expected /votestatus countdown derived from normalized 3s delay, got: ${JSON.stringify(statusResult.logs)}`,
+    );
+
+    const varSearch = await client4.variable.variableControllerSearch({
+      filters: {
+        key: ['vr_vote_state'],
+        gameServerId: [ctx4.gameServer.id],
+        moduleId: [moduleId4],
+      },
+    });
+    assert.ok(varSearch.data.data.length > 0, 'Expected vr_vote_state variable to exist');
+
+    const voteStateVar = varSearch.data.data[0]!;
+    const voteState = JSON.parse(voteStateVar.value);
+    voteState.status = 'passed';
+    voteState.passedAt = new Date(Date.now() - 2_000).toISOString();
+    await client4.variable.variableControllerUpdate(voteStateVar.id, {
+      value: JSON.stringify(voteState),
+    });
+
+    const earlyCron = await triggerCronjob4();
+    assert.equal(earlyCron.success, true, `Expected early cronjob to succeed, logs: ${JSON.stringify(earlyCron.logs)}`);
+    assert.ok(
+      !earlyCron.logs.some((l) => l.includes('restart command executed successfully')),
+      `Expected cronjob to wait until normalized 3s delay elapsed, got: ${JSON.stringify(earlyCron.logs)}`,
+    );
+
+    voteState.passedAt = new Date(Date.now() - 4_000).toISOString();
+    await client4.variable.variableControllerUpdate(voteStateVar.id, {
+      value: JSON.stringify(voteState),
+    });
+
+    const lateCron = await triggerCronjob4();
+    assert.equal(lateCron.success, true, `Expected late cronjob to succeed, logs: ${JSON.stringify(lateCron.logs)}`);
+    assert.ok(
+      lateCron.logs.some((l) => l.includes('restart command executed successfully')),
+      `Expected cronjob to restart after normalized 3s delay elapsed, got: ${JSON.stringify(lateCron.logs)}`,
+    );
+  });
+});
 
 describe('vote-restart dynamic threshold recalculation', () => {
   let client3: Client;

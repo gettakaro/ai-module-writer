@@ -152,8 +152,8 @@
     },
     "reflink": {
       "trigger": "reflink",
-      "description": "Admin: manually link a referee to a referrer and pay immediately.",
-      "helpText": "Usage: /reflink <referee> <referrer> (replace / if your server uses a different command prefix). Creates a paid referral link immediately.",
+      "description": "Admin: manually link a referee to a referrer and pay now or queue payout repair.",
+      "helpText": "Usage: /reflink <referee> <referrer> (replace / if your server uses a different command prefix). Creates the referral link immediately and pays rewards right away when possible, otherwise leaves payout queued for retry.",
       "function": "src/commands/reflink/index.js",
       "arguments": [
         {

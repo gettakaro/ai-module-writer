@@ -138,3 +138,13 @@ export function computeThreshold(onlineCount, percent) {
 export function getEffectiveRestartDelaySeconds(config) {
   return Math.max(0, Math.ceil(Number(config?.restartDelay ?? 0) || 0));
 }
+
+export async function getCommandPrefix(gameServerId) {
+  try {
+    const result = await takaro.settings.settingsControllerGet(['commandPrefix'], gameServerId);
+    return result.data.data?.[0]?.value || '/';
+  } catch (err) {
+    console.error(`vote-helpers: failed to load command prefix for ${gameServerId}: ${err}`);
+    return '/';
+  }
+}
