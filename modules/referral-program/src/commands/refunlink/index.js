@@ -7,6 +7,7 @@ import {
   removePendingReferee,
   rollbackWelcomeBonus,
   rollbackReferrerReward,
+  getCommandPrefix,
 } from './referral-helpers.js';
 
 async function main() {
@@ -19,11 +20,12 @@ async function main() {
 
   const refereeName = String(args.referee || '').trim();
   if (!refereeName) {
-    throw new TakaroUserError('Usage: refunlink <referee> (use your server command prefix before the trigger).');
+    const prefix = await getCommandPrefix(gameServerId);
+    throw new TakaroUserError(`Usage: ${prefix}refunlink <referee>`);
   }
 
   const referee = await findPlayerByName(gameServerId, refereeName);
-  if (!referee) throw new TakaroUserError(`Referee "${refereeName}" not found.`);
+  if (!referee) throw new TakaroUserError(`Referee "${refereeName}" was not found on this server.`);
 
   const link = await getReferralLink(gameServerId, moduleId, referee.id);
   if (!link) {
@@ -44,8 +46,9 @@ async function main() {
     }
   }
 
+  let welcomeBonusRolledBack = 0;
   if (welcomeBonusAmount > 0) {
-    await rollbackWelcomeBonus(gameServerId, referee.id, welcomeBonusAmount);
+    welcomeBonusRolledBack = await rollbackWelcomeBonus(gameServerId, referee.id, welcomeBonusAmount);
   }
 
   await adjustReferrerStatsForLink(gameServerId, moduleId, link.referrerId, link, -1);
@@ -53,13 +56,13 @@ async function main() {
   await deleteReferralLink(gameServerId, moduleId, referee.id);
 
   console.log(
-    `referral-program: admin unlinked referee=${referee.name}, previousStatus=${link.status}, welcomeBonusRolledBack=${welcomeBonusAmount}, referrerRewardRolledBack=${JSON.stringify(rewardRollback)}`,
+    `referral-program: admin unlinked referee=${referee.name}, previousStatus=${link.status}, welcomeBonusRolledBack=${welcomeBonusRolledBack}, referrerRewardRolledBack=${JSON.stringify(rewardRollback)}`,
   );
 
   const statusNote = link.status === 'paid'
     ? ` Paid referral rewards were rolled back${rewardRollback.rolledBack ? '' : ' where possible'}.`
     : ' Pending referral state was cleared.';
-  await pog.pm(`Referral link removed for ${referee.name}. Welcome bonus rollback: ${welcomeBonusAmount}.${statusNote}`);
+  await pog.pm(`Referral link removed for ${referee.name}. Welcome bonus rollback: ${welcomeBonusRolledBack}.${statusNote}`);
 }
 
 await main();

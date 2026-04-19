@@ -1,5 +1,5 @@
 import { data, checkPermission, TakaroUserError } from '@takaro/helpers';
-import { ensureReferralCode } from './referral-helpers.js';
+import { ensureReferralCode, getCommandPrefix } from './referral-helpers.js';
 
 async function main() {
   const { pog, player, gameServerId, module: mod } = data;
@@ -9,8 +9,9 @@ async function main() {
   }
 
   const code = await ensureReferralCode(gameServerId, mod.moduleId, pog.playerId);
-  console.log(`referral-program: generated/refetched code for player=${player.name}, code=${code.code}`);
-  await pog.pm(`Your referral code is ${code.code}. Share it with new players so they can use their server command prefix followed by referral ${code.code}.`);
+  const prefix = await getCommandPrefix(gameServerId);
+  console.log(`referral-program: generated/refetched code for player=${player.name}, code=${code.code}, prefix=${prefix}`);
+  await pog.pm(`Your referral code is ${code.code}. Tell invited players to type ${prefix}referral ${code.code}.`);
 }
 
 await main();

@@ -16,6 +16,8 @@ import {
   awardWelcomeBonus,
   rollbackWelcomeBonus,
   getTodayKey,
+  getCommandPrefix,
+  withReferralLocks,
 } from './referral-helpers.js';
 
 function getWelcomeMessage(welcomeBonus, thresholdMinutes) {
@@ -36,12 +38,8 @@ async function main() {
 
   const code = String(args.code || '').trim().toUpperCase();
   if (!code) {
-    throw new TakaroUserError('Usage: referral <code> — use your server command prefix before the trigger.');
-  }
-
-  const existingLink = await getReferralLink(gameServerId, moduleId, pog.playerId);
-  if (existingLink) {
-    throw new TakaroUserError('You already have a referral link on this server. An admin can use refunlink if this needs to be corrected.');
+    const prefix = await getCommandPrefix(gameServerId);
+    throw new TakaroUserError(`Usage: ${prefix}referral <code>`);
   }
 
   const lookup = await getReferralCodeLookup(gameServerId, moduleId, code);
@@ -70,75 +68,91 @@ async function main() {
     }
   }
 
-  const referrerStatsRaw = await getReferralStats(gameServerId, moduleId, lookup.playerId);
-  const referrerStats = resetDailyCounterIfNeeded(referrerStatsRaw);
-  if (referrerStats.referralsToday >= config.maxReferralsPerDay) {
-    throw new TakaroUserError('That referrer has reached their daily referral limit. Please try again tomorrow or use a different code.');
-  }
-  if (referrerStats.referralsTotal >= config.maxReferralsLifetime) {
-    throw new TakaroUserError('That referrer has reached their lifetime referral limit. Please contact an admin if this needs an override.');
-  }
-
   await ensureReferralCode(gameServerId, moduleId, lookup.playerId);
 
-  const baseLink = {
-    referrerId: lookup.playerId,
-    linkedAt: new Date().toISOString(),
-    status: 'linking',
-    playtimeAtLink: getPlaytimeMinutes(refereePog),
-    retries: 0,
-  };
+  await withReferralLocks(
+    gameServerId,
+    moduleId,
+    [`referee-link:${pog.playerId}`, `referrer-quota:${lookup.playerId}`],
+    async () => {
+      const existingLink = await getReferralLink(gameServerId, moduleId, pog.playerId);
+      if (existingLink) {
+        throw new TakaroUserError('You already have a referral link on this server. An admin can use refunlink if this needs to be corrected.');
+      }
 
-  let welcomeBonus = 0;
-  let statsUpdated = false;
-  let pendingAdded = false;
+      const referrerStatsRaw = await getReferralStats(gameServerId, moduleId, lookup.playerId);
+      const referrerStats = resetDailyCounterIfNeeded(referrerStatsRaw);
+      if (referrerStats.referralsToday >= config.maxReferralsPerDay) {
+        throw new TakaroUserError('That referrer has reached their daily referral limit. Please try again tomorrow or use a different code.');
+      }
+      if (referrerStats.referralsTotal >= config.maxReferralsLifetime) {
+        throw new TakaroUserError('That referrer has reached their lifetime referral limit. Please contact an admin if this needs an override.');
+      }
 
-  try {
-    await setReferralLink(gameServerId, moduleId, pog.playerId, baseLink);
+      const baseLink = {
+        referrerId: lookup.playerId,
+        linkedAt: new Date().toISOString(),
+        status: 'linking',
+        playtimeAtLink: getPlaytimeMinutes(refereePog),
+        retries: 0,
+      };
 
-    welcomeBonus = await awardWelcomeBonus(gameServerId, pog.playerId, config);
+      let welcomeBonus = 0;
+      let statsUpdated = false;
+      let pendingAdded = false;
 
-    const updatedStats = {
-      ...referrerStats,
-      referralsTotal: referrerStats.referralsTotal + 1,
-      referralsToday: referrerStats.referralsToday + 1,
-      lastReferralDay: getTodayKey(),
-    };
-    await setReferralStats(gameServerId, moduleId, lookup.playerId, updatedStats);
-    statsUpdated = true;
+      try {
+        await setReferralLink(gameServerId, moduleId, pog.playerId, baseLink);
 
-    await addPendingReferee(gameServerId, moduleId, pog.playerId);
-    pendingAdded = true;
+        welcomeBonus = await awardWelcomeBonus(gameServerId, pog.playerId, config);
 
-    const link = {
-      ...baseLink,
-      status: 'pending',
-      welcomeBonusGranted: welcomeBonus > 0,
-      welcomeBonusAmount: welcomeBonus,
-    };
-    await setReferralLink(gameServerId, moduleId, pog.playerId, link);
+        const updatedStats = {
+          ...referrerStats,
+          referralsTotal: referrerStats.referralsTotal + 1,
+          referralsToday: referrerStats.referralsToday + 1,
+          lastReferralDay: getTodayKey(),
+        };
+        await setReferralStats(gameServerId, moduleId, lookup.playerId, updatedStats);
+        statsUpdated = true;
 
-    console.log(
-      `referral-program: linked referee=${pog.playerId} to referrer=${lookup.playerId}, code=${code}, playtimeAtLink=${link.playtimeAtLink}, welcomeBonus=${welcomeBonus}`,
-    );
+        await addPendingReferee(gameServerId, moduleId, pog.playerId);
+        pendingAdded = true;
 
-    await pog.pm(getWelcomeMessage(welcomeBonus, config.playtimeThresholdMinutes));
-  } catch (err) {
-    if (pendingAdded) {
-      await removePendingReferee(gameServerId, moduleId, pog.playerId);
-    }
+        const link = {
+          ...baseLink,
+          status: 'pending',
+          welcomeBonusGranted: welcomeBonus > 0,
+          welcomeBonusAmount: welcomeBonus,
+        };
+        await setReferralLink(gameServerId, moduleId, pog.playerId, link);
 
-    if (statsUpdated) {
-      await setReferralStats(gameServerId, moduleId, lookup.playerId, referrerStats);
-    }
+        console.log(
+          `referral-program: linked referee=${pog.playerId} to referrer=${lookup.playerId}, code=${code}, playtimeAtLink=${link.playtimeAtLink}, welcomeBonus=${welcomeBonus}`,
+        );
 
-    if (welcomeBonus > 0) {
-      await rollbackWelcomeBonus(gameServerId, pog.playerId, welcomeBonus);
-    }
+        await pog.pm(getWelcomeMessage(welcomeBonus, config.playtimeThresholdMinutes));
+      } catch (err) {
+        if (pendingAdded) {
+          await removePendingReferee(gameServerId, moduleId, pog.playerId);
+        }
 
-    await deleteReferralLink(gameServerId, moduleId, pog.playerId);
-    throw err;
-  }
+        if (statsUpdated) {
+          await setReferralStats(gameServerId, moduleId, lookup.playerId, referrerStats);
+        }
+
+        if (welcomeBonus > 0) {
+          await rollbackWelcomeBonus(gameServerId, pog.playerId, welcomeBonus);
+        }
+
+        await deleteReferralLink(gameServerId, moduleId, pog.playerId);
+        throw err;
+      }
+    },
+    {
+      ownerTokenPrefix: 'referral-claim',
+      busyMessage: 'Another referral claim for this player or code is already being processed. Please try again in a moment.',
+    },
+  );
 }
 
 await main();

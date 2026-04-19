@@ -7,6 +7,7 @@ export const REFERRAL_STATS_PREFIX = 'referral_stats:';
 export const REFERRAL_PENDING_INDEX_KEY = 'referral_pending_index';
 export const REFERRAL_STATS_INDEX_KEY = 'referral_stats_index';
 export const REFERRAL_PAYOUT_LOCK_PREFIX = 'referral_payout_lock:';
+export const REFERRAL_MUTATION_LOCK_PREFIX = 'referral_lock:';
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -28,6 +29,10 @@ export function getReferralStatsKey(playerId) {
 
 export function getReferralPayoutLockKey(playerId) {
   return `${REFERRAL_PAYOUT_LOCK_PREFIX}${playerId}`;
+}
+
+export function getReferralMutationLockKey(scope) {
+  return `${REFERRAL_MUTATION_LOCK_PREFIX}${scope}`;
 }
 
 export function defaultReferralStats() {
@@ -107,8 +112,7 @@ function looksLikeDuplicateVariableError(err) {
   return /duplicate|already exists|unique/i.test(message);
 }
 
-export async function tryAcquirePayoutLock(gameServerId, moduleId, refereeId, ownerToken, staleMs = 5 * 60 * 1000) {
-  const key = getReferralPayoutLockKey(refereeId);
+async function tryAcquireVariableLock(gameServerId, moduleId, key, ownerToken, label, staleMs = 5 * 60 * 1000) {
   const now = Date.now();
   const lockPayload = {
     ownerToken,
@@ -123,7 +127,7 @@ export async function tryAcquirePayoutLock(gameServerId, moduleId, refereeId, ow
       if (!looksLikeDuplicateVariableError(err)) throw err;
 
       const existing = await findVariable(gameServerId, moduleId, key);
-      const parsed = safeJsonParse(existing?.value, null, `payout lock for ${refereeId}`);
+      const parsed = safeJsonParse(existing?.value, null, label);
       const acquiredAtMs = new Date(parsed?.acquiredAt ?? 0).getTime();
       const isStale = Number.isFinite(acquiredAtMs) && (now - acquiredAtMs) > staleMs;
 
@@ -139,14 +143,76 @@ export async function tryAcquirePayoutLock(gameServerId, moduleId, refereeId, ow
   return { acquired: false, key, ownerToken };
 }
 
-export async function releasePayoutLock(gameServerId, moduleId, refereeId, ownerToken) {
-  const key = getReferralPayoutLockKey(refereeId);
+async function releaseVariableLock(gameServerId, moduleId, key, ownerToken, label) {
   const existing = await findVariable(gameServerId, moduleId, key);
   if (!existing) return;
 
-  const parsed = safeJsonParse(existing.value, null, `payout lock for ${refereeId}`);
+  const parsed = safeJsonParse(existing.value, null, label);
   if (parsed?.ownerToken && parsed.ownerToken !== ownerToken) return;
   await takaro.variable.variableControllerDelete(existing.id);
+}
+
+export async function tryAcquirePayoutLock(gameServerId, moduleId, refereeId, ownerToken, staleMs = 5 * 60 * 1000) {
+  return tryAcquireVariableLock(
+    gameServerId,
+    moduleId,
+    getReferralPayoutLockKey(refereeId),
+    ownerToken,
+    `payout lock for ${refereeId}`,
+    staleMs,
+  );
+}
+
+export async function releasePayoutLock(gameServerId, moduleId, refereeId, ownerToken) {
+  await releaseVariableLock(
+    gameServerId,
+    moduleId,
+    getReferralPayoutLockKey(refereeId),
+    ownerToken,
+    `payout lock for ${refereeId}`,
+  );
+}
+
+export async function withReferralLocks(gameServerId, moduleId, scopes, callback, options = {}) {
+  const ownerToken = `${options.ownerTokenPrefix ?? 'lock'}:${new Date().toISOString()}:${Math.random().toString(36).slice(2, 10)}`;
+  const uniqueScopes = Array.from(new Set((scopes || []).filter(Boolean))).sort();
+  const acquiredLocks = [];
+  const waitTimeoutMs = Math.max(0, Number(options.waitTimeoutMs ?? 2000) || 2000);
+  const retryDelayMs = Math.max(10, Number(options.retryDelayMs ?? 50) || 50);
+
+  try {
+    for (const scope of uniqueScopes) {
+      const key = getReferralMutationLockKey(scope);
+      const startedAt = Date.now();
+      let lock;
+
+      do {
+        lock = await tryAcquireVariableLock(
+          gameServerId,
+          moduleId,
+          key,
+          ownerToken,
+          `mutation lock ${scope}`,
+          options.staleMs,
+        );
+
+        if (lock.acquired) break;
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      } while ((Date.now() - startedAt) < waitTimeoutMs);
+
+      if (!lock?.acquired) {
+        throw new TakaroUserError(options.busyMessage || 'Another referral update is already in progress. Please try again in a moment.');
+      }
+
+      acquiredLocks.push({ key, scope });
+    }
+
+    return await callback();
+  } finally {
+    await Promise.allSettled(
+      acquiredLocks.map((lock) => releaseVariableLock(gameServerId, moduleId, lock.key, ownerToken, `mutation lock ${lock.scope}`)),
+    );
+  }
 }
 
 export async function getReferralCode(gameServerId, moduleId, playerId) {
@@ -258,18 +324,32 @@ export async function setStringIndex(gameServerId, moduleId, key, values) {
   await writeVariable(gameServerId, moduleId, key, unique);
 }
 
+async function mutateStringIndex(gameServerId, moduleId, key, mutator) {
+  return withReferralLocks(
+    gameServerId,
+    moduleId,
+    [`index:${key}`],
+    async () => {
+      const current = await getStringIndex(gameServerId, moduleId, key);
+      const next = mutator(Array.from(current));
+      await setStringIndex(gameServerId, moduleId, key, next);
+      return next;
+    },
+    {
+      ownerTokenPrefix: `index:${key}`,
+      busyMessage: 'Another referral update is already in progress. Please try again in a moment.',
+    },
+  );
+}
+
 export async function addToStringIndex(gameServerId, moduleId, key, value) {
-  const current = await getStringIndex(gameServerId, moduleId, key);
-  if (!current.includes(value)) {
-    current.push(value);
-    await setStringIndex(gameServerId, moduleId, key, current);
-  }
+  await mutateStringIndex(gameServerId, moduleId, key, (current) => (
+    current.includes(value) ? current : [...current, value]
+  ));
 }
 
 export async function removeFromStringIndex(gameServerId, moduleId, key, value) {
-  const current = await getStringIndex(gameServerId, moduleId, key);
-  if (!current.includes(value)) return;
-  await setStringIndex(gameServerId, moduleId, key, current.filter((entry) => entry !== value));
+  await mutateStringIndex(gameServerId, moduleId, key, (current) => current.filter((entry) => entry !== value));
 }
 
 export async function getPendingRefereeIds(gameServerId, moduleId) {
@@ -315,7 +395,7 @@ export async function findPlayerByName(gameServerId, name) {
   });
 
   const playerIdsOnServer = new Set(pogSearch.data.data.map((pog) => pog.playerId));
-  return exactMatches.find((player) => playerIdsOnServer.has(player.id)) ?? exactMatches[0] ?? null;
+  return exactMatches.find((player) => playerIdsOnServer.has(player.id)) ?? null;
 }
 
 export async function getPlayerName(playerId) {
@@ -406,6 +486,16 @@ export function getNormalizedConfig(mod) {
     maxReferralsPerDay: Math.max(1, Number(config.maxReferralsPerDay ?? 5) || 5),
     maxReferralsLifetime: Math.max(1, Number(config.maxReferralsLifetime ?? 50) || 50),
   };
+}
+
+export async function getCommandPrefix(gameServerId) {
+  try {
+    const result = await takaro.settings.settingsControllerGet(['commandPrefix'], gameServerId);
+    return result.data.data?.[0]?.value || '/';
+  } catch (err) {
+    console.error(`referral-helpers: failed to load command prefix for ${gameServerId}: ${err}`);
+    return '/';
+  }
 }
 
 function normalizeConfiguredItem(item) {
