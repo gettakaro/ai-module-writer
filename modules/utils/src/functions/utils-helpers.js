@@ -143,19 +143,87 @@ export function parseBanDurationToken(token) {
   };
 }
 
-export async function fetchOnlinePlayers(gameServerId) {
-  const players = [];
-  const limit = 100;
+export function collapsePlayersById(players) {
+  const seen = new Set();
+  const uniquePlayers = [];
+
+  for (const player of players) {
+    const playerId = trimOrEmpty(player?.playerId);
+    if (playerId === '' || seen.has(playerId)) continue;
+    seen.add(playerId);
+    uniquePlayers.push(player);
+  }
+
+  return uniquePlayers;
+}
+
+export async function collectPaginatedResults(fetchPage, { limit = 100, maxIterations = 100 } = {}) {
+  const items = [];
   let page = 0;
   let iterations = 0;
 
   while (true) {
     iterations += 1;
-    if (iterations > 100) {
-      console.error('utils-helpers: fetchOnlinePlayers exceeded 100 iterations, aborting pagination');
+    if (iterations > maxIterations) {
+      console.error(`utils-helpers: collectPaginatedResults exceeded ${maxIterations} iterations, aborting pagination`);
       break;
     }
 
+    const result = await fetchPage({ page, limit });
+    const batch = Array.isArray(result?.data) ? result.data : [];
+    const total = typeof result?.total === 'number' ? result.total : undefined;
+
+    items.push(...batch);
+
+    if (batch.length === 0) break;
+    if (total !== undefined && items.length >= total) break;
+    if (batch.length < limit && total === undefined) break;
+
+    page += 1;
+  }
+
+  return items;
+}
+
+async function searchPlayerByIdOrName(rawTarget) {
+  const normalizedTarget = trimOrEmpty(rawTarget);
+  if (normalizedTarget === '') return null;
+
+  try {
+    const byId = await takaro.player.playerControllerGetOne(normalizedTarget);
+    if (byId?.data?.data?.id) {
+      return byId.data.data;
+    }
+  } catch {
+    // Not a resolvable player ID; fall through to name search.
+  }
+
+  const searchedName = await takaro.player.playerControllerSearch({
+    search: {
+      name: [normalizedTarget],
+    },
+    limit: 10,
+  });
+  return searchedName.data.data.find((candidate) => trimOrEmpty(candidate.name).toLowerCase() === normalizedTarget.toLowerCase()) ?? null;
+}
+
+export async function resolvePlayerTarget(rawTarget) {
+  try {
+    const target = await searchPlayerByIdOrName(rawTarget);
+    if (!target) return null;
+
+    return {
+      playerId: target.id,
+      name: trimOrEmpty(target.name) || 'Unknown Player',
+    };
+  } catch (err) {
+    console.error(`utils-helpers: failed to resolve player target "${trimOrEmpty(rawTarget)}": ${err}`);
+    throw err;
+  }
+}
+
+export async function fetchOnlinePlayers(gameServerId) {
+  const players = await collectPaginatedResults(async ({ page, limit }) => {
     const result = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
       filters: {
         gameServerId: [gameServerId],
@@ -165,17 +233,13 @@ export async function fetchOnlinePlayers(gameServerId) {
       limit,
     });
 
-    const batch = result.data.data;
-    players.push(...batch);
+    return {
+      data: result.data.data,
+      total: result.data.meta?.total,
+    };
+  });
 
-    if (players.length >= (result.data.meta?.total ?? players.length) || batch.length === 0) break;
-    page += 1;
-  }
-
-  const uniquePlayers = players.filter(
-    (player, index, all) => all.findIndex((candidate) => candidate.playerId === player.playerId) === index,
-  );
-
+  const uniquePlayers = collapsePlayersById(players);
   const namedPlayers = await Promise.all(uniquePlayers.map(async (player) => ({
     ...player,
     name: await getPlayerName(player.playerId, ''),

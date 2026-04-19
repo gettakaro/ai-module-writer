@@ -1,9 +1,11 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
+  acquireFundStateLock,
   getFundTotal,
   setFundTotal,
   incrementFundCycle,
   recordCompletion,
+  releaseFundStateLock,
 } from './fund-helpers.js';
 
 async function main() {
@@ -36,24 +38,12 @@ async function main() {
     throw new TakaroUserError('The community fund is not currently configured. Please contact an admin.');
   }
 
-  // pog.currency is fetched at command dispatch time; the deduct API will also reject if insufficient,
-  // so this check is a fast-fail convenience, not a hard guarantee.
-  if (pog.currency < amount) {
-    const message = `You don't have enough currency. You have ${pog.currency} but tried to contribute ${amount}.`;
-    console.log(message);
-    throw new TakaroUserError(message);
-  }
-
-  // Deduct currency BEFORE updating shared fund state.
-  // If the deduction fails due to a race or backend error, the contribution must not advance the
-  // fund, cycle, or completion flow.
+  const lockOwner = `${player.id}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
   try {
-    await takaro.playerOnGameserver.playerOnGameServerControllerDeductCurrency(gameServerId, pog.playerId, {
-      currency: amount,
-    });
-  } catch (deductErr) {
-    console.error(`Fund: currency deduction failed for player ${player.name} (amount=${amount}). Contribution aborted. Error: ${deductErr}`);
-    throw new TakaroUserError('Your contribution could not be processed because your currency could not be deducted. Please try again.');
+    await acquireFundStateLock(gameServerId, moduleId, lockOwner);
+  } catch (lockErr) {
+    console.error(`Fund: failed to acquire contribution lock for player ${player.name}. Error: ${lockErr}`);
+    throw new TakaroUserError('The community fund is busy processing another contribution. Please try again in a moment.');
   }
 
   let currentTotal;
@@ -62,41 +52,64 @@ async function main() {
   let thresholdReached = false;
 
   try {
-    // This read-modify-write is not atomic. If two players contribute simultaneously, both may
-    // read the same currentTotal and one contribution could be lost. This is an accepted limitation
-    // of the Takaro variable storage platform (no atomic increment API).
-    currentTotal = await getFundTotal(gameServerId, moduleId);
-    newTotal = currentTotal + amount;
-
-    console.log(`Fund contribution: player=${player.name}, amount=${amount}, previousTotal=${currentTotal}, newTotal=${newTotal}, threshold=${threshold}`);
-
-    if (newTotal >= threshold) {
-      thresholdReached = true;
-      const carryover = newTotal - threshold;
-      await setFundTotal(gameServerId, moduleId, carryover);
-      newCycle = await incrementFundCycle(gameServerId, moduleId);
-      await recordCompletion(gameServerId, moduleId, newCycle, player.name);
-    } else {
-      await setFundTotal(gameServerId, moduleId, newTotal);
+    // pog.currency is fetched at command dispatch time; the deduct API will also reject if insufficient,
+    // so this check is a fast-fail convenience, not a hard guarantee.
+    if (pog.currency < amount) {
+      const message = `You don't have enough currency. You have ${pog.currency} but tried to contribute ${amount}.`;
+      console.log(message);
+      throw new TakaroUserError(message);
     }
-  } catch (stateErr) {
-    console.error(`Fund: failed to persist contribution state for player ${player.name} after deducting ${amount}. Attempting currency rollback. Error: ${stateErr}`);
-    let refunded = false;
+
+    // The fund state lock serializes contributions so each paid deposit sees the latest total.
     try {
-      await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, pog.playerId, {
+      await takaro.playerOnGameserver.playerOnGameServerControllerDeductCurrency(gameServerId, pog.playerId, {
         currency: amount,
       });
-      refunded = true;
-      console.log(`Fund: rolled back ${amount} currency to player ${player.name} after contribution-state failure.`);
-    } catch (rollbackErr) {
-      console.error(`Fund: CRITICAL rollback failure for player ${player.name} after contribution-state failure. Manual intervention required. Rollback error: ${rollbackErr}`);
+    } catch (deductErr) {
+      console.error(`Fund: currency deduction failed for player ${player.name} (amount=${amount}). Contribution aborted. Error: ${deductErr}`);
+      throw new TakaroUserError('Your contribution could not be processed because your currency could not be deducted. Please try again.');
     }
 
-    if (refunded) {
-      throw new TakaroUserError('Your contribution could not be recorded, so your currency was refunded. Please try again.');
-    }
+    try {
+      currentTotal = await getFundTotal(gameServerId, moduleId);
+      newTotal = currentTotal + amount;
 
-    throw new TakaroUserError('Your contribution could not be recorded, and we could not confirm your refund. Please contact an admin immediately.');
+      console.log(`Fund contribution: player=${player.name}, amount=${amount}, previousTotal=${currentTotal}, newTotal=${newTotal}, threshold=${threshold}`);
+
+      if (newTotal >= threshold) {
+        thresholdReached = true;
+        const carryover = newTotal - threshold;
+        await setFundTotal(gameServerId, moduleId, carryover);
+        newCycle = await incrementFundCycle(gameServerId, moduleId);
+        await recordCompletion(gameServerId, moduleId, newCycle, player.name);
+      } else {
+        await setFundTotal(gameServerId, moduleId, newTotal);
+      }
+    } catch (stateErr) {
+      console.error(`Fund: failed to persist contribution state for player ${player.name} after deducting ${amount}. Attempting currency rollback. Error: ${stateErr}`);
+      let refunded = false;
+      try {
+        await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, pog.playerId, {
+          currency: amount,
+        });
+        refunded = true;
+        console.log(`Fund: rolled back ${amount} currency to player ${player.name} after contribution-state failure.`);
+      } catch (rollbackErr) {
+        console.error(`Fund: CRITICAL rollback failure for player ${player.name} after contribution-state failure. Manual intervention required. Rollback error: ${rollbackErr}`);
+      }
+
+      if (refunded) {
+        throw new TakaroUserError('Your contribution could not be recorded, so your currency was refunded. Please try again.');
+      }
+
+      throw new TakaroUserError('Your contribution could not be recorded, and we could not confirm your refund. Please contact an admin immediately.');
+    }
+  } finally {
+    try {
+      await releaseFundStateLock(gameServerId, moduleId, lockOwner);
+    } catch (releaseErr) {
+      console.error(`Fund: failed to release contribution lock for player ${player.name}. Error: ${releaseErr}`);
+    }
   }
 
   if (thresholdReached) {

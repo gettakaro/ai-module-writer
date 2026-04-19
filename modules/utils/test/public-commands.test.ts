@@ -16,6 +16,7 @@ import {
   cleanupTestGameServers,
 } from '../../../test/helpers/modules.js';
 import { formatOnlinePlayersLine } from '../src/functions/utils-formatters.js';
+import { collapsePlayersById, collectPaginatedResults } from '../src/functions/utils-helpers.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -136,6 +137,51 @@ describe('utils: public commands', () => {
     assert.equal(res.success, true, `Expected command to succeed, logs: ${JSON.stringify(res.logs)}`);
     const expectedLine = `3 players online: ${expectedNames.join(', ')}`;
     assert.ok(res.logs.some((msg) => msg.includes(expectedLine)), JSON.stringify(res.logs));
+  });
+
+  it('online pagination helper walks multiple pages until the reported total is reached', async () => {
+    const requestedPages: number[] = [];
+    const players = await collectPaginatedResults(async ({ page, limit }) => {
+      requestedPages.push(page);
+      assert.equal(limit, 2);
+
+      const pages = [
+        [
+          { playerId: '1', playerName: 'Amy' },
+          { playerId: '2', playerName: 'Bea' },
+        ],
+        [
+          { playerId: '3', playerName: 'Cal' },
+        ],
+      ];
+
+      return {
+        data: pages[page] ?? [],
+        total: 3,
+      };
+    }, { limit: 2 });
+
+    assert.deepEqual(requestedPages, [0, 1]);
+    assert.equal(players.length, 3);
+  });
+
+  it('online duplicate-collapse helper keeps the first record for each playerId', () => {
+    const unique = collapsePlayersById([
+      { playerId: '1', playerName: 'Amy', gameId: 'game-1' },
+      { playerId: '1', playerName: 'Amy Duplicate', gameId: 'game-1b' },
+      { playerId: '2', playerName: 'Bea', gameId: 'game-2' },
+      { playerId: '2', playerName: 'Bea Duplicate', gameId: 'game-2b' },
+      { playerId: '3', playerName: 'Cal', gameId: 'game-3' },
+    ]);
+
+    assert.deepEqual(
+      unique.map((player) => ({ playerId: player.playerId, playerName: player.playerName, gameId: player.gameId })),
+      [
+        { playerId: '1', playerName: 'Amy', gameId: 'game-1' },
+        { playerId: '2', playerName: 'Bea', gameId: 'game-2' },
+        { playerId: '3', playerName: 'Cal', gameId: 'game-3' },
+      ],
+    );
   });
 
   it('online formatter truncates after 10 visible names', () => {

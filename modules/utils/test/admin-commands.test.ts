@@ -166,6 +166,26 @@ describe('utils: admin commands', () => {
     assert.ok(res.logs.some((msg) => msg.includes('do not have permission')), JSON.stringify(res.logs));
   });
 
+  it('rejects /givecurrency with a friendly message when economy support is disabled', async () => {
+    const target = ctx.players[1];
+    const targetName = await getPlayerName(target.playerId);
+
+    await client.settings.settingsControllerSet('economyEnabled', {
+      gameServerId: ctx.gameServer.id,
+      value: 'false',
+    });
+
+    const res = await trigger(ctx.players[0].playerId, `${prefix}givecurrency ${targetName} 5`);
+
+    assert.equal(res.success, false, 'Expected /givecurrency to fail cleanly when economy support is disabled');
+    assert.ok(res.logs.some((msg) => msg.includes('Currency is not available on this game server.')), JSON.stringify(res.logs));
+
+    await client.settings.settingsControllerSet('economyEnabled', {
+      gameServerId: ctx.gameServer.id,
+      value: 'true',
+    });
+  });
+
   it('allows /givecurrency for admins and broadcasts success', async () => {
     const target = ctx.players[1];
     const targetName = await getPlayerName(target.playerId);
@@ -342,6 +362,13 @@ describe('utils: admin commands', () => {
 
     assert.equal(res.success, false, 'Expected self kick to fail');
     assert.ok(res.logs.some((msg) => msg.includes('cannot use this command on yourself')), JSON.stringify(res.logs));
+  });
+
+  it('rejects invalid /kick targets with a friendly player-resolution error', async () => {
+    const res = await trigger(ctx.players[0].playerId, `${prefix}kick definitely-not-a-real-player-name`);
+
+    assert.equal(res.success, false, 'Expected /kick with an invalid player to fail');
+    assert.ok(res.logs.some((msg) => msg.includes('Please specify a valid player.')), JSON.stringify(res.logs));
   });
 
   it('rejects /kick when the player exists globally but is not online on this server', async () => {

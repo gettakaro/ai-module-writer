@@ -121,13 +121,13 @@
     "kick": {
       "trigger": "kick",
       "description": "Kick an online player",
-      "helpText": "Usage: /kick <player> [reason]",
+      "helpText": "Usage: /kick <player-name-or-id> [reason] — target must be online on this server.",
       "function": "src/commands/kick/index.js",
       "arguments": [
         {
           "name": "player",
-          "type": "player",
-          "helpText": "The player to kick",
+          "type": "string",
+          "helpText": "Takaro player name or ID for the online player to kick",
           "position": 0
         },
         {
@@ -142,13 +142,13 @@
     "ban": {
       "trigger": "ban",
       "description": "Ban a Takaro-resolvable player temporarily or permanently",
-      "helpText": "Usage: /ban <player> <duration> [reason] — offline players may work when the integration can resolve them.",
+      "helpText": "Usage: /ban <player-name-or-id> <duration> [reason] — works for players already known to Takaro, including offline players it can resolve.",
       "function": "src/commands/ban/index.js",
       "arguments": [
         {
           "name": "player",
-          "type": "player",
-          "helpText": "The player to ban",
+          "type": "string",
+          "helpText": "Takaro player name or ID for the player to ban",
           "position": 0
         },
         {
@@ -169,13 +169,13 @@
     "givecurrency": {
       "trigger": "givecurrency",
       "description": "Grant currency to a player",
-      "helpText": "Usage: /givecurrency <player> <amount>",
+      "helpText": "Usage: /givecurrency <player-name-or-id> <amount>",
       "function": "src/commands/givecurrency/index.js",
       "arguments": [
         {
           "name": "player",
-          "type": "player",
-          "helpText": "The player to receive currency",
+          "type": "string",
+          "helpText": "Takaro player name or ID for the player to receive currency",
           "position": 0
         },
         {

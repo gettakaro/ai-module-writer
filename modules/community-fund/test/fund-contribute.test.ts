@@ -27,8 +27,9 @@ const MODULE_DIR = path.resolve(__dirname, '..');
 // The threshold is 100 and later tests intentionally build on earlier state:
 // 1. contribute 20 (fund=20)
 // 2. permission/validation failures keep fund at 20
-// 3. concurrent 30+30 contributions exercise the deduction-first race path (fund should end at 50)
+// 3. same-player concurrent 30+30 submissions serialize behind the lock, so one paid contribution lands (fund=50)
 // 4. the completion test reads the live total and contributes only what is needed to cross the threshold once
+// 5. the final multiplayer concurrency test resets state and proves two simultaneous valid deposits both persist
 
 describe('community-fund: fund-contribute command', () => {
   let client: Client;
@@ -531,7 +532,7 @@ describe('community-fund: fund-contribute command', () => {
     );
   });
 
-  it('should refund the player if fund state persistence fails after deduction', async () => {
+  it('should serialize simultaneous valid deposits from different players without losing either contribution', async () => {
     const firstPlayer = ctx.players[0]!;
     const secondPlayer = ctx.players[2]!;
 
@@ -542,78 +543,61 @@ describe('community-fund: fund-contribute command', () => {
       ['COMMUNITY_FUND_CONTRIBUTE'],
     );
 
-    let rollbackAttemptLogs: string[] | undefined;
+    await resetFundState();
+    await setCurrencyExact(firstPlayer.playerId, 10);
+    await setCurrencyExact(secondPlayer.playerId, 10);
 
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      await resetFundState();
-      await setCurrencyExact(firstPlayer.playerId, 10);
-      await setCurrencyExact(secondPlayer.playerId, 10);
-
-      const before = new Date();
-      await Promise.all([
-        client.command.commandControllerTrigger(ctx.gameServer.id, {
-          msg: `${prefix}fund 10`,
-          playerId: firstPlayer.playerId,
-        }),
-        client.command.commandControllerTrigger(ctx.gameServer.id, {
-          msg: `${prefix}fund 10`,
-          playerId: secondPlayer.playerId,
-        }),
-      ]);
-
-      const events = await waitForCommandEvents(before, 2);
-      const fundEvents = events
-        .map((event) => event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } })
-        .map((meta) => ({
-          success: meta?.result?.success ?? false,
-          logs: (meta?.result?.logs ?? []).map((l) => l.msg),
-        }))
-        .filter((result) => result.logs.some((msg) => msg.includes('Fund contribution'))
-          || result.logs.some((msg) => msg.includes('rolled back'))
-          || result.logs.some((msg) => msg.includes('could not be recorded, so your currency was refunded')));
-
-      const rollbackEvent = fundEvents.find((result) => !result.success
-        && result.logs.some((msg) => msg.includes('could not be recorded, so your currency was refunded')));
-      const successCount = fundEvents.filter((result) => result.success).length;
-      if (!rollbackEvent || successCount !== 1) {
-        continue;
-      }
-
-      rollbackAttemptLogs = rollbackEvent.logs;
-
-      const firstPog = await getPog(firstPlayer.playerId);
-      const secondPog = await getPog(secondPlayer.playerId);
-      assert.ok(firstPog, 'Expected first player POG to exist after rollback race');
-      assert.ok(secondPog, 'Expected second player POG to exist after rollback race');
-
-      const currencies = [firstPog?.currency, secondPog?.currency].sort((a, b) => (a ?? 0) - (b ?? 0));
-      assert.deepEqual(
-        currencies,
-        [0, 10],
-        `Expected one deduction to stick and one player to be refunded, got: ${JSON.stringify({ firstPog, secondPog, fundEvents })}`,
-      );
-
-      const statusBefore = new Date();
-      await client.command.commandControllerTrigger(ctx.gameServer.id, {
-        msg: `${prefix}fundstatus`,
+    const before = new Date();
+    await Promise.all([
+      client.command.commandControllerTrigger(ctx.gameServer.id, {
+        msg: `${prefix}fund 10`,
         playerId: firstPlayer.playerId,
-      });
-      const statusEvent = await waitForEvent(client, {
-        eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
-        gameserverId: ctx.gameServer.id,
-        after: statusBefore,
-        timeout: 30000,
-      });
-      const statusMeta = statusEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
-      const statusLogs = (statusMeta?.result?.logs ?? []).map((l) => l.msg);
-      assert.ok(
-        statusLogs.some((msg) => msg.includes('total=10')),
-        `Expected failed post-deduction contribution not to advance fund state, got: ${JSON.stringify(statusLogs)}`,
-      );
+      }),
+      client.command.commandControllerTrigger(ctx.gameServer.id, {
+        msg: `${prefix}fund 10`,
+        playerId: secondPlayer.playerId,
+      }),
+    ]);
 
-      return;
-    }
+    const events = await waitForCommandEvents(before, 2);
+    const fundEvents = events
+      .map((event) => event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } })
+      .map((meta) => ({
+        success: meta?.result?.success ?? false,
+        logs: (meta?.result?.logs ?? []).map((l) => l.msg),
+      }))
+      .filter((result) => result.logs.some((msg) => msg.includes('Fund contribution')));
 
-    assert.fail(`Did not observe a real rollback-path event after repeated concurrent attempts. Last rollback logs: ${JSON.stringify(rollbackAttemptLogs)}`);
+    assert.equal(fundEvents.length, 2, `Expected both contribution events, got: ${JSON.stringify(fundEvents)}`);
+    assert.equal(
+      fundEvents.filter((result) => result.success).length,
+      2,
+      `Expected both simultaneous valid deposits to succeed, got: ${JSON.stringify(fundEvents)}`,
+    );
+
+    const firstPog = await getPog(firstPlayer.playerId);
+    const secondPog = await getPog(secondPlayer.playerId);
+    assert.ok(firstPog, 'Expected first player POG to exist after serialized deposits');
+    assert.ok(secondPog, 'Expected second player POG to exist after serialized deposits');
+    assert.equal(firstPog?.currency, 0, `Expected first player currency to be deducted once, got: ${JSON.stringify(firstPog)}`);
+    assert.equal(secondPog?.currency, 0, `Expected second player currency to be deducted once, got: ${JSON.stringify(secondPog)}`);
+
+    const statusBefore = new Date();
+    await client.command.commandControllerTrigger(ctx.gameServer.id, {
+      msg: `${prefix}fundstatus`,
+      playerId: firstPlayer.playerId,
+    });
+    const statusEvent = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: statusBefore,
+      timeout: 30000,
+    });
+    const statusMeta = statusEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const statusLogs = (statusMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.ok(
+      statusLogs.some((msg) => msg.includes('total=20')),
+      `Expected both serialized deposits to persist in fund state, got: ${JSON.stringify(statusLogs)}`,
+    );
   });
 });

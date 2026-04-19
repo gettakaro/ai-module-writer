@@ -25,8 +25,9 @@ Environment:
 
 - Paper game server: `minecraft`
 - Takaro gameServerId: `c423b25e-c2af-4ea1-ab0a-a559574d1b65`
-- Installed module: `server-utils`
-- Installed versionId: `6327679e-9e81-4cbc-99fc-dfe4a12d7520`
+- Installed module: `test-utils`
+- Installed moduleId: `7a1feb7e-263a-442c-9569-3878dc95d595`
+- Installed versionId: `3dfe5c9d-d5af-48b1-a96c-55b09493bbaa`
 - Command prefix: `+`
 - Bot API port: `3103`
 - Bots: `adminbot`, `targetbot`
@@ -96,7 +97,26 @@ This confirms the admin confirmation, recipient notification, and broadcast are 
   - `Banned Bot_targetbot for 10 minutes. Reason: spawn camping again`
   - `Bot_targetbot was banned by Bot_adminbot for 10 minutes. Reason: spawn camping again`
 
-### Invalid-input and offline-target paths
+### Invalid-input, unsupported-feature, and offline-target paths
+
+#### `+givecurrency Bot_cftwo 5` by `adminbot` with economy disabled
+- success: `false`
+- key logs:
+  - `utils:givecurrency failed for target=... amount=5: AxiosError: Request failed with status code 400`
+  - `Currency is not available on this game server. Ask an admin to enable economy support before using /givecurrency.`
+
+#### `+kick definitely-not-a-real-player-name` by `adminbot`
+- success: `false`
+- key logs:
+  - `➡️ POST /player/search`
+  - `Please specify a valid player.`
+
+#### `+givecurrency definitely-not-a-real-player-name 5` by `adminbot`
+- success: `false`
+- key logs:
+  - `➡️ POST /player/search`
+  - `Please specify a valid player.`
+
 
 #### `+ban Bot_targetbot nonsense` by `adminbot`
 - success: `false`

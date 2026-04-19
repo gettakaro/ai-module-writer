@@ -1,9 +1,9 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
-  getCommandTargetPlayer,
   getGameServerPogForPlayer,
   getPlayerName,
   renderTemplate,
+  resolvePlayerTarget,
   safeBroadcast,
   safeDirectMessage,
   safePrivateMessage,
@@ -18,7 +18,7 @@ async function main() {
 
   const amount = args.amount;
 
-  const target = getCommandTargetPlayer(args.player);
+  const target = await resolvePlayerTarget(args.player);
   if (!target) {
     throw new TakaroUserError('Please specify a valid player.');
   }
@@ -37,9 +37,14 @@ async function main() {
     throw new TakaroUserError('That player is not currently online.');
   }
 
-  await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, target.playerId, {
-    currency: amount,
-  });
+  try {
+    await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, target.playerId, {
+      currency: amount,
+    });
+  } catch (err) {
+    console.error(`utils:givecurrency failed for target=${target.playerId} amount=${amount}: ${err}`);
+    throw new TakaroUserError('Currency is not available on this game server. Ask an admin to enable economy support before using /givecurrency.');
+  }
 
   console.log(`utils:givecurrency admin=${adminName} target=${targetName} amount=${amount}`);
 
