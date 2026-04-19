@@ -1,0 +1,100 @@
+import { data, checkPermission, TakaroUserError } from '@takaro/helpers';
+import {
+  ensureReferralCode,
+  getNormalizedConfig,
+  getPog,
+  getPlaytimeMinutes,
+  getReferralCodeLookup,
+  getReferralLink,
+  getReferralStats,
+  resetDailyCounterIfNeeded,
+  setReferralLink,
+  setReferralStats,
+  addPendingReferee,
+  awardWelcomeBonus,
+  getTodayKey,
+} from './referral-helpers.js';
+
+async function main() {
+  const { pog, player, gameServerId, arguments: args, module: mod } = data;
+  const moduleId = mod.moduleId;
+
+  if (!checkPermission(pog, 'REFERRAL_USE')) {
+    throw new TakaroUserError('You do not have permission to use referral commands.');
+  }
+
+  const code = String(args.code || '').trim().toUpperCase();
+  if (!code) {
+    throw new TakaroUserError('Usage: /referral <code> — provide a referral code from the player who invited you.');
+  }
+
+  const existingLink = await getReferralLink(gameServerId, moduleId, pog.playerId);
+  if (existingLink) {
+    throw new TakaroUserError('You already have a referral link on this server. An admin can use /refunlink if this needs to be corrected.');
+  }
+
+  const lookup = await getReferralCodeLookup(gameServerId, moduleId, code);
+  if (!lookup?.playerId) {
+    throw new TakaroUserError(`Referral code "${code}" was not found.`);
+  }
+
+  if (lookup.playerId === pog.playerId) {
+    throw new TakaroUserError('You cannot use your own referral code.');
+  }
+
+  const config = getNormalizedConfig(mod);
+  const refereePog = await getPog(gameServerId, pog.playerId);
+  if (!refereePog) {
+    throw new TakaroUserError('Could not load your player record for this server. Please reconnect and try again.');
+  }
+
+  const firstSeenMs = new Date(refereePog.createdAt).getTime();
+  if (Number.isFinite(firstSeenMs) && config.referralWindowHours >= 0) {
+    const ageHours = (Date.now() - firstSeenMs) / (1000 * 60 * 60);
+    if (ageHours > config.referralWindowHours) {
+      throw new TakaroUserError(`You can only claim a referral within ${config.referralWindowHours} hour${config.referralWindowHours === 1 ? '' : 's'} of first joining this server.`);
+    }
+  }
+
+  const referrerStatsRaw = await getReferralStats(gameServerId, moduleId, lookup.playerId);
+  const referrerStats = resetDailyCounterIfNeeded(referrerStatsRaw);
+  if (referrerStats.referralsToday >= config.maxReferralsPerDay) {
+    throw new TakaroUserError('That referrer has reached their daily referral limit. Please try again tomorrow or use a different code.');
+  }
+  if (referrerStats.referralsTotal >= config.maxReferralsLifetime) {
+    throw new TakaroUserError('That referrer has reached their lifetime referral limit. Please contact an admin if this needs an override.');
+  }
+
+  await ensureReferralCode(gameServerId, moduleId, lookup.playerId);
+
+  const link = {
+    referrerId: lookup.playerId,
+    linkedAt: new Date().toISOString(),
+    status: 'pending',
+    playtimeAtLink: getPlaytimeMinutes(refereePog),
+    retries: 0,
+  };
+
+  await setReferralLink(gameServerId, moduleId, pog.playerId, link);
+  await addPendingReferee(gameServerId, moduleId, pog.playerId);
+
+  const updatedStats = {
+    ...referrerStats,
+    referralsTotal: referrerStats.referralsTotal + 1,
+    referralsToday: referrerStats.referralsToday + 1,
+    lastReferralDay: getTodayKey(),
+  };
+  await setReferralStats(gameServerId, moduleId, lookup.playerId, updatedStats);
+
+  const welcomeBonus = await awardWelcomeBonus(gameServerId, pog.playerId, config);
+
+  console.log(
+    `referral-program: linked referee=${pog.playerId} to referrer=${lookup.playerId}, code=${code}, playtimeAtLink=${link.playtimeAtLink}, welcomeBonus=${welcomeBonus}`,
+  );
+
+  await pog.pm(
+    `Referral linked successfully. You received ${welcomeBonus} welcome currency and your referrer will be paid after you play ${config.playtimeThresholdMinutes} more minute${config.playtimeThresholdMinutes === 1 ? '' : 's'}.`,
+  );
+}
+
+await main();

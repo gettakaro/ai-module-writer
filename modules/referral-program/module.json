@@ -1,0 +1,211 @@
+{
+  "name": "test-referral-program",
+  "description": "Players invite others via referral codes; referrers earn rewards when referees reach a playtime threshold, with caps, VIP bonuses, and admin tools.",
+  "version": "latest",
+  "supportedGames": [
+    "all"
+  ],
+  "config": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "prizeIsCurrency": {
+        "type": "boolean",
+        "default": true,
+        "description": "When true, the referrer reward is paid in currency. When false, a random configured item is awarded instead."
+      },
+      "referrerCurrencyReward": {
+        "type": "number",
+        "default": 500,
+        "minimum": 0,
+        "description": "Base currency reward for a successful referrer payout before VIP multiplier."
+      },
+      "refereeCurrencyReward": {
+        "type": "number",
+        "default": 100,
+        "minimum": 0,
+        "description": "Immediate currency welcome bonus paid to the referee when they link successfully."
+      },
+      "items": {
+        "x-component": "item",
+        "type": "array",
+        "default": [],
+        "description": "Random item prize pool used when prizeIsCurrency is false.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "item": {
+              "type": "string",
+              "title": "Item"
+            },
+            "amount": {
+              "type": "number",
+              "minimum": 1,
+              "title": "Amount"
+            },
+            "quality": {
+              "type": "string",
+              "title": "Quality"
+            }
+          },
+          "required": [
+            "item",
+            "amount",
+            "quality"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "playtimeThresholdMinutes": {
+        "type": "number",
+        "default": 60,
+        "minimum": 1,
+        "description": "Minutes the referee must play after linking before the referrer is paid."
+      },
+      "referralWindowHours": {
+        "type": "number",
+        "default": 24,
+        "minimum": 0,
+        "description": "Maximum age in hours since a player's first connect on this game server to claim a referral."
+      },
+      "maxReferralsPerDay": {
+        "type": "number",
+        "default": 5,
+        "minimum": 1,
+        "description": "Maximum new referral links a referrer can receive per UTC day."
+      },
+      "maxReferralsLifetime": {
+        "type": "number",
+        "default": 50,
+        "minimum": 1,
+        "description": "Maximum lifetime referral links a referrer can receive."
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  },
+  "uiSchema": {
+    "items": {
+      "items": {
+        "item": {
+          "ui:widget": "item"
+        }
+      }
+    }
+  },
+  "permissions": [
+    {
+      "permission": "REFERRAL_USE",
+      "friendlyName": "Use referral system",
+      "description": "Allows a player to use /refcode, /referral, /refstats, and /reftop.",
+      "canHaveCount": false
+    },
+    {
+      "permission": "REFERRAL_VIP",
+      "friendlyName": "Referral VIP tier",
+      "description": "Count = VIP tier. Each tier adds +5% referrer reward, capped at +25%.",
+      "canHaveCount": true
+    },
+    {
+      "permission": "REFERRAL_ADMIN",
+      "friendlyName": "Referral admin",
+      "description": "Allows admins to link or unlink referrals manually.",
+      "canHaveCount": false
+    }
+  ],
+  "commands": {
+    "refcode": {
+      "trigger": "refcode",
+      "description": "Show or generate your referral code.",
+      "helpText": "Shows your personal referral code. Share it with invited players so they can use /referral <code>.",
+      "function": "src/commands/refcode/index.js",
+      "arguments": []
+    },
+    "referral": {
+      "trigger": "referral",
+      "description": "Claim another player's referral code.",
+      "helpText": "Usage: /referral <code> — link yourself to the player who invited you and claim your welcome bonus.",
+      "function": "src/commands/referral/index.js",
+      "arguments": [
+        {
+          "name": "code",
+          "type": "string",
+          "helpText": "Referral code from the player who invited you",
+          "position": 0
+        }
+      ]
+    },
+    "refstats": {
+      "trigger": "refstats",
+      "description": "View your referral stats.",
+      "helpText": "Shows your referral code, totals, pending referrals, earnings, and your own referrer if you have one.",
+      "function": "src/commands/refstats/index.js",
+      "arguments": []
+    },
+    "reftop": {
+      "trigger": "reftop",
+      "description": "View the referral leaderboard.",
+      "helpText": "Shows the top 10 players by verified paid referrals.",
+      "function": "src/commands/reftop/index.js",
+      "arguments": []
+    },
+    "reflink": {
+      "trigger": "reflink",
+      "description": "Admin: manually link a referee to a referrer and pay immediately.",
+      "helpText": "Usage: /reflink <referee> <referrer> — creates a paid referral link immediately.",
+      "function": "src/commands/reflink/index.js",
+      "arguments": [
+        {
+          "name": "referee",
+          "type": "string",
+          "helpText": "Referee player name",
+          "position": 0
+        },
+        {
+          "name": "referrer",
+          "type": "string",
+          "helpText": "Referrer player name",
+          "position": 1
+        }
+      ]
+    },
+    "refunlink": {
+      "trigger": "refunlink",
+      "description": "Admin: remove an existing referral link.",
+      "helpText": "Usage: /refunlink <referee> — removes a referral link and rolls back referral stats.",
+      "function": "src/commands/refunlink/index.js",
+      "arguments": [
+        {
+          "name": "referee",
+          "type": "string",
+          "helpText": "Referee player name",
+          "position": 0
+        }
+      ]
+    }
+  },
+  "hooks": {
+    "on-player-disconnect": {
+      "eventType": "player-disconnected",
+      "description": "Checks whether the disconnecting player's referral has crossed the threshold and should be paid.",
+      "function": "src/hooks/on-player-disconnect/index.js"
+    }
+  },
+  "cronJobs": {
+    "sweep-pending-referrals": {
+      "temporalValue": "*/15 * * * *",
+      "description": "Checks pending referral links and pays those whose referees reached the playtime threshold.",
+      "function": "src/cronjobs/sweep-pending-referrals/index.js"
+    },
+    "reset-daily-counters": {
+      "temporalValue": "0 0 * * *",
+      "description": "Resets referral daily counters at UTC midnight.",
+      "function": "src/cronjobs/reset-daily-counters/index.js"
+    }
+  },
+  "functions": {
+    "referral-helpers": {
+      "function": "src/functions/referral-helpers.js"
+    }
+  }
+}
