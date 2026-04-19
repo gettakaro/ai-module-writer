@@ -321,6 +321,23 @@ describe('vote-restart module', () => {
   // Vote is in "passed" state. With restartDelay=0, cronjob should execute restart.
 
   it('should execute the restart command when restartDelay has elapsed', async () => {
+    const varSearch = await client.variable.variableControllerSearch({
+      filters: {
+        key: ['vr_vote_state'],
+        gameServerId: [ctx.gameServer.id],
+        moduleId: [moduleId],
+      },
+    });
+    assert.ok(varSearch.data.data.length > 0, 'Expected vr_vote_state variable to exist before restart cron');
+
+    const voteStateVar = varSearch.data.data[0]!;
+    const voteState = JSON.parse(voteStateVar.value);
+    voteState.status = 'passed';
+    voteState.passedAt = new Date(Date.now() - 2_000).toISOString();
+    await client.variable.variableControllerUpdate(voteStateVar.id, {
+      value: JSON.stringify(voteState),
+    });
+
     const { success, logs } = await triggerCronjob();
 
     assert.equal(success, true, `Expected cronjob to succeed, logs: ${JSON.stringify(logs)}`);

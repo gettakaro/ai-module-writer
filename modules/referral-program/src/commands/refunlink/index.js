@@ -3,8 +3,7 @@ import {
   findPlayerByName,
   getReferralLink,
   deleteReferralLink,
-  getReferralStats,
-  setReferralStats,
+  adjustReferrerStatsForLink,
   removePendingReferee,
 } from './referral-helpers.js';
 
@@ -29,12 +28,7 @@ async function main() {
     throw new TakaroUserError(`Player "${referee.name}" does not have a referral link.`);
   }
 
-  const stats = await getReferralStats(gameServerId, moduleId, link.referrerId);
-  await setReferralStats(gameServerId, moduleId, link.referrerId, {
-    ...stats,
-    referralsTotal: Math.max(0, stats.referralsTotal - 1),
-    referralsPaid: Math.max(0, stats.referralsPaid - (link.status === 'paid' ? 1 : 0)),
-  });
+  await adjustReferrerStatsForLink(gameServerId, moduleId, link.referrerId, link, -1);
 
   await removePendingReferee(gameServerId, moduleId, referee.id);
   await deleteReferralLink(gameServerId, moduleId, referee.id);
