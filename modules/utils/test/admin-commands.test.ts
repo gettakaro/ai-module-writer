@@ -17,6 +17,11 @@ import {
   assignPermissions,
   cleanupRole,
 } from '../../../test/helpers/modules.js';
+import {
+  UTILS_DEBUG_FORCE_BAN_API_FAILURE_KEY,
+  UTILS_DEBUG_FORCE_GIVECURRENCY_API_FAILURE_KEY,
+  UTILS_DEBUG_FORCE_KICK_API_FAILURE_KEY,
+} from '../src/functions/utils-helpers.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -111,6 +116,15 @@ describe('utils: admin commands', () => {
   async function getPlayerName(playerId: string) {
     const result = await client.player.playerControllerGetOne(playerId);
     return result.data.data.name;
+  }
+
+  async function setDebugFlag(key: string) {
+    await client.variable.variableControllerCreate({
+      key,
+      value: JSON.stringify(true),
+      gameServerId: ctx.gameServer.id,
+      moduleId,
+    });
   }
 
   async function waitForOnline(playerId: string, expectedOnline: boolean) {
@@ -251,6 +265,17 @@ describe('utils: admin commands', () => {
     assert.equal(afterPog?.currency, beforeCurrency + 7, 'Expected self currency to increase by 7');
   });
 
+  it('surfaces the generic /givecurrency API failure message when the currency call fails for a non-economy reason', async () => {
+    const targetName = await getPlayerName(ctx.players[1].playerId);
+    await setDebugFlag(UTILS_DEBUG_FORCE_GIVECURRENCY_API_FAILURE_KEY);
+
+    const res = await trigger(ctx.players[0].playerId, `${prefix}givecurrency ${targetName} 5`);
+
+    assert.equal(res.success, false, 'Expected forced /givecurrency API failure to be translated');
+    assert.ok(res.logs.some((msg) => msg.includes('utils:givecurrency failed')), JSON.stringify(res.logs));
+    assert.ok(res.logs.some((msg) => msg.includes('game server API returned an error')), JSON.stringify(res.logs));
+  });
+
   it('rejects invalid /ban duration', async () => {
     const target = ctx.players[1];
     const targetName = await getPlayerName(target.playerId);
@@ -389,6 +414,17 @@ describe('utils: admin commands', () => {
     await waitForOnline(target.playerId, true);
   });
 
+  it('surfaces the generic /ban API failure message when the ban creation call fails', async () => {
+    const targetName = await getPlayerName(ctx.players[1].playerId);
+    await setDebugFlag(UTILS_DEBUG_FORCE_BAN_API_FAILURE_KEY);
+
+    const res = await trigger(ctx.players[0].playerId, `${prefix}ban ${targetName} 10m debug failure`);
+
+    assert.equal(res.success, false, 'Expected forced /ban API failure to be translated');
+    assert.ok(res.logs.some((msg) => msg.includes('utils:ban failed')), JSON.stringify(res.logs));
+    assert.ok(res.logs.some((msg) => msg.includes('ban could not be created right now')), JSON.stringify(res.logs));
+  });
+
   it('denies self /kick', async () => {
     const self = ctx.players[0];
     const selfName = await getPlayerName(self.playerId);
@@ -463,5 +499,18 @@ describe('utils: admin commands', () => {
 
     const pog = await waitForOnline(target.playerId, false);
     assert.equal(pog?.online, false, 'Expected target to be offline after ID-targeted kick');
+  });
+
+  it('surfaces the generic /kick API failure message when the kick call fails', async () => {
+    const targetName = await getPlayerName(ctx.players[1].playerId);
+    await ctx.server.executeConsoleCommand('connectAll');
+    await waitForOnline(ctx.players[1].playerId, true);
+    await setDebugFlag(UTILS_DEBUG_FORCE_KICK_API_FAILURE_KEY);
+
+    const res = await trigger(ctx.players[0].playerId, `${prefix}kick ${targetName} debug failure`);
+
+    assert.equal(res.success, false, 'Expected forced /kick API failure to be translated');
+    assert.ok(res.logs.some((msg) => msg.includes('utils:kick failed')), JSON.stringify(res.logs));
+    assert.ok(res.logs.some((msg) => msg.includes('could not be kicked right now')), JSON.stringify(res.logs));
   });
 });

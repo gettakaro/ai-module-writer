@@ -10,6 +10,7 @@ import {
   assertFundStateLock,
   consumeFundDebugFlag,
   FUND_DEBUG_FORCE_STATE_WRITE_FAILURE_KEY,
+  FUND_DEBUG_FORCE_REFUND_FAILURE_KEY,
   FUND_DEBUG_REPLACE_LOCK_OWNER_KEY,
   releaseFundStateLock,
 } from './fund-helpers.js';
@@ -104,6 +105,10 @@ async function main() {
       console.error(`Fund: failed to persist contribution state for player ${player.name} after deducting ${amount}. Attempting currency rollback. Error: ${stateErr}`);
       let refunded = false;
       try {
+        if (await consumeFundDebugFlag(gameServerId, moduleId, FUND_DEBUG_FORCE_REFUND_FAILURE_KEY)) {
+          throw new Error('Debug-forced refund failure after contribution-state failure');
+        }
+
         await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, pog.playerId, {
           currency: amount,
         });

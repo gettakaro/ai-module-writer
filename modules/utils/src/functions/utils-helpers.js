@@ -1,5 +1,9 @@
 import { takaro } from '@takaro/helpers';
 
+export const UTILS_DEBUG_FORCE_GIVECURRENCY_API_FAILURE_KEY = '__debug_force_givecurrency_api_failure';
+export const UTILS_DEBUG_FORCE_KICK_API_FAILURE_KEY = '__debug_force_kick_api_failure';
+export const UTILS_DEBUG_FORCE_BAN_API_FAILURE_KEY = '__debug_force_ban_api_failure';
+
 export function isBlank(value) {
   return value === undefined || value === null || String(value).trim() === '';
 }
@@ -82,7 +86,7 @@ export function collapsePlayersById(players) {
   const uniquePlayers = [];
 
   for (const player of players) {
-    const playerId = trimOrEmpty(player?.playerId);
+    const playerId = trimOrEmpty(player?.playerId || player?.id);
     if (playerId === '' || seen.has(playerId)) continue;
     seen.add(playerId);
     uniquePlayers.push(player);
@@ -146,8 +150,69 @@ export function requireResolvedPlayerArgument(target) {
   };
 }
 
-export async function resolveOnlinePlayerArgument(gameServerId, target) {
-  const resolved = requireResolvedPlayerArgument(target);
+async function searchPlayersByFilters(filters) {
+  const result = await takaro.player.playerControllerSearch({
+    filters,
+    limit: 10,
+  });
+  return result.data.data ?? [];
+}
+
+async function searchPlayersByName(token) {
+  const result = await takaro.player.playerControllerSearch({
+    search: { name: [token] },
+    limit: 10,
+  });
+  return result.data.data ?? [];
+}
+
+function toResolvedPlayer(player) {
+  const normalized = getCommandTargetPlayer(player);
+  if (!normalized) return null;
+  return {
+    ...normalized,
+    online: player?.online,
+  };
+}
+
+export async function resolvePlayerArgument(targetInput) {
+  const token = trimOrEmpty(targetInput);
+  if (token === '') return null;
+
+  const exactMatches = collapsePlayersById([
+    ...(await searchPlayersByFilters({ id: [token] })),
+    ...(await searchPlayersByFilters({ name: [token] })),
+  ]);
+
+  if (exactMatches.length === 1) {
+    return toResolvedPlayer(exactMatches[0]);
+  }
+
+  if (exactMatches.length > 1) {
+    const caseInsensitive = exactMatches.filter((player) => trimOrEmpty(player.name).toLowerCase() === token.toLowerCase());
+    if (caseInsensitive.length === 1) {
+      return toResolvedPlayer(caseInsensitive[0]);
+    }
+
+    console.warn(`utils-helpers: ambiguous player lookup for token '${token}' matched ${exactMatches.length} players`);
+    return null;
+  }
+
+  const fuzzyMatches = collapsePlayersById(await searchPlayersByName(token));
+  const exactNameMatches = fuzzyMatches.filter((player) => trimOrEmpty(player.name).toLowerCase() === token.toLowerCase());
+  if (exactNameMatches.length === 1) {
+    return toResolvedPlayer(exactNameMatches[0]);
+  }
+
+  if (fuzzyMatches.length === 1 && trimOrEmpty(fuzzyMatches[0].name) === token) {
+    return toResolvedPlayer(fuzzyMatches[0]);
+  }
+
+  return null;
+}
+
+export async function resolveOnlinePlayerArgument(gameServerId, targetInput) {
+  const resolved = await resolvePlayerArgument(targetInput);
   if (!resolved) return null;
 
   const onlinePog = await getOnlinePogForPlayer(gameServerId, resolved.playerId);
@@ -302,6 +367,51 @@ export async function getGameServerPogForPlayer(gameServerId, playerId, { online
 
 export async function getOnlinePogForPlayer(gameServerId, playerId) {
   return getGameServerPogForPlayer(gameServerId, playerId, { onlineOnly: true });
+}
+
+export async function isEconomyEnabled(gameServerId) {
+  try {
+    const result = await takaro.settings.settingsControllerGetOne('economyEnabled', gameServerId);
+    return String(result.data.data.value).toLowerCase() === 'true';
+  } catch (err) {
+    console.error(`utils-helpers: failed to load economyEnabled for ${gameServerId}: ${err}`);
+    return true;
+  }
+}
+
+async function getUtilsVariable(gameServerId, moduleId, key) {
+  const result = await takaro.variable.variableControllerSearch({
+    filters: {
+      key: [key],
+      gameServerId: [gameServerId],
+      moduleId: [moduleId],
+    },
+    limit: 1,
+  });
+
+  return result.data.data[0] ?? null;
+}
+
+export async function consumeUtilsDebugFlag(gameServerId, moduleId, key) {
+  if (!moduleId) return false;
+
+  const variable = await getUtilsVariable(gameServerId, moduleId, key);
+  if (!variable) return false;
+
+  let enabled = false;
+  try {
+    enabled = JSON.parse(variable.value) === true;
+  } catch {
+    enabled = false;
+  }
+
+  try {
+    await takaro.variable.variableControllerDelete(variable.id);
+  } catch (err) {
+    console.warn(`utils-helpers: failed to delete debug flag ${key}: ${err}`);
+  }
+
+  return enabled;
 }
 
 export async function safeBroadcast(gameServerId, message) {

@@ -1,7 +1,10 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
+  UTILS_DEBUG_FORCE_GIVECURRENCY_API_FAILURE_KEY,
+  consumeUtilsDebugFlag,
   getOnlinePogForPlayer,
   getPlayerName,
+  isEconomyEnabled,
   renderTemplate,
   resolveOnlinePlayerArgument,
   safeBroadcast,
@@ -27,6 +30,10 @@ async function main() {
     throw new TakaroUserError('Usage: /givecurrency <player> <amount> — Amount must be a positive whole number.');
   }
 
+  if (!await isEconomyEnabled(gameServerId)) {
+    throw new TakaroUserError('Currency is not available on this game server. Ask an admin to enable economy support before using /givecurrency.');
+  }
+
   const [adminName, targetName, targetPog] = await Promise.all([
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),
@@ -38,6 +45,10 @@ async function main() {
   }
 
   try {
+    if (await consumeUtilsDebugFlag(gameServerId, mod.moduleId, UTILS_DEBUG_FORCE_GIVECURRENCY_API_FAILURE_KEY)) {
+      throw new Error('Debug-forced givecurrency API failure');
+    }
+
     await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(targetPog.gameServerId || gameServerId, target.playerId, {
       currency: amount,
     });

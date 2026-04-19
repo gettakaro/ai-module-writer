@@ -6,6 +6,7 @@ export const FUND_CYCLE_KEY = 'fund_cycle';
 export const FUND_LAST_COMPLETION_KEY = 'fund_last_completion';
 export const FUND_STATE_LOCK_KEY = 'fund_state_lock';
 export const FUND_DEBUG_FORCE_STATE_WRITE_FAILURE_KEY = '__debug_force_state_write_failure_after_deduct';
+export const FUND_DEBUG_FORCE_REFUND_FAILURE_KEY = '__debug_force_refund_failure_after_state_write_failure';
 export const FUND_DEBUG_REPLACE_LOCK_OWNER_KEY = '__debug_replace_lock_owner_before_release';
 
 function isConflictError(err) {
@@ -69,9 +70,10 @@ export async function acquireFundStateLock(
   owner,
   { maxWaitMs = 5000, pollMs = 200, staleAfterMs = 120000 } = {},
 ) {
-  const maxAttempts = Math.max(1, Math.ceil(maxWaitMs / Math.max(1, pollMs)));
+  const deadline = Date.now() + Math.max(0, maxWaitMs);
+  const sleepMs = Math.max(1, pollMs);
 
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+  while (Date.now() <= deadline) {
     const now = Date.now();
     const lockValue = {
       owner,
@@ -106,6 +108,13 @@ export async function acquireFundStateLock(
         }
       }
     }
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      break;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, Math.min(sleepMs, remainingMs)));
   }
 
   throw new Error('Timed out acquiring the community fund state lock');

@@ -1,5 +1,7 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
+  UTILS_DEBUG_FORCE_KICK_API_FAILURE_KEY,
+  consumeUtilsDebugFlag,
   extractReason,
   getCommandArgumentTokens,
   getPlayerName,
@@ -39,6 +41,10 @@ async function main() {
   const reason = normalizeReason(extractReason(args.reason, chatMessage, [typedTargetToken]), 'Kicked by an admin.');
 
   try {
+    if (await consumeUtilsDebugFlag(gameServerId, mod.moduleId, UTILS_DEBUG_FORCE_KICK_API_FAILURE_KEY)) {
+      throw new Error('Debug-forced kick API failure');
+    }
+
     await takaro.gameserver.gameServerControllerKickPlayer(gameServerId, target.playerId, {
       reason,
     });

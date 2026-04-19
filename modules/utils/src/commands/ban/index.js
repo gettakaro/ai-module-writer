@@ -1,12 +1,14 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
+  UTILS_DEBUG_FORCE_BAN_API_FAILURE_KEY,
+  consumeUtilsDebugFlag,
   extractReason,
   getCommandArgumentTokens,
   getPlayerName,
   normalizeReason,
   parseBanDurationToken,
   renderTemplate,
-  requireResolvedPlayerArgument,
+  resolvePlayerArgument,
   safeBroadcast,
   safePrivateMessage,
 } from './utils-helpers.js';
@@ -18,7 +20,7 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const target = requireResolvedPlayerArgument(args.player);
+  const target = await resolvePlayerArgument(args.player);
   if (!target) {
     throw new TakaroUserError('Please specify a valid player.');
   }
@@ -54,6 +56,10 @@ async function main() {
 
   let banResult;
   try {
+    if (await consumeUtilsDebugFlag(gameServerId, mod.moduleId, UTILS_DEBUG_FORCE_BAN_API_FAILURE_KEY)) {
+      throw new Error('Debug-forced ban API failure');
+    }
+
     banResult = await takaro.player.banControllerCreate(payload);
   } catch (err) {
     console.error(`utils:ban failed for target=${target.playerId}: ${err}`);

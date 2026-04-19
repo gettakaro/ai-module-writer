@@ -21,7 +21,7 @@ export interface InstallModuleConfig {
 
 /**
  * Push a local module to Takaro via the import API.
- * If a module with the same name already exists, deletes it first (idempotent).
+ * If a module with the same name already exists, backs it up, replaces it, and restores it on import failure.
  * Returns the imported module (found by name from module.json).
  */
 export async function pushModule(
@@ -53,11 +53,15 @@ export async function pushModule(
     }
     const { name } = moduleJson;
 
-    // Delete any existing module with this name before importing (idempotent push)
+    // Keep a backup of the current module so a failed replacement import can be rolled back.
     const existing = await client.module.moduleControllerSearch({
       filters: { name: [name] },
     });
     const existingModule = existing.data.data.find((m) => m.name === name);
+    const existingBackup = existingModule
+      ? (await client.module.moduleControllerExport(existingModule.id, {})).data.data
+      : null;
+
     if (existingModule) {
       await client.module.moduleControllerRemove(existingModule.id);
     }
@@ -66,9 +70,17 @@ export async function pushModule(
     try {
       await client.module.moduleControllerImport(moduleJson);
     } catch (err) {
-      if (existingModule) {
+      if (existingBackup) {
+        try {
+          await client.module.moduleControllerImport(existingBackup);
+        } catch (restoreErr) {
+          throw new Error(
+            `Import of '${name}' failed and restoring the previous module also failed. Import error: ${err}. Restore error: ${restoreErr}`,
+          );
+        }
+
         throw new Error(
-          `Import of '${name}' failed. Previous module version was deleted before this import failure. Cause: ${err}`,
+          `Import of '${name}' failed, but the previous module was restored. Cause: ${err}`,
         );
       }
       throw err;
