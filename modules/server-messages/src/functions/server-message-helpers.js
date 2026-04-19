@@ -1,6 +1,11 @@
 import { takaro } from '@takaro/helpers';
 
 export const SERVER_MESSAGES_STATE_KEY = 'server_messages_state';
+export const SERVER_MESSAGES_LOCK_KEY = 'server_messages_lock';
+export const MAX_MESSAGE_WEIGHT = 100;
+const LOCK_RETRY_DELAY_MS = 250;
+const LOCK_TIMEOUT_MS = 10000;
+const LOCK_TTL_MS = 30000;
 
 export function normalizeMessages(rawMessages) {
   if (!Array.isArray(rawMessages)) return [];
@@ -16,7 +21,10 @@ export function normalizeMessages(rawMessages) {
 export function normalizeWeight(weight) {
   const parsed = Number.isFinite(weight) ? weight : 1;
   const floored = Math.floor(parsed);
-  return floored >= 1 ? floored : 1;
+
+  if (floored < 1) return 1;
+  if (floored > MAX_MESSAGE_WEIGHT) return MAX_MESSAGE_WEIGHT;
+  return floored;
 }
 
 export function normalizeOrder(order) {
@@ -112,6 +120,52 @@ export async function writeVariable(gameServerId, moduleId, key, value) {
     gameServerId,
     moduleId,
   });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isConflictError(err) {
+  return err?.response?.status === 409 || /duplicate key|already exists|unique/i.test(String(err?.message ?? err));
+}
+
+export async function acquireExecutionLock(gameServerId, moduleId, options = {}) {
+  const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : LOCK_TIMEOUT_MS;
+  const retryDelayMs = Number.isFinite(options.retryDelayMs) ? options.retryDelayMs : LOCK_RETRY_DELAY_MS;
+  const ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : LOCK_TTL_MS;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    try {
+      const res = await takaro.variable.variableControllerCreate({
+        key: SERVER_MESSAGES_LOCK_KEY,
+        value: JSON.stringify({ acquiredAt: new Date().toISOString() }),
+        expiresAt: new Date(Date.now() + ttlMs).toISOString(),
+        gameServerId,
+        moduleId,
+      });
+
+      return res.data.data;
+    } catch (err) {
+      if (!isConflictError(err)) throw err;
+      await sleep(retryDelayMs);
+    }
+  }
+
+  throw new Error(`server-message-helpers: timed out acquiring execution lock after ${timeoutMs}ms`);
+}
+
+export async function releaseExecutionLock(lockId) {
+  if (!lockId) return;
+
+  try {
+    await takaro.variable.variableControllerDelete(lockId);
+  } catch (err) {
+    if (err?.response?.status !== 404) {
+      throw err;
+    }
+  }
 }
 
 export function buildWeightedBag(messages) {

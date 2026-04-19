@@ -1,5 +1,5 @@
 {
-  "name": "test-server-messages",
+  "name": "server-messages",
   "description": "Broadcasts scheduled server announcements using sequential or weighted shuffle-bag rotation.",
   "version": "latest",
   "supportedGames": [
@@ -11,7 +11,7 @@
     "properties": {
       "messages": {
         "type": "array",
-        "description": "Messages to broadcast. Weight only affects random order.",
+        "description": "Messages to broadcast. Supports {playerCount} and {serverName} placeholders. Weight only affects random order.",
         "default": [],
         "items": {
           "type": "object",
@@ -19,13 +19,14 @@
             "text": {
               "type": "string",
               "minLength": 1,
-              "description": "The message text to broadcast"
+              "description": "The message text to broadcast. Supports {playerCount} and {serverName}; unknown placeholders are left unchanged."
             },
             "weight": {
               "type": "integer",
               "minimum": 1,
+              "maximum": 100,
               "default": 1,
-              "description": "Relative frequency in random weighted shuffle-bag mode"
+              "description": "Relative frequency in random weighted shuffle-bag mode. Capped at 100 to keep shuffle bags bounded."
             }
           },
           "required": [

@@ -1,6 +1,7 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'path';
+import fs from 'node:fs/promises';
 import { fileURLToPath } from 'url';
 import {
   Client,
@@ -153,6 +154,33 @@ describe('server-messages: broadcast cronjob', () => {
     };
   }
 
+  async function waitForCronEvents(after: Date, expectedCount: number): Promise<EventOutputDTO[]> {
+    const deadline = Date.now() + 30000;
+
+    while (Date.now() < deadline) {
+      const result = await client.event.eventControllerSearch({
+        filters: {
+          eventName: [EventSearchInputAllowedFiltersEventNameEnum.CronjobExecuted],
+          gameserverId: [ctx.gameServer.id],
+        },
+        greaterThan: {
+          createdAt: after.toISOString(),
+        },
+        sortBy: 'createdAt',
+        sortDirection: 'asc',
+        limit: expectedCount + 2,
+      });
+
+      if (result.data.data.length >= expectedCount) {
+        return result.data.data.slice(0, expectedCount);
+      }
+
+      await wait(1000);
+    }
+
+    throw new Error(`Timed out waiting for ${expectedCount} cronjob-executed events`);
+  }
+
   async function getChatMessages(after: Date): Promise<string[]> {
     const result = await client.event.eventControllerSearch({
       filters: {
@@ -190,6 +218,35 @@ describe('server-messages: broadcast cronjob', () => {
     assert.deepEqual(first.chatMessages, ['Alpha']);
     assert.deepEqual(second.chatMessages, ['Beta']);
     assert.deepEqual(third.chatMessages, ['Alpha']);
+  });
+
+  it('serializes overlapping cron triggers so they do not double-send the same sequential message', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: 'Alpha' }, { text: 'Beta' }, { text: 'Gamma' }],
+    });
+
+    const before = new Date();
+    await Promise.all([
+      client.cronjob.cronJobControllerTrigger({ gameServerId: ctx.gameServer.id, cronjobId, moduleId }),
+      client.cronjob.cronJobControllerTrigger({ gameServerId: ctx.gameServer.id, cronjobId, moduleId }),
+    ]);
+
+    const events = await waitForCronEvents(before, 2);
+    await wait(1000);
+    const chatMessages = await getChatMessages(before);
+
+    assert.equal(events.length, 2);
+    for (const event of events) {
+      const meta = event.meta as { result?: { success?: boolean } };
+      assert.equal(meta?.result?.success, true, `Expected concurrent cron event to succeed: ${JSON.stringify(event.meta)}`);
+    }
+    assert.deepEqual(chatMessages, ['Alpha', 'Beta']);
+
+    const stateVariable = await getStateVariable();
+    assert.ok(stateVariable, 'Expected state variable to exist after concurrent triggers');
+    const storedState = JSON.parse(stateVariable.value) as { sequentialIndex?: number };
+    assert.equal(storedState.sequentialIndex, 2, `Expected sequential index to advance twice, got ${stateVariable.value}`);
   });
 
   it('does not advance sequential state when nobody is online', async () => {
@@ -318,5 +375,64 @@ describe('server-messages: broadcast cronjob', () => {
     const reset = await triggerCronjobAndCollectMessages();
     assert.equal(reset.success, true, `Expected reset run to succeed, logs: ${JSON.stringify(reset.logs)}`);
     assert.deepEqual(reset.chatMessages, ['New 1']);
+  });
+
+  it('recovers from malformed persisted state without crashing', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: 'First' }, { text: 'Second' }],
+    });
+
+    await client.variable.variableControllerCreate({
+      key: STATE_KEY,
+      value: 'not-json',
+      gameServerId: ctx.gameServer.id,
+      moduleId,
+    });
+
+    const result = await triggerCronjobAndCollectMessages();
+    assert.equal(result.success, true, `Expected malformed-state run to succeed, logs: ${JSON.stringify(result.logs)}`);
+    assert.deepEqual(result.chatMessages, ['First']);
+
+    const stateVariable = await getStateVariable();
+    assert.ok(stateVariable, 'Expected malformed state to be rewritten');
+    const state = JSON.parse(stateVariable.value) as { sequentialIndex?: number };
+    assert.equal(state.sequentialIndex, 1, `Expected malformed state reset to first advance, got ${stateVariable.value}`);
+  });
+
+  it('creates the state variable on first run and updates the same record on later runs', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: 'State 1' }, { text: 'State 2' }],
+    });
+
+    await triggerCronjobAndCollectMessages();
+    const created = await getStateVariable();
+    assert.ok(created, 'Expected first cron run to create the state variable');
+
+    await triggerCronjobAndCollectMessages();
+    const updated = await getStateVariable();
+    assert.ok(updated, 'Expected second cron run to keep the state variable');
+    assert.equal(updated.id, created.id, 'Expected later cron runs to update the existing state variable');
+
+    const state = JSON.parse(updated.value) as { sequentialIndex?: number };
+    assert.equal(state.sequentialIndex, 0, `Expected wrapped sequential index after two sends, got ${updated.value}`);
+  });
+
+  it('documents placeholder support and bounded random weights in module.json', async () => {
+    const moduleJson = JSON.parse(await fs.readFile(path.join(MODULE_DIR, 'module.json'), 'utf8')) as {
+      config: {
+        properties: {
+          messages: {
+            description?: string;
+            items: { properties: { text: { description?: string }; weight: { maximum?: number } } };
+          };
+        };
+      };
+    };
+
+    assert.match(moduleJson.config.properties.messages.description ?? '', /\{playerCount\}.*\{serverName\}/);
+    assert.match(moduleJson.config.properties.messages.items.properties.text.description ?? '', /\{playerCount\}.*\{serverName\}/);
+    assert.equal(moduleJson.config.properties.messages.items.properties.weight.maximum, 100);
   });
 });
