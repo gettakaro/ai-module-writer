@@ -4,6 +4,8 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import os from 'os';
 import { Client, ModuleOutputDTO, SettingsControllerGetKeysEnum } from '@takaro/apiclient';
+import { importModuleExport } from '../../src/scripts/module-import.js';
+import { TakaroModuleExport } from '../../src/types/module.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,8 +23,7 @@ export interface InstallModuleConfig {
 
 /**
  * Push a local module to Takaro via the import API.
- * If a module with the same name already exists, deletes it first (idempotent).
- * Returns the imported module (found by name from module.json).
+ * Returns the imported module after running the same safe replacement logic as the CLI.
  */
 export async function pushModule(
   client: Client,
@@ -45,44 +46,14 @@ export async function pushModule(
       );
     }
 
-    let moduleJson: { name: string };
+    let moduleJson: TakaroModuleExport;
     try {
-      moduleJson = JSON.parse(fs.readFileSync(tempFile, 'utf-8'));
+      moduleJson = JSON.parse(fs.readFileSync(tempFile, 'utf-8')) as TakaroModuleExport;
     } catch (err) {
       throw new Error(`Failed to parse module-to-json output from '${tempFile}': ${err}`);
     }
-    const { name } = moduleJson;
 
-    // Delete any existing module with this name before importing (idempotent push)
-    const existing = await client.module.moduleControllerSearch({
-      filters: { name: [name] },
-    });
-    const existingModule = existing.data.data.find((m) => m.name === name);
-    if (existingModule) {
-      await client.module.moduleControllerRemove(existingModule.id);
-    }
-
-    // Import via API (returns void — second search below retrieves the module data)
-    try {
-      await client.module.moduleControllerImport(moduleJson);
-    } catch (err) {
-      if (existingModule) {
-        throw new Error(
-          `Import of '${name}' failed. Previous module version was deleted before this import failure. Cause: ${err}`,
-        );
-      }
-      throw err;
-    }
-
-    // Find the module by name after import (import API returns void, no module data in response)
-    const searchResult = await client.module.moduleControllerSearch({
-      filters: { name: [name] },
-    });
-
-    const found = searchResult.data.data.find((m) => m.name === name);
-    if (!found) throw new Error(`Module '${name}' not found after import`);
-
-    return found;
+    return await importModuleExport(client, moduleJson);
   } finally {
     if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
   }

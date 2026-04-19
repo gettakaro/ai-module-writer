@@ -421,7 +421,7 @@ describe('server-messages: broadcast cronjob', () => {
 
     const originalName = ctx.gameServer.name;
     await client.gameserver.gameServerControllerUpdate(ctx.gameServer.id, {
-      name: '',
+      name: '   ',
       connectionInfo: JSON.stringify(ctx.gameServer.connectionInfo),
       type: ctx.gameServer.type,
       enabled: ctx.gameServer.enabled,
@@ -735,18 +735,36 @@ describe('server-messages: broadcast cronjob', () => {
     const before = new Date();
     const pendingRun = triggerCronjob();
 
-    const lock = await waitForVariable(LOCK_KEY, undefined, 5000);
-    const payload = JSON.parse(lock.value) as { acquiredAt?: string; heartbeatAt?: string };
-    for (let attempt = 0; attempt < 5; attempt++) {
-      await client.variable.variableControllerUpdate(lock.id, {
-        value: JSON.stringify({
-          ...payload,
-          token: 'stolen-lock-token',
-        }),
-        expiresAt: lock.expiresAt,
-      });
-      await wait(100);
+    await waitForVariable(LOCK_KEY, undefined, 5000);
+    let stoleLock = false;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const currentLock = await getVariable(LOCK_KEY);
+      if (!currentLock) {
+        await wait(50);
+        continue;
+      }
+
+      const payload = JSON.parse(currentLock.value) as { acquiredAt?: string; heartbeatAt?: string };
+      try {
+        await client.variable.variableControllerUpdate(currentLock.id, {
+          value: JSON.stringify({
+            ...payload,
+            token: 'stolen-lock-token',
+          }),
+          expiresAt: currentLock.expiresAt,
+        });
+        stoleLock = true;
+        break;
+      } catch (err) {
+        if ((err as { response?: { status?: number } })?.response?.status !== 404) {
+          throw err;
+        }
+      }
+
+      await wait(50);
     }
+
+    assert.equal(stoleLock, true, 'Expected to steal the lock before the cronjob finished');
 
     const failed = await pendingRun;
     assert.equal(failed.success, false, `Expected ownership-loss run to fail, logs: ${JSON.stringify(failed.logs)}`);
