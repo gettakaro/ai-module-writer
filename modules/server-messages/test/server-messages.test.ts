@@ -643,40 +643,27 @@ describe('server-messages: broadcast cronjob', () => {
     );
   });
 
-  it('accepts install-time configs that runtime normalization clamps', async () => {
-    await reinstall({
-      order: 'random',
-      messages: [{ text: 'Low', weight: 0 }, { text: 'High', weight: 250.9 }],
-    });
-
-    const result = await triggerCronjobAndCollectMessages();
-    assert.equal(result.success, true, `Expected normalized-config run to succeed, logs: ${JSON.stringify(result.logs)}`);
-
-    const stateVariable = await getStateVariable();
-    assert.ok(stateVariable, 'Expected state variable after normalized-config run');
-    const state = JSON.parse(stateVariable.value) as { bag?: number[]; cursor?: number };
-    const counts = (state.bag ?? []).reduce<Record<number, number>>((acc, index) => {
-      acc[index] = (acc[index] ?? 0) + 1;
-      return acc;
-    }, {});
-
-    assert.equal(state.bag?.length, 101, `Expected bounded weighted bag length 101, got ${stateVariable.value}`);
-    assert.equal(counts[0], 1, `Expected low weight to clamp to one slot, got ${stateVariable.value}`);
-    assert.equal(counts[1], 100, `Expected high weight to clamp to 100 slots, got ${stateVariable.value}`);
-    assert.equal(state.cursor, 1, `Expected normalized weighted bag cursor to advance once, got ${stateVariable.value}`);
+  it('rejects out-of-range weights at install time instead of silently coercing them', async () => {
+    await assert.rejects(
+      reinstall({
+        order: 'random',
+        messages: [{ text: 'Low', weight: 0 }, { text: 'High', weight: 101 }],
+      }),
+      /minimum|maximum|validation|config|userConfig/i,
+    );
   });
 
-  it('builds a bounded weighted bag from normalized message weights', async () => {
+  it('builds a bounded weighted bag from valid message weights', async () => {
     await reinstall({
       order: 'random',
-      messages: [{ text: 'Low', weight: 0 }, { text: 'High', weight: 250.9 }],
+      messages: [{ text: 'Low', weight: 1 }, { text: 'High', weight: 100 }],
     });
 
     const result = await triggerCronjobAndCollectMessages();
-    assert.equal(result.success, true, `Expected normalized-weight run to succeed, logs: ${JSON.stringify(result.logs)}`);
+    assert.equal(result.success, true, `Expected valid-weight run to succeed, logs: ${JSON.stringify(result.logs)}`);
 
     const stateVariable = await getStateVariable();
-    assert.ok(stateVariable, 'Expected state variable after normalized-weight run');
+    assert.ok(stateVariable, 'Expected state variable after valid-weight run');
     const state = JSON.parse(stateVariable.value) as { bag?: number[]; cursor?: number };
     const counts = (state.bag ?? []).reduce<Record<number, number>>((acc, index) => {
       acc[index] = (acc[index] ?? 0) + 1;
@@ -684,9 +671,9 @@ describe('server-messages: broadcast cronjob', () => {
     }, {});
 
     assert.equal(state.bag?.length, 101, `Expected bounded weighted bag length 101, got ${stateVariable.value}`);
-    assert.equal(counts[0], 1, `Expected low weight to clamp to one slot, got ${stateVariable.value}`);
-    assert.equal(counts[1], 100, `Expected high weight to clamp to 100 slots, got ${stateVariable.value}`);
-    assert.equal(state.cursor, 1, `Expected normalized weighted bag cursor to advance once, got ${stateVariable.value}`);
+    assert.equal(counts[0], 1, `Expected low weight to occupy one slot, got ${stateVariable.value}`);
+    assert.equal(counts[1], 100, `Expected high weight to occupy 100 slots, got ${stateVariable.value}`);
+    assert.equal(state.cursor, 1, `Expected weighted bag cursor to advance once, got ${stateVariable.value}`);
   });
 
   it('creates the state variable on first run and updates the same record on later runs', async () => {
@@ -856,7 +843,7 @@ describe('server-messages: broadcast cronjob', () => {
             items: {
               properties: {
                 text: { description?: string; pattern?: string };
-                weight: { type?: string; description?: string };
+                weight: { type?: string; minimum?: number; maximum?: number; description?: string };
               };
             };
           };
@@ -871,7 +858,9 @@ describe('server-messages: broadcast cronjob', () => {
     assert.equal(moduleJson.config.properties.messages.maxItems, 100);
     assert.equal(moduleJson.config.properties.messages.items.properties.text.pattern, '\\S');
     assert.match(moduleJson.config.properties.messages.items.properties.text.description ?? '', /Whitespace-only messages are rejected at install time/);
-    assert.equal(moduleJson.config.properties.messages.items.properties.weight.type, 'number');
-    assert.match(moduleJson.config.properties.messages.items.properties.weight.description ?? '', /clamps weights into the 1-100 range/);
+    assert.equal(moduleJson.config.properties.messages.items.properties.weight.type, 'integer');
+    assert.equal(moduleJson.config.properties.messages.items.properties.weight.minimum, 1);
+    assert.equal(moduleJson.config.properties.messages.items.properties.weight.maximum, 100);
+    assert.match(moduleJson.config.properties.messages.items.properties.weight.description ?? '', /rejected at install time/i);
   });
 });

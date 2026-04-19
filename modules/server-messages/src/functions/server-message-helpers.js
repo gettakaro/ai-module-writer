@@ -6,6 +6,7 @@ export const MAX_MESSAGE_WEIGHT = 100;
 export const MAX_MESSAGE_COUNT = 100;
 const LOCK_TTL_MS = 30000;
 const LOCK_TIMEOUT_MS = LOCK_TTL_MS + 5000;
+const LOCK_RETRY_DELAY_MS = 250;
 const PLAYER_COUNT_PAGE_SIZE = 100;
 const MAX_PLAYER_COUNT_PAGES = 100;
 const SUPPORTED_PLACEHOLDERS = ['playerCount', 'serverName'];
@@ -24,12 +25,20 @@ export function normalizeMessages(rawMessages) {
 }
 
 export function normalizeWeight(weight) {
-  const parsed = Number.isFinite(weight) ? weight : 1;
-  const floored = Math.floor(parsed);
+  if (weight === undefined || weight === null) {
+    return 1;
+  }
 
-  if (floored < 1) return 1;
-  if (floored > MAX_MESSAGE_WEIGHT) return MAX_MESSAGE_WEIGHT;
-  return floored;
+  const parsed = Number(weight);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
+    throw new Error(`server-message-helpers: weight '${weight}' must be an integer between 1 and ${MAX_MESSAGE_WEIGHT}`);
+  }
+
+  if (parsed < 1 || parsed > MAX_MESSAGE_WEIGHT) {
+    throw new Error(`server-message-helpers: weight '${weight}' must be between 1 and ${MAX_MESSAGE_WEIGHT}`);
+  }
+
+  return parsed;
 }
 
 export function normalizeOrder(order) {
@@ -173,6 +182,10 @@ function createLockToken() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function buildLockPayload(token, now = new Date()) {
   return {
     token,
@@ -266,7 +279,9 @@ export function startExecutionLockHeartbeat(lock, options = {}) {
 export async function acquireExecutionLock(gameServerId, moduleId, options = {}) {
   const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : LOCK_TIMEOUT_MS;
   const ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : LOCK_TTL_MS;
+  const retryDelayMs = Number.isFinite(options.retryDelayMs) ? options.retryDelayMs : LOCK_RETRY_DELAY_MS;
   const deadline = Date.now() + timeoutMs;
+  let observedExpiredLockWhileWaiting = false;
 
   while (Date.now() < deadline) {
     const token = createLockToken();
@@ -281,6 +296,10 @@ export async function acquireExecutionLock(gameServerId, moduleId, options = {})
         moduleId,
       });
 
+      if (observedExpiredLockWhileWaiting) {
+        console.warn('server-message-helpers: cleared stale execution lock after waiting for expiry');
+      }
+
       return {
         ...res.data.data,
         token,
@@ -291,15 +310,28 @@ export async function acquireExecutionLock(gameServerId, moduleId, options = {})
       if (!isConflictError(err)) throw err;
 
       const existingLock = await findVariable(gameServerId, moduleId, SERVER_MESSAGES_LOCK_KEY);
+      const nowMs = Date.now();
       if (existingLock?.id) {
-        const nowMs = Date.now();
         if (isLockStale(existingLock, ttlMs, nowMs)) {
           const deleted = await tryDeleteVariable(existingLock.id);
           if (deleted) {
             console.warn(`server-message-helpers: cleared stale execution lock ${existingLock.id}`);
           }
+          observedExpiredLockWhileWaiting = true;
+          continue;
         }
+
+        const expiryMs = parseLockExpiryMs(existingLock, ttlMs);
+        const remainingMs = expiryMs === null ? retryDelayMs : Math.max(0, expiryMs - nowMs);
+        if (remainingMs <= retryDelayMs) {
+          observedExpiredLockWhileWaiting = true;
+        }
+        await sleep(Math.min(retryDelayMs, Math.max(50, remainingMs)));
+        continue;
       }
+
+      observedExpiredLockWhileWaiting = true;
+      await sleep(Math.min(retryDelayMs, Math.max(50, deadline - nowMs)));
     }
   }
 

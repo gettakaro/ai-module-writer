@@ -9,7 +9,12 @@ import { fileURLToPath } from 'url';
 import { Client } from '@takaro/apiclient';
 import { createClient } from '../../../test/helpers/client.js';
 import { cleanupTestModules, deleteModule } from '../../../test/helpers/modules.js';
-import { getTakaroAuthConfig, REPO_ROOT } from '../../../src/scripts/module-import.js';
+import {
+  createTakaroClient,
+  getTakaroAuthConfig,
+  REPO_ROOT,
+  withOptionalLoginRetry,
+} from '../../../src/scripts/module-import.js';
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
@@ -17,6 +22,7 @@ const __dirname = path.dirname(__filename);
 const MODULE_DIR = path.resolve(__dirname, '..');
 const MODULE_TO_JSON_SCRIPT = path.join(REPO_ROOT, 'dist', 'scripts', 'module-to-json.js');
 const MODULE_IMPORT_SCRIPT = path.join(REPO_ROOT, 'dist', 'scripts', 'module-import.js');
+const MODULE_PUSH_SCRIPT = path.join(REPO_ROOT, 'scripts', 'module-push.sh');
 const MODULE_NAME = 'test-hello-world';
 
 describe('module-import CLI', () => {
@@ -86,6 +92,68 @@ describe('module-import CLI', () => {
       await fs.rm(tempCwd, { recursive: true, force: true });
       await fs.rm(exportFile, { force: true });
     }
+  });
+
+  it('uses the credentialed client path when username/password are present', async () => {
+    const { client: credentialedClient, canLogin } = createTakaroClient({
+      url: 'https://example.invalid',
+      domainId: 'domain-id',
+      username: 'user@example.com',
+      password: 'secret',
+      token: 'stale-token',
+    });
+
+    assert.equal(canLogin, true);
+    assert.ok(credentialedClient, 'Expected a client instance for credential auth');
+  });
+
+  it('retries once with login after a 401 when credential auth is available', async () => {
+    let attempts = 0;
+    let loginCalls = 0;
+    let domainSetTo: string | undefined;
+
+    const fakeClient = {
+      login: async () => {
+        loginCalls += 1;
+      },
+      setDomain: (domainId: string) => {
+        domainSetTo = domainId;
+      },
+    } as unknown as Client;
+
+    const result = await withOptionalLoginRetry(fakeClient, true, 'domain-123', async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw { response: { status: 401 } };
+      }
+      return 'ok';
+    });
+
+    assert.equal(result, 'ok');
+    assert.equal(attempts, 2);
+    assert.equal(loginCalls, 1);
+    assert.equal(domainSetTo, 'domain-123');
+  });
+
+  it('push script imports a module end-to-end through the documented shell workflow', async () => {
+    const auth = getTakaroAuthConfig();
+    const tokenOnlyEnv = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      TAKARO_TOKEN: client.token ?? '',
+      TAKARO_HOST: auth.url,
+      TAKARO_DOMAIN_ID: auth.domainId,
+      TAKARO_USERNAME: '',
+      TAKARO_PASSWORD: '',
+    };
+
+    const { stdout } = await execFileAsync('bash', [MODULE_PUSH_SCRIPT, MODULE_DIR], { env: tokenOnlyEnv });
+    const parsed = JSON.parse(stdout) as { data?: { id?: string; name?: string } };
+    assert.equal(parsed.data?.name, MODULE_NAME);
+
+    const imported = await searchExactModule();
+    assert.ok(imported, 'Expected module-push.sh to import the module');
+    moduleId = imported.id;
   });
 
   it('restores the previous module when a replacement import fails', async () => {

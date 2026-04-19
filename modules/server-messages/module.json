@@ -1,5 +1,5 @@
 {
-  "name": "server-messages",
+  "name": "test-server-messages",
   "description": "Broadcasts scheduled server announcements using sequential or weighted shuffle-bag rotation.",
   "version": "latest",
   "supportedGames": [
@@ -23,9 +23,11 @@
               "description": "The message text to broadcast. Supports {playerCount} and {serverName}; unknown placeholders are left unchanged with a warning. Whitespace-only messages are rejected at install time."
             },
             "weight": {
-              "type": "number",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
               "default": 1,
-              "description": "Relative frequency in random weighted shuffle-bag mode. Runtime normalization clamps weights into the 1-100 range to keep shuffle bags bounded."
+              "description": "Relative frequency in random weighted shuffle-bag mode. Must be a positive integer from 1 to 100. Invalid weights are rejected at install time to keep shuffle bags bounded and predictable."
             }
           },
           "required": [

@@ -1,4 +1,5 @@
 import { execFileSync, SpawnSyncReturns } from 'child_process';
+import { inspect } from 'util';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
@@ -62,18 +63,41 @@ export async function pushModule(
 /**
  * Install a module version on a game server.
  */
+function formatApiError(err: unknown): string {
+  const response = (err as { response?: { data?: unknown; status?: number } })?.response;
+  const data = response?.data as
+    | { meta?: { error?: { message?: string; details?: unknown } } }
+    | undefined;
+
+  const message = data?.meta?.error?.message;
+  if (message) {
+    const details = data.meta?.error?.details;
+    return details === undefined ? message : `${message} (${inspect(details, { depth: 5, breakLength: Infinity })})`;
+  }
+
+  if (response?.data !== undefined) {
+    return inspect(response.data, { depth: 5, breakLength: Infinity });
+  }
+
+  return (err as Error)?.message ?? String(err);
+}
+
 export async function installModule(
   client: Client,
   versionId: string,
   gameServerId: string,
   config?: InstallModuleConfig,
 ): Promise<void> {
-  await client.module.moduleInstallationsControllerInstallModule({
-    versionId,
-    gameServerId,
-    userConfig: config?.userConfig ? JSON.stringify(config.userConfig) : undefined,
-    systemConfig: config?.systemConfig ? JSON.stringify(config.systemConfig) : undefined,
-  });
+  try {
+    await client.module.moduleInstallationsControllerInstallModule({
+      versionId,
+      gameServerId,
+      userConfig: config?.userConfig ? JSON.stringify(config.userConfig) : undefined,
+      systemConfig: config?.systemConfig ? JSON.stringify(config.systemConfig) : undefined,
+    });
+  } catch (err) {
+    throw new Error(`Failed to install module version '${versionId}' on game server '${gameServerId}': ${formatApiError(err)}`);
+  }
 }
 
 /**
