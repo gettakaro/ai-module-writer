@@ -183,7 +183,12 @@ function createLockToken() {
 }
 
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  const durationMs = Math.max(0, Number(ms) || 0);
+  const deadline = Date.now() + durationMs;
+  while (Date.now() < deadline) {
+    // Takaro's VM does not expose setTimeout, so lock contention waits must use
+    // a simple synchronous delay instead of timer-based promises.
+  }
 }
 
 function buildLockPayload(token, now = new Date()) {

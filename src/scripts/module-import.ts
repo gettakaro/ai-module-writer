@@ -49,6 +49,12 @@ interface ExportResponse<T> {
   data: T;
 }
 
+interface InstallationSnapshot {
+  gameServerId: string;
+  userConfig: unknown;
+  systemConfig: unknown;
+}
+
 class TakaroApiError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
@@ -144,15 +150,47 @@ async function findExactModuleByName(client: Client, name: string): Promise<Modu
   return existing.data.data.find((mod) => mod.name === name) ?? null;
 }
 
+async function getInstallationsForModule(client: Client, moduleId: string): Promise<InstallationSnapshot[]> {
+  const installations = await client.module.moduleInstallationsControllerGetInstalledModules({
+    filters: { moduleId: [moduleId] },
+    limit: 100,
+  });
+
+  return installations.data.data.map((installation) => ({
+    gameServerId: installation.gameserverId,
+    userConfig: installation.userConfig,
+    systemConfig: installation.systemConfig,
+  }));
+}
+
+async function reinstallSnapshotsOnModule(
+  client: Client,
+  module: ModuleOutputDTO,
+  installations: InstallationSnapshot[],
+): Promise<void> {
+  if (installations.length === 0) return;
+
+  for (const installation of installations) {
+    await client.module.moduleInstallationsControllerInstallModule({
+      versionId: module.latestVersion.id,
+      gameServerId: installation.gameServerId,
+      userConfig: installation.userConfig === undefined ? undefined : JSON.stringify(installation.userConfig),
+      systemConfig: installation.systemConfig === undefined ? undefined : JSON.stringify(installation.systemConfig),
+    });
+  }
+}
+
 export async function importModuleExport(
   client: Client,
   moduleExport: TakaroModuleExport,
 ): Promise<ModuleOutputDTO> {
   const existingModule = await findExactModuleByName(client, moduleExport.name);
   let backupModuleExport: TakaroModuleExport | null = null;
+  let installationSnapshots: InstallationSnapshot[] = [];
 
   if (existingModule) {
     console.error(`Module '${moduleExport.name}' already exists (id: ${existingModule.id}), exporting backup before replacement...`);
+    installationSnapshots = await getInstallationsForModule(client, existingModule.id);
     const exported = await client.module.moduleControllerExport(existingModule.id);
     backupModuleExport = exported.data.data as TakaroModuleExport;
     await client.module.moduleControllerRemove(existingModule.id);
@@ -161,13 +199,30 @@ export async function importModuleExport(
 
   try {
     await client.module.moduleControllerImport(moduleExport);
+    const found = await findExactModuleByName(client, moduleExport.name);
+    if (!found) {
+      throw new Error(`Module '${moduleExport.name}' not found after import`);
+    }
+
+    await reinstallSnapshotsOnModule(client, found, installationSnapshots);
+    console.error(`Successfully imported module '${found.name}' (id: ${found.id})`);
+    return found;
   } catch (err) {
     if (!backupModuleExport) {
       throw err;
     }
 
     try {
+      const importedReplacement = await findExactModuleByName(client, moduleExport.name);
+      if (importedReplacement) {
+        await client.module.moduleControllerRemove(importedReplacement.id);
+      }
       await client.module.moduleControllerImport(backupModuleExport);
+      const restored = await findExactModuleByName(client, moduleExport.name);
+      if (!restored) {
+        throw new Error(`Module '${moduleExport.name}' not found after restore`);
+      }
+      await reinstallSnapshotsOnModule(client, restored, installationSnapshots);
       console.error(`Restored previous module '${moduleExport.name}' from backup after import failure`);
     } catch (restoreErr) {
       throw new Error(
@@ -177,14 +232,6 @@ export async function importModuleExport(
 
     throw new Error(`Import of '${moduleExport.name}' failed, but the previous module was restored. Cause: ${err}`);
   }
-
-  const found = await findExactModuleByName(client, moduleExport.name);
-  if (!found) {
-    throw new Error(`Module '${moduleExport.name}' not found after import`);
-  }
-
-  console.error(`Successfully imported module '${found.name}' (id: ${found.id})`);
-  return found;
 }
 
 async function takaroTokenRequest<T>(
@@ -212,6 +259,55 @@ async function takaroTokenRequest<T>(
   return parsed as T;
 }
 
+async function findExactModuleByNameWithToken(
+  auth: Required<Pick<TakaroAuthConfig, 'url' | 'domainId' | 'token'>>,
+  name: string,
+): Promise<ModuleOutputDTO | null> {
+  const searchResult = await takaroTokenRequest<SearchResponse<ModuleOutputDTO>>(auth, '/module/search', {
+    body: { filters: { name: [name] } },
+  });
+
+  return searchResult.data.find((mod) => mod.name === name) ?? null;
+}
+
+async function getInstallationsForModuleWithToken(
+  auth: Required<Pick<TakaroAuthConfig, 'url' | 'domainId' | 'token'>>,
+  moduleId: string,
+): Promise<InstallationSnapshot[]> {
+  const result = await takaroTokenRequest<SearchResponse<{ gameserverId: string; userConfig: unknown; systemConfig: unknown }>>(
+    auth,
+    '/module/installation/search',
+    {
+      body: { filters: { moduleId: [moduleId] }, limit: 100 },
+    },
+  );
+
+  return result.data.map((installation) => ({
+    gameServerId: installation.gameserverId,
+    userConfig: installation.userConfig,
+    systemConfig: installation.systemConfig,
+  }));
+}
+
+async function reinstallSnapshotsOnModuleWithToken(
+  auth: Required<Pick<TakaroAuthConfig, 'url' | 'domainId' | 'token'>>,
+  module: ModuleOutputDTO,
+  installations: InstallationSnapshot[],
+): Promise<void> {
+  if (installations.length === 0) return;
+
+  for (const installation of installations) {
+    await takaroTokenRequest(auth, '/module/installation/', {
+      body: {
+        versionId: module.latestVersion.id,
+        gameServerId: installation.gameServerId,
+        userConfig: installation.userConfig === undefined ? undefined : JSON.stringify(installation.userConfig),
+        systemConfig: installation.systemConfig === undefined ? undefined : JSON.stringify(installation.systemConfig),
+      },
+    });
+  }
+}
+
 async function importModuleExportWithToken(auth: TakaroAuthConfig, moduleExport: TakaroModuleExport): Promise<ModuleOutputDTO> {
   if (!auth.token) {
     throw new Error('TAKARO_TOKEN is required for token-only module imports');
@@ -223,14 +319,13 @@ async function importModuleExportWithToken(auth: TakaroAuthConfig, moduleExport:
     token: auth.token,
   };
 
-  const searchExisting = await takaroTokenRequest<SearchResponse<ModuleOutputDTO>>(tokenAuth, '/module/search', {
-    body: { filters: { name: [moduleExport.name] } },
-  });
-  const existingModule = searchExisting.data.find((mod) => mod.name === moduleExport.name) ?? null;
+  const existingModule = await findExactModuleByNameWithToken(tokenAuth, moduleExport.name);
   let backupModuleExport: TakaroModuleExport | null = null;
+  let installationSnapshots: InstallationSnapshot[] = [];
 
   if (existingModule) {
     console.error(`Module '${moduleExport.name}' already exists (id: ${existingModule.id}), exporting backup before replacement...`);
+    installationSnapshots = await getInstallationsForModuleWithToken(tokenAuth, existingModule.id);
     const exported = await takaroTokenRequest<ExportResponse<TakaroModuleExport>>(
       tokenAuth,
       `/module/${existingModule.id}/export`,
@@ -243,13 +338,30 @@ async function importModuleExportWithToken(auth: TakaroAuthConfig, moduleExport:
 
   try {
     await takaroTokenRequest(tokenAuth, '/module/import', { body: moduleExport });
+    const found = await findExactModuleByNameWithToken(tokenAuth, moduleExport.name);
+    if (!found) {
+      throw new Error(`Module '${moduleExport.name}' not found after import`);
+    }
+
+    await reinstallSnapshotsOnModuleWithToken(tokenAuth, found, installationSnapshots);
+    console.error(`Successfully imported module '${found.name}' (id: ${found.id})`);
+    return found;
   } catch (err) {
     if (!backupModuleExport) {
       throw err;
     }
 
     try {
+      const importedReplacement = await findExactModuleByNameWithToken(tokenAuth, moduleExport.name);
+      if (importedReplacement) {
+        await takaroTokenRequest(tokenAuth, `/module/${importedReplacement.id}`, { method: 'DELETE' });
+      }
       await takaroTokenRequest(tokenAuth, '/module/import', { body: backupModuleExport });
+      const restored = await findExactModuleByNameWithToken(tokenAuth, moduleExport.name);
+      if (!restored) {
+        throw new Error(`Module '${moduleExport.name}' not found after restore`);
+      }
+      await reinstallSnapshotsOnModuleWithToken(tokenAuth, restored, installationSnapshots);
       console.error(`Restored previous module '${moduleExport.name}' from backup after import failure`);
     } catch (restoreErr) {
       throw new Error(
@@ -259,17 +371,6 @@ async function importModuleExportWithToken(auth: TakaroAuthConfig, moduleExport:
 
     throw new Error(`Import of '${moduleExport.name}' failed, but the previous module was restored. Cause: ${err}`);
   }
-
-  const searchImported = await takaroTokenRequest<SearchResponse<ModuleOutputDTO>>(tokenAuth, '/module/search', {
-    body: { filters: { name: [moduleExport.name] } },
-  });
-  const found = searchImported.data.find((mod) => mod.name === moduleExport.name) ?? null;
-  if (!found) {
-    throw new Error(`Module '${moduleExport.name}' not found after import`);
-  }
-
-  console.error(`Successfully imported module '${found.name}' (id: ${found.id})`);
-  return found;
 }
 
 export async function importModuleExportFile(jsonFile: string): Promise<ModuleOutputDTO> {

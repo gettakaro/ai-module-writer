@@ -8,7 +8,8 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'url';
 import { Client } from '@takaro/apiclient';
 import { createClient } from '../../../test/helpers/client.js';
-import { cleanupTestModules, deleteModule } from '../../../test/helpers/modules.js';
+import { cleanupTestGameServers, cleanupTestModules, deleteModule, installModule } from '../../../test/helpers/modules.js';
+import { MockServerContext, startMockServer, stopMockServer } from '../../../test/helpers/mock-server.js';
 import {
   createTakaroClient,
   getTakaroAuthConfig,
@@ -28,13 +29,19 @@ const MODULE_NAME = 'test-hello-world';
 describe('module-import CLI', () => {
   let client: Client;
   let moduleId: string | undefined;
+  let mockCtx: MockServerContext | undefined;
 
   before(async () => {
     client = await createClient();
     await cleanupTestModules(client);
+    await cleanupTestGameServers(client);
   });
 
   after(async () => {
+    if (mockCtx) {
+      await stopMockServer(mockCtx.server, client, mockCtx.gameServer.id);
+    }
+
     const result = await client.module.moduleControllerSearch({ filters: { name: [MODULE_NAME] } });
     const existing = result.data.data.find((mod) => mod.name === MODULE_NAME);
     if (existing) {
@@ -154,6 +161,76 @@ describe('module-import CLI', () => {
     const imported = await searchExactModule();
     assert.ok(imported, 'Expected module-push.sh to import the module');
     moduleId = imported.id;
+  });
+
+  it('imports end-to-end through the username/password auth path', async () => {
+    const exportFile = await createModuleExport('CLI credential import');
+    const auth = getTakaroAuthConfig();
+
+    try {
+      await execFileAsync(process.execPath, [MODULE_IMPORT_SCRIPT, exportFile], {
+        env: {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          TAKARO_TOKEN: '',
+          TAKARO_HOST: auth.url,
+          TAKARO_DOMAIN_ID: auth.domainId,
+          TAKARO_USERNAME: auth.username ?? process.env.TAKARO_USERNAME ?? '',
+          TAKARO_PASSWORD: auth.password ?? process.env.TAKARO_PASSWORD ?? '',
+        },
+      });
+
+      const imported = await searchExactModule();
+      assert.ok(imported, 'Expected username/password CLI import to create the module');
+      moduleId = imported.id;
+    } finally {
+      await fs.rm(exportFile, { force: true });
+    }
+  });
+
+  it('preserves live installations across replacement imports', async () => {
+    const auth = getTakaroAuthConfig();
+    const tokenOnlyEnv = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      TAKARO_TOKEN: client.token ?? '',
+      TAKARO_HOST: auth.url,
+      TAKARO_DOMAIN_ID: auth.domainId,
+      TAKARO_USERNAME: '',
+      TAKARO_PASSWORD: '',
+    };
+    const updatedExport = await createModuleExport('Updated while keeping installation');
+    mockCtx = await startMockServer(client);
+
+    try {
+      await execFileAsync('bash', [MODULE_PUSH_SCRIPT, MODULE_DIR], { env: tokenOnlyEnv });
+      const baselineModule = await searchExactModule();
+      assert.ok(baselineModule, 'Expected baseline module import before installation migration test');
+      moduleId = baselineModule.id;
+
+      const baselineDetails = await client.module.moduleControllerGetOne(baselineModule.id);
+      await installModule(client, baselineDetails.data.data.latestVersion.id, mockCtx.gameServer.id);
+
+      await execFileAsync(process.execPath, [MODULE_IMPORT_SCRIPT, updatedExport], { env: tokenOnlyEnv });
+      const replacementModule = await searchExactModule();
+      assert.ok(replacementModule, 'Expected replacement module after re-import');
+      moduleId = replacementModule.id;
+
+      const installations = await client.module.moduleInstallationsControllerGetInstalledModules({
+        filters: {
+          moduleId: [replacementModule.id],
+          gameserverId: [mockCtx.gameServer.id],
+        },
+      });
+
+      assert.equal(installations.data.data.length, 1, 'Expected re-imported module to stay installed on the same game server');
+    } finally {
+      await fs.rm(updatedExport, { force: true });
+      if (mockCtx) {
+        await stopMockServer(mockCtx.server, client, mockCtx.gameServer.id);
+        mockCtx = undefined;
+      }
+    }
   });
 
   it('restores the previous module when a replacement import fails', async () => {

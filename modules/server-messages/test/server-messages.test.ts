@@ -653,6 +653,16 @@ describe('server-messages: broadcast cronjob', () => {
     );
   });
 
+  it('rejects installs with more than 100 configured messages', async () => {
+    await assert.rejects(
+      reinstall({
+        order: 'sequential',
+        messages: Array.from({ length: 101 }, (_, index) => ({ text: `Message ${index + 1}` })),
+      }),
+      /maxItems|validation|config|userConfig/i,
+    );
+  });
+
   it('builds a bounded weighted bag from valid message weights', async () => {
     await reinstall({
       order: 'random',
