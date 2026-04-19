@@ -19,7 +19,8 @@
             "text": {
               "type": "string",
               "minLength": 1,
-              "description": "The message text to broadcast. Supports {playerCount} and {serverName}; unknown placeholders are left unchanged."
+              "pattern": ".*\\S.*",
+              "description": "The message text to broadcast. Supports {playerCount} and {serverName}; unknown placeholders are left unchanged. Whitespace-only messages are ignored."
             },
             "weight": {
               "type": "integer",

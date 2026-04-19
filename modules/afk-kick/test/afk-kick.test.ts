@@ -68,6 +68,13 @@ describe('afk-kick: check-afk cronjob', () => {
         kickMessage: 'Kicked for being AFK',
         positionThreshold: 5,
       },
+      systemConfig: {
+        cronJobs: {
+          'check-afk': {
+            temporalValue: '0 0 1 1 *',
+          },
+        },
+      },
     });
 
     const cronjob = mod.latestVersion.cronJobs[0];

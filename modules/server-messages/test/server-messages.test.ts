@@ -25,6 +25,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const MODULE_DIR = path.resolve(__dirname, '..');
 const STATE_KEY = 'server_messages_state';
+const LOCK_KEY = 'server_messages_lock';
 
 describe('server-messages: broadcast cronjob', () => {
   let client: Client;
@@ -86,15 +87,19 @@ describe('server-messages: broadcast cronjob', () => {
     throw new Error(`Timed out waiting for ${expected} online players`);
   }
 
-  async function getStateVariable(): Promise<VariableOutputDTO | null> {
+  async function getVariable(key: string): Promise<VariableOutputDTO | null> {
     const res = await client.variable.variableControllerSearch({
       filters: {
-        key: [STATE_KEY],
+        key: [key],
         gameServerId: [ctx.gameServer.id],
         moduleId: [moduleId],
       },
     });
     return res.data.data[0] ?? null;
+  }
+
+  async function getStateVariable(): Promise<VariableOutputDTO | null> {
+    return getVariable(STATE_KEY);
   }
 
   async function deleteStateVariable(): Promise<void> {
@@ -340,6 +345,21 @@ describe('server-messages: broadcast cronjob', () => {
     );
   });
 
+  it('ignores whitespace-only messages instead of broadcasting blank chat lines', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: '   ' }],
+    });
+
+    const result = await triggerCronjobAndCollectMessages();
+    assert.equal(result.success, true, `Expected whitespace-only run to succeed, logs: ${JSON.stringify(result.logs)}`);
+    assert.deepEqual(result.chatMessages, []);
+    assert.ok(
+      result.logs.some((log) => log.includes('no messages configured')),
+      `Expected whitespace-only message to be treated as empty config, got: ${JSON.stringify(result.logs)}`,
+    );
+  });
+
   it('renders playerCount and serverName placeholders and leaves unknown placeholders unchanged', async () => {
     await reinstall({
       order: 'sequential',
@@ -377,6 +397,32 @@ describe('server-messages: broadcast cronjob', () => {
     assert.deepEqual(reset.chatMessages, ['New 1']);
   });
 
+  it('resets random shuffle state when only weights change', async () => {
+    await reinstall({
+      order: 'random',
+      messages: [{ text: 'A', weight: 1 }, { text: 'B', weight: 1 }],
+    });
+
+    await triggerCronjobAndCollectMessages();
+
+    await reinstall(
+      {
+        order: 'random',
+        messages: [{ text: 'A', weight: 1 }, { text: 'B', weight: 3 }],
+      },
+      { clearState: false },
+    );
+
+    const result = await triggerCronjobAndCollectMessages();
+    assert.equal(result.success, true, `Expected weight-change run to succeed, logs: ${JSON.stringify(result.logs)}`);
+
+    const stateVariable = await getStateVariable();
+    assert.ok(stateVariable, 'Expected state variable after weight-change reset');
+    const state = JSON.parse(stateVariable.value) as { bag?: number[]; cursor?: number };
+    assert.equal(state.bag?.length, 4, `Expected rebuilt weighted bag to reflect new weights, got ${stateVariable.value}`);
+    assert.equal(state.cursor, 1, `Expected rebuilt bag cursor to advance from the fresh bag, got ${stateVariable.value}`);
+  });
+
   it('recovers from malformed persisted state without crashing', async () => {
     await reinstall({
       order: 'sequential',
@@ -398,6 +444,83 @@ describe('server-messages: broadcast cronjob', () => {
     assert.ok(stateVariable, 'Expected malformed state to be rewritten');
     const state = JSON.parse(stateVariable.value) as { sequentialIndex?: number };
     assert.equal(state.sequentialIndex, 1, `Expected malformed state reset to first advance, got ${stateVariable.value}`);
+  });
+
+  it('coerces partially corrupt persisted state into a safe sequential state', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: 'First' }, { text: 'Second' }],
+    });
+
+    await triggerCronjobAndCollectMessages();
+    const existingState = await getStateVariable();
+    assert.ok(existingState, 'Expected a valid state variable before corrupting it');
+    const parsedExistingState = JSON.parse(existingState.value) as { fingerprint?: string };
+
+    await client.variable.variableControllerUpdate(existingState.id, {
+      value: JSON.stringify({
+        fingerprint: parsedExistingState.fingerprint,
+        sequentialIndex: 'bad-index',
+        bag: [0, -1, 1.5, 2],
+        cursor: -10,
+      }),
+    });
+
+    const result = await triggerCronjobAndCollectMessages();
+    assert.equal(result.success, true, `Expected corrupt-state run to succeed, logs: ${JSON.stringify(result.logs)}`);
+    assert.deepEqual(result.chatMessages, ['First']);
+
+    const rewrittenState = await getStateVariable();
+    assert.ok(rewrittenState, 'Expected corrupt state to be rewritten');
+    const parsedState = JSON.parse(rewrittenState.value) as { sequentialIndex?: number; bag?: number[]; cursor?: number };
+    assert.equal(parsedState.sequentialIndex, 1, `Expected coerced sequential index to restart from zero, got ${rewrittenState.value}`);
+    assert.deepEqual(parsedState.bag, [], `Expected invalid bag entries to be discarded in sequential mode, got ${rewrittenState.value}`);
+    assert.equal(parsedState.cursor, 0, `Expected invalid cursor to coerce to zero, got ${rewrittenState.value}`);
+  });
+
+  it('self-heals a stale execution lock before broadcasting', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: 'Alpha' }, { text: 'Beta' }],
+    });
+
+    await client.variable.variableControllerCreate({
+      key: LOCK_KEY,
+      value: JSON.stringify({ acquiredAt: new Date(Date.now() - 60000).toISOString() }),
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+      gameServerId: ctx.gameServer.id,
+      moduleId,
+    });
+
+    const result = await triggerCronjobAndCollectMessages();
+    assert.equal(result.success, true, `Expected stale-lock run to succeed, logs: ${JSON.stringify(result.logs)}`);
+    assert.deepEqual(result.chatMessages, ['Alpha']);
+
+    const lockVariable = await getVariable(LOCK_KEY);
+    assert.equal(lockVariable, null, 'Expected stale execution lock to be cleared after broadcast completes');
+  });
+
+  it('builds a bounded weighted bag from normalized message weights', async () => {
+    await reinstall({
+      order: 'random',
+      messages: [{ text: 'Low', weight: 0 }, { text: 'High', weight: 250.9 }],
+    });
+
+    const result = await triggerCronjobAndCollectMessages();
+    assert.equal(result.success, true, `Expected normalized-weight run to succeed, logs: ${JSON.stringify(result.logs)}`);
+
+    const stateVariable = await getStateVariable();
+    assert.ok(stateVariable, 'Expected state variable after normalized-weight run');
+    const state = JSON.parse(stateVariable.value) as { bag?: number[]; cursor?: number };
+    const counts = (state.bag ?? []).reduce<Record<number, number>>((acc, index) => {
+      acc[index] = (acc[index] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    assert.equal(state.bag?.length, 101, `Expected bounded weighted bag length 101, got ${stateVariable.value}`);
+    assert.equal(counts[0], 1, `Expected low weight to clamp to one slot, got ${stateVariable.value}`);
+    assert.equal(counts[1], 100, `Expected high weight to clamp to 100 slots, got ${stateVariable.value}`);
+    assert.equal(state.cursor, 1, `Expected normalized weighted bag cursor to advance once, got ${stateVariable.value}`);
   });
 
   it('creates the state variable on first run and updates the same record on later runs', async () => {

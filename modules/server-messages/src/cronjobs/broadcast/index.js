@@ -74,6 +74,8 @@ async function main() {
       nextState = {
         ...nextState,
         sequentialIndex: (messageIndex + 1) % messages.length,
+        bag: [],
+        cursor: 0,
       };
     }
 

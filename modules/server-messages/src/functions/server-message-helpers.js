@@ -6,12 +6,14 @@ export const MAX_MESSAGE_WEIGHT = 100;
 const LOCK_RETRY_DELAY_MS = 250;
 const LOCK_TIMEOUT_MS = 10000;
 const LOCK_TTL_MS = 30000;
+const PLAYER_COUNT_PAGE_SIZE = 100;
+const MAX_PLAYER_COUNT_PAGES = 100;
 
 export function normalizeMessages(rawMessages) {
   if (!Array.isArray(rawMessages)) return [];
 
   return rawMessages
-    .filter((message) => message && typeof message.text === 'string' && message.text.length > 0)
+    .filter((message) => message && typeof message.text === 'string' && message.text.trim().length > 0)
     .map((message) => ({
       text: message.text,
       weight: normalizeWeight(message.weight),
@@ -123,11 +125,52 @@ export async function writeVariable(gameServerId, moduleId, key, value) {
 }
 
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    // Takaro's function runtime does not expose setTimeout, so busy-wait briefly.
+  }
 }
 
 function isConflictError(err) {
   return err?.response?.status === 409 || /duplicate key|already exists|unique/i.test(String(err?.message ?? err));
+}
+
+function parseTimestamp(value) {
+  const timestamp = Date.parse(String(value ?? ''));
+  return Number.isNaN(timestamp) ? null : timestamp;
+}
+
+function parseLockExpiryMs(lockVariable, ttlMs) {
+  const explicitExpiry = parseTimestamp(lockVariable?.expiresAt);
+  if (explicitExpiry !== null) return explicitExpiry;
+
+  try {
+    const parsedValue = JSON.parse(lockVariable?.value ?? '{}');
+    const acquiredAt = parseTimestamp(parsedValue?.acquiredAt);
+    if (acquiredAt !== null) return acquiredAt + ttlMs;
+  } catch {
+    // Ignore malformed lock payloads and treat them as stale below.
+  }
+
+  return null;
+}
+
+function isLockStale(lockVariable, ttlMs, now = Date.now()) {
+  const expiryMs = parseLockExpiryMs(lockVariable, ttlMs);
+  if (expiryMs === null) return true;
+  return expiryMs <= now;
+}
+
+async function tryDeleteVariable(variableId) {
+  try {
+    await takaro.variable.variableControllerDelete(variableId);
+    return true;
+  } catch (err) {
+    if (err?.response?.status === 404) {
+      return false;
+    }
+    throw err;
+  }
 }
 
 export async function acquireExecutionLock(gameServerId, moduleId, options = {}) {
@@ -149,7 +192,17 @@ export async function acquireExecutionLock(gameServerId, moduleId, options = {})
       return res.data.data;
     } catch (err) {
       if (!isConflictError(err)) throw err;
-      await sleep(retryDelayMs);
+
+      const existingLock = await findVariable(gameServerId, moduleId, SERVER_MESSAGES_LOCK_KEY);
+      if (existingLock?.id && isLockStale(existingLock, ttlMs)) {
+        const deleted = await tryDeleteVariable(existingLock.id);
+        if (deleted) {
+          console.warn(`server-message-helpers: cleared stale execution lock ${existingLock.id}`);
+        }
+        continue;
+      }
+
+      sleep(retryDelayMs);
     }
   }
 
@@ -193,16 +246,30 @@ export function shuffleBag(entries) {
 }
 
 export async function getOnlinePlayerCount(gameServerId) {
-  const res = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
-    filters: {
-      gameServerId: [gameServerId],
-      online: [true],
-    },
-    limit: 1,
-    page: 0,
-  });
+  let countedPlayers = 0;
 
-  return typeof res.data.meta?.total === 'number' ? res.data.meta.total : res.data.data.length;
+  for (let page = 0; page < MAX_PLAYER_COUNT_PAGES; page++) {
+    const res = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
+      filters: {
+        gameServerId: [gameServerId],
+        online: [true],
+      },
+      limit: PLAYER_COUNT_PAGE_SIZE,
+      page,
+    });
+
+    if (typeof res.data.meta?.total === 'number') {
+      return res.data.meta.total;
+    }
+
+    countedPlayers += res.data.data.length;
+    if (res.data.data.length < PLAYER_COUNT_PAGE_SIZE) {
+      return countedPlayers;
+    }
+  }
+
+  console.warn(`server-message-helpers: player count exceeded ${MAX_PLAYER_COUNT_PAGES} pages without meta.total; returning partial count ${countedPlayers}`);
+  return countedPlayers;
 }
 
 export async function getServerName(gameServerId) {
