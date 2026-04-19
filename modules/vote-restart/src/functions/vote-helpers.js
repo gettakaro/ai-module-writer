@@ -136,5 +136,5 @@ export function computeThreshold(onlineCount, percent) {
 }
 
 export function getEffectiveRestartDelaySeconds(config) {
-  return Math.max(1, Math.ceil(Number(config?.restartDelay ?? 0) || 0));
+  return Math.max(0, Math.ceil(Number(config?.restartDelay ?? 0) || 0));
 }

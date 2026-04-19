@@ -17,6 +17,7 @@ import {
   assignPermissions,
   cleanupRole,
 } from '../../../test/helpers/modules.js';
+import { getEffectiveRestartDelaySeconds } from '../src/functions/vote-helpers.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -112,6 +113,16 @@ function makeCronjobHelper(
 //   10. /voteyes with no active vote → rejected
 //   11. /votestatus with no active vote → "No active restart vote"
 //   12. Start new vote, manipulate state to simulate expiry, trigger cronjob, cooldown enforced
+
+describe('vote-restart restartDelay normalization', () => {
+  it('ceil()s positive fractional values and clamps zero/negative values to zero', () => {
+    assert.equal(getEffectiveRestartDelaySeconds({ restartDelay: 0 }), 0);
+    assert.equal(getEffectiveRestartDelaySeconds({ restartDelay: 2.2 }), 3);
+    assert.equal(getEffectiveRestartDelaySeconds({ restartDelay: 5.0 }), 5);
+    assert.equal(getEffectiveRestartDelaySeconds({ restartDelay: -4 }), 0);
+    assert.equal(getEffectiveRestartDelaySeconds({ restartDelay: '1.1' }), 2);
+  });
+});
 
 describe('vote-restart module', () => {
   let client: Client;

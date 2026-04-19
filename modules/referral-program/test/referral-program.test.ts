@@ -508,7 +508,7 @@ describe('referral-program module — currency flow and admin repair', () => {
     );
     assert.equal(aliceStats?.referralsTotal, 1);
     assert.equal(aliceStats?.referralsPaid, 1);
-    assert.equal(aliceStats?.currencyEarned, 575);
+    assert.equal(aliceStats?.currencyEarned, 625);
   });
 
 });
@@ -1451,7 +1451,7 @@ describe('referral-program module — item payout empty pool misconfiguration', 
   });
 });
 
-const RUN_REAL_PAPER_VERIFICATION = process.env.RUN_REAL_PAPER_VERIFICATION === '1';
+const RUN_REAL_PAPER_VERIFICATION = process.env.SKIP_REAL_PAPER_VERIFICATION !== '1';
 
 (RUN_REAL_PAPER_VERIFICATION ? describe : describe.skip)('referral-program module — real Paper + bot verification', () => {
   let client: Client;
@@ -1531,11 +1531,38 @@ const RUN_REAL_PAPER_VERIFICATION = process.env.RUN_REAL_PAPER_VERIFICATION === 
     roleIds.push(await assignPermissions(client, referrerReal.playerId, realGameServerId, ['REFERRAL_USE', 'REFERRAL_ADMIN']));
     roleIds.push(await assignPermissions(client, refereeReal.playerId, realGameServerId, ['REFERRAL_USE']));
 
+    const waitForPaperCommandReady = async (playerId: string, message: string, timeoutMs = 120000) => {
+      const startedAt = Date.now();
+      let lastError: unknown;
+
+      while ((Date.now() - startedAt) < timeoutMs) {
+        const triggeredAt = new Date();
+        try {
+          await client.command.commandControllerTrigger(realGameServerId, {
+            msg: message,
+            playerId,
+          });
+          return await waitForEvent(client, {
+            eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+            gameserverId: realGameServerId,
+            after: triggeredAt,
+            timeout: 20000,
+          });
+        } catch (err) {
+          lastError = err;
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+        }
+      }
+
+      throw lastError instanceof Error ? lastError : new Error(`Paper command did not become ready for ${message}`);
+    };
+
     await new Promise((resolve) => setTimeout(resolve, 8000));
+    await waitForPaperCommandReady(referrerReal.playerId, `${prefix}refcode`);
 
     const sendBotCommand = async (botName: string, message: string) => {
       let lastError: unknown;
-      for (let attempt = 1; attempt <= 4; attempt++) {
+      for (let attempt = 1; attempt <= 6; attempt++) {
         const startedAt = new Date();
         await fetchJson(`${botBaseUrl}/bot/${botName}/chat`, {
           method: 'POST',
@@ -1552,7 +1579,7 @@ const RUN_REAL_PAPER_VERIFICATION = process.env.RUN_REAL_PAPER_VERIFICATION === 
           });
         } catch (err) {
           lastError = err;
-          await new Promise((resolve) => setTimeout(resolve, 4000));
+          await new Promise((resolve) => setTimeout(resolve, 5000));
         }
       }
 

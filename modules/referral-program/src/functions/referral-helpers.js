@@ -581,6 +581,7 @@ function serializePreparedRewardFields(reward, multiplierInfo, reason, retries =
     vipTier: multiplierInfo.tier,
     vipMultiplier: multiplierInfo.multiplier,
     payoutReason: reason,
+    rewardDeliveryAttemptedAt: undefined,
     retries,
   };
 }
@@ -616,6 +617,7 @@ function clearPreparedReward(link) {
     vipMultiplier: undefined,
     payoutPreparedAt: undefined,
     payoutReason: undefined,
+    rewardDeliveryAttemptedAt: undefined,
     rewardGranted: undefined,
     rewardGrantedAt: undefined,
     paidAt: undefined,
@@ -700,7 +702,8 @@ export async function rollbackWelcomeBonus(gameServerId, refereeId, amount) {
 }
 
 export async function previewReferrerRewardRollback(gameServerId, referrerId, link) {
-  if (!referrerId || !link || link.status !== 'paid') {
+  const rewardWasPotentiallyDelivered = link?.status === 'paid' || (link?.status === 'paying' && !!link?.rewardDeliveryAttemptedAt);
+  if (!referrerId || !link || !rewardWasPotentiallyDelivered) {
     return { rolledBack: false, skipped: true, reason: 'not-paid' };
   }
 
@@ -788,6 +791,8 @@ export function describePayoutDelayReason(reason) {
       return 'another payout update is already in progress';
     case 'payout-finalization-pending':
       return 'the reward was prepared and will be finalized on the next retry';
+    case 'payout-verification-required':
+      return 'reward delivery may already have succeeded, so an admin should verify the payout before retrying';
     case 'payout-failed':
       return 'reward delivery failed and will be retried automatically';
     case 'rejected-after-retries':
@@ -823,26 +828,57 @@ export function describeReferralProblemForPlayer(reason) {
   return 'Reward delivery failed repeatedly. Please ask an admin to review this referral.';
 }
 
+async function sendReferralMessage(gameServerId, message) {
+  await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
+    message,
+    opts: {},
+  });
+}
+
 async function notifyReferralPayout(gameServerId, referrerId, refereeId, reward) {
   try {
     const [referrerName, refereeName] = await Promise.all([
       getPlayerName(referrerId),
       getPlayerName(refereeId),
     ]);
-    const summary = `${referrerName} earned ${describeReward(reward)} thanks to ${refereeName}'s completed referral.`;
+    const summary = `[Referral] ${referrerName} earned ${describeReward(reward)} thanks to ${refereeName}'s completed referral.`;
     console.log(
       `referral-program: payout notification referrer=${referrerName} (${referrerId}), referee=${refereeName} (${refereeId}), reward=${describeReward(reward)}`,
     );
 
     try {
-      await takaro.gameserver.gameServerControllerExecuteCommand(gameServerId, {
-        command: `say [Referral] ${summary}`,
-      });
+      await sendReferralMessage(gameServerId, summary);
     } catch (broadcastErr) {
       console.warn(`referral-program: failed to broadcast payout notification in-game: ${broadcastErr}`);
     }
   } catch (err) {
     console.error(`referral-program: failed to record payout notification for referrer=${referrerId}, referee=${refereeId}: ${err}`);
+  }
+}
+
+export async function notifyReferralRollback(gameServerId, referrerId, refereeId, details) {
+  try {
+    const [referrerName, refereeName] = await Promise.all([
+      getPlayerName(referrerId),
+      getPlayerName(refereeId),
+    ]);
+    const lines = [
+      `[Referral] Admin rollback: ${refereeName}'s referral link with ${referrerName} was removed.`,
+    ];
+
+    if ((details?.welcomeBonusRolledBack ?? 0) > 0) {
+      lines.push(`${refereeName}'s welcome bonus rollback: ${details.welcomeBonusRolledBack}.`);
+    }
+
+    if (details?.rewardRollback?.rewardType === 'currency' && (details.rewardRollback.amount ?? 0) > 0) {
+      lines.push(`${referrerName}'s referral reward rollback: ${details.rewardRollback.amount} currency.`);
+    } else if (details?.rewardRollback?.rewardType === 'item') {
+      lines.push(`${referrerName}'s referral item reward could not be clawed back automatically.`);
+    }
+
+    await sendReferralMessage(gameServerId, lines.join(' '));
+  } catch (err) {
+    console.error(`referral-program: failed to send rollback notification for referrer=${referrerId}, referee=${refereeId}: ${err}`);
   }
 }
 
@@ -906,15 +942,41 @@ export async function applyPaidReferral({
 
           if (currentLink.rewardGranted) {
             console.log(`referral-program: resuming payout finalization for referee=${refereeId}, referrer=${effectiveReferrerId}`);
+          } else if (currentLink.rewardDeliveryAttemptedAt) {
+            console.error(
+              `referral-program: payout for referee=${refereeId}, referrer=${effectiveReferrerId} needs manual verification because reward delivery was attempted at ${currentLink.rewardDeliveryAttemptedAt} but confirmation was not persisted.`,
+            );
+            return {
+              paid: false,
+              reason: 'payout-verification-required',
+              reward,
+              link: currentLink,
+            };
           } else {
             console.log(`referral-program: resuming payout reward delivery for referee=${refereeId}, referrer=${effectiveReferrerId}`);
-            await executePreparedReward(gameServerId, effectiveReferrerId, reward);
             checkpointLink = {
               ...currentLink,
+              rewardDeliveryAttemptedAt: new Date().toISOString(),
+            };
+            await setReferralLink(gameServerId, moduleId, refereeId, checkpointLink);
+            await executePreparedReward(gameServerId, effectiveReferrerId, reward);
+            checkpointLink = {
+              ...checkpointLink,
               rewardGranted: true,
               rewardGrantedAt: new Date().toISOString(),
             };
-            await setReferralLink(gameServerId, moduleId, refereeId, checkpointLink);
+            try {
+              await setReferralLink(gameServerId, moduleId, refereeId, checkpointLink);
+            } catch (checkpointErr) {
+              console.error(`referral-program: payout for referee=${refereeId} needs manual verification after reward delivery during resume: ${checkpointErr}`);
+              return {
+                paid: false,
+                reason: 'payout-verification-required',
+                reward,
+                error: getErrorMessage(checkpointErr),
+                link: checkpointLink,
+              };
+            }
           }
         } else {
           multiplierInfo = getVipMultiplier(referrerPog);
@@ -929,13 +991,29 @@ export async function applyPaidReferral({
           };
           await setReferralLink(gameServerId, moduleId, refereeId, checkpointLink);
           try {
+            checkpointLink = {
+              ...checkpointLink,
+              rewardDeliveryAttemptedAt: new Date().toISOString(),
+            };
+            await setReferralLink(gameServerId, moduleId, refereeId, checkpointLink);
             await executePreparedReward(gameServerId, effectiveReferrerId, reward);
             checkpointLink = {
               ...checkpointLink,
               rewardGranted: true,
               rewardGrantedAt: new Date().toISOString(),
             };
-            await setReferralLink(gameServerId, moduleId, refereeId, checkpointLink);
+            try {
+              await setReferralLink(gameServerId, moduleId, refereeId, checkpointLink);
+            } catch (checkpointErr) {
+              console.error(`referral-program: payout for referee=${refereeId} needs manual verification after reward delivery: ${checkpointErr}`);
+              return {
+                paid: false,
+                reason: 'payout-verification-required',
+                reward,
+                error: getErrorMessage(checkpointErr),
+                link: checkpointLink,
+              };
+            }
           } catch (err) {
             await setReferralLink(
               gameServerId,
@@ -1071,8 +1149,11 @@ export async function maybePayReferral(gameServerId, moduleId, refereeId, mod, r
     const latestLink = await getReferralLink(gameServerId, moduleId, refereeId);
 
     if (latestLink?.status === 'paying') {
+      const reasonCode = latestLink.rewardDeliveryAttemptedAt && !latestLink.rewardGranted
+        ? 'payout-verification-required'
+        : 'payout-finalization-pending';
       console.error(`referral-program: payout finalization paused for referee=${refereeId}. Error: ${message}`);
-      return { paid: false, reason: 'payout-finalization-pending', error: message };
+      return { paid: false, reason: reasonCode, error: message };
     }
 
     const retryBase = latestLink ?? link;

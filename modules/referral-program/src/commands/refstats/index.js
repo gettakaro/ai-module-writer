@@ -45,20 +45,26 @@ async function main() {
     `Your referrer: ${referrerName ? referrerName : 'none'}`,
   ];
 
-  const statusLink = link ?? latestRejectedOutgoingReferral;
-  if (statusLink) {
-    lines.push(`Your referral status: ${describeReferralStatusForPlayer(statusLink)}`);
-    if (statusLink.status === 'pending' && link) {
+  if (link) {
+    lines.push(`Your referral status: ${describeReferralStatusForPlayer(link)}`);
+    if (link.status === 'pending') {
       const currentPlaytimeMinutes = getPlaytimeMinutes(currentPog);
-      const earnedSinceLink = Math.max(0, currentPlaytimeMinutes - (Number(statusLink.playtimeAtLink ?? 0) || 0));
+      const earnedSinceLink = Math.max(0, currentPlaytimeMinutes - (Number(link.playtimeAtLink ?? 0) || 0));
       const remainingMinutes = Math.max(0, config.playtimeThresholdMinutes - earnedSinceLink);
       lines.push(
         `Qualifying progress: ${formatMinutes(earnedSinceLink)}/${formatMinutes(config.playtimeThresholdMinutes)} minutes (${formatMinutes(remainingMinutes)} remaining)`,
       );
     }
-    if (statusLink.status === 'rejected') {
-      lines.push(`Payout issue: ${describeReferralProblemForPlayer(statusLink.rejectionReason)}`);
+    if (link.status === 'rejected') {
+      lines.push(`Payout issue: ${describeReferralProblemForPlayer(link.rejectionReason)}`);
     }
+  } else if (latestRejectedOutgoingReferral) {
+    const affectedPlayerName = latestRejectedOutgoingReferral.refereePlayerId
+      ? await getPlayerName(latestRejectedOutgoingReferral.refereePlayerId)
+      : 'Unknown player';
+    lines.push(`Latest referred player needing admin help: ${affectedPlayerName}`);
+    lines.push(`Their referral status: ${describeReferralStatusForPlayer(latestRejectedOutgoingReferral)}`);
+    lines.push(`Payout issue: ${describeReferralProblemForPlayer(latestRejectedOutgoingReferral.rejectionReason)}`);
   }
 
   console.log(`referral-program: refstats player=${pog.playerId} summary=${lines.join(' | ')}`);
