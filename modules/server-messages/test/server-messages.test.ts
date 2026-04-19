@@ -24,7 +24,7 @@ import {
   buildConfigFingerprint,
   normalizeMessages,
   SERVER_MESSAGES_DELIVERY_RECEIPT_KEY,
-} from '../src/functions/server-message-helpers.js';
+} from '../src/functions/server-message-helpers.shared.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -829,6 +829,73 @@ describe('server-messages: broadcast cronjob', () => {
     const retried = await triggerCronjobAndCollectMessages();
     assert.equal(retried.success, true, `Expected retry after restoring server availability to succeed, logs: ${JSON.stringify(retried.logs)}`);
     assert.deepEqual(retried.chatMessages, ['Fail Second']);
+  });
+
+  it('discards malformed delivery receipts and continues with a normal broadcast', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: 'Malformed receipt fallback' }],
+    });
+
+    await client.variable.variableControllerCreate({
+      key: SERVER_MESSAGES_DELIVERY_RECEIPT_KEY,
+      value: '{not-json',
+      gameServerId: ctx.gameServer.id,
+      moduleId,
+    });
+
+    const result = await triggerCronjobAndCollectMessages();
+    assert.equal(result.success, true, `Expected malformed-receipt run to succeed, logs: ${JSON.stringify(result.logs)}`);
+    assert.deepEqual(result.chatMessages, ['Malformed receipt fallback']);
+
+    const receiptVariable = await getVariable(SERVER_MESSAGES_DELIVERY_RECEIPT_KEY);
+    assert.equal(receiptVariable, null, 'Expected malformed delivery receipt to be discarded during recovery');
+  });
+
+  it('discards stale delivery receipts whose fingerprint no longer matches the config', async () => {
+    const oldMessages = [{ text: 'Old receipt message' }];
+    await reinstall({
+      order: 'sequential',
+      messages: oldMessages,
+    });
+
+    const oldFingerprint = buildConfigFingerprint('sequential', normalizeMessages(oldMessages));
+    await client.variable.variableControllerCreate({
+      key: SERVER_MESSAGES_DELIVERY_RECEIPT_KEY,
+      value: JSON.stringify({
+        fingerprint: oldFingerprint,
+        nextState: {
+          fingerprint: oldFingerprint,
+          sequentialIndex: 1,
+          bag: [],
+          cursor: 0,
+        },
+        messageIndex: 0,
+        renderedMessage: 'Old receipt message',
+        sentAt: new Date().toISOString(),
+      }),
+      gameServerId: ctx.gameServer.id,
+      moduleId,
+    });
+
+    await reinstall(
+      {
+        order: 'sequential',
+        messages: [{ text: 'New config first' }, { text: 'New config second' }],
+      },
+      { clearState: false },
+    );
+
+    const result = await triggerCronjobAndCollectMessages();
+    assert.equal(result.success, true, `Expected stale-receipt run to succeed, logs: ${JSON.stringify(result.logs)}`);
+    assert.deepEqual(result.chatMessages, ['New config first']);
+    assert.ok(
+      result.logs.some((log) => log.includes('discarded stale delivery receipt')),
+      `Expected stale receipt discard log, got: ${JSON.stringify(result.logs)}`,
+    );
+
+    const receiptVariable = await getVariable(SERVER_MESSAGES_DELIVERY_RECEIPT_KEY);
+    assert.equal(receiptVariable, null, 'Expected stale delivery receipt to be cleared before broadcasting the new config');
   });
 
   it('recovers persisted next-state from a delivery receipt without rebroadcasting', async () => {

@@ -68,6 +68,11 @@ interface VariableSnapshot {
   playerId?: string;
 }
 
+const TRANSIENT_MODULE_VARIABLE_PATTERNS = [
+  /(?:^|_)lock$/i,
+  /(?:^|_)delivery_receipt$/i,
+];
+
 interface RolePermissionSnapshot {
   permissionId: string;
   count?: number;
@@ -108,6 +113,50 @@ class TakaroApiError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
   }
+}
+
+function describeError(err: unknown): string {
+  if (err instanceof Error && err.message) {
+    return err.message;
+  }
+
+  const maybeResponse = (err as { response?: { data?: unknown; status?: number } })?.response;
+  const apiMessage = (maybeResponse?.data as { meta?: { error?: { message?: string } } } | undefined)?.meta?.error?.message;
+  if (apiMessage) {
+    return apiMessage;
+  }
+
+  if (typeof err === 'string') {
+    return err;
+  }
+
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
+function isExpiredVariable(variable: VariableSnapshot, now = Date.now()): boolean {
+  if (!variable.expiresAt) return false;
+  const expiresAt = Date.parse(variable.expiresAt);
+  return Number.isFinite(expiresAt) && expiresAt <= now;
+}
+
+function isTransientModuleVariable(variable: VariableSnapshot): boolean {
+  return TRANSIENT_MODULE_VARIABLE_PATTERNS.some((pattern) => pattern.test(variable.key));
+}
+
+function shouldRestoreModuleVariable(variable: VariableSnapshot): boolean {
+  if (isExpiredVariable(variable)) {
+    return false;
+  }
+
+  if (isTransientModuleVariable(variable)) {
+    return false;
+  }
+
+  return true;
 }
 
 export function getTakaroAuthConfig(env: NodeJS.ProcessEnv = process.env): TakaroAuthConfig {
@@ -458,7 +507,7 @@ async function snapshotReplacementState(ops: ImportOps, existingModule: ModuleOu
 
   return {
     installations,
-    variables,
+    variables: variables.filter(shouldRestoreModuleVariable),
     rolesUsingModulePermissions,
     permissionIdToCode,
   };
@@ -568,11 +617,11 @@ async function importModuleExportWithOps(ops: ImportOps, moduleExport: TakaroMod
       console.error(`Restored previous module '${moduleExport.name}' from backup after import failure`);
     } catch (restoreErr) {
       throw new Error(
-        `Import of '${moduleExport.name}' failed and automatic restore also failed. Import error: ${err}. Restore error: ${restoreErr}`,
+        `Import of '${moduleExport.name}' failed and automatic restore also failed. Import error: ${describeError(err)}. Restore error: ${describeError(restoreErr)}`,
       );
     }
 
-    throw new Error(`Import of '${moduleExport.name}' failed, but the previous module was restored. Cause: ${err}`);
+    throw new Error(`Import of '${moduleExport.name}' failed, but the previous module was restored. Cause: ${describeError(err)}`);
   }
 }
 
@@ -848,7 +897,7 @@ function createTokenImportOps(
   };
 }
 
-async function importModuleExportWithToken(auth: TakaroAuthConfig, moduleExport: TakaroModuleExport): Promise<ModuleOutputDTO> {
+export async function importModuleExportWithToken(auth: TakaroAuthConfig, moduleExport: TakaroModuleExport): Promise<ModuleOutputDTO> {
   if (!auth.token) {
     throw new Error('TAKARO_TOKEN is required for token-only module imports');
   }

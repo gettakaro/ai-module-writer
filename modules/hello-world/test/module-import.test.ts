@@ -14,6 +14,7 @@ import {
   createTakaroClient,
   getTakaroAuthConfig,
   importModuleExport,
+  importModuleExportWithToken,
   REPO_ROOT,
   withOptionalLoginRetry,
 } from '../../../src/scripts/module-import.js';
@@ -187,6 +188,38 @@ describe('module-import CLI', () => {
     moduleId = imported.id;
   });
 
+  it('bootstraps cached auth for module-push when only username/password are provided', async () => {
+    const auth = getTakaroAuthConfig();
+    const tokenFile = '/tmp/takaro-token';
+    const originalToken = await fs.readFile(tokenFile, 'utf8').catch(() => null);
+
+    try {
+      await fs.rm(tokenFile, { force: true });
+      const { stdout } = await execFileAsync('bash', [MODULE_PUSH_SCRIPT, MODULE_DIR], {
+        env: {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          TAKARO_TOKEN: '',
+          TAKARO_HOST: auth.url,
+          TAKARO_DOMAIN_ID: auth.domainId,
+          TAKARO_USERNAME: auth.username ?? process.env.TAKARO_USERNAME ?? '',
+          TAKARO_PASSWORD: auth.password ?? process.env.TAKARO_PASSWORD ?? '',
+        },
+      });
+
+      const parsed = JSON.parse(stdout) as { data?: { id?: string; name?: string } };
+      assert.equal(parsed.data?.name, MODULE_NAME);
+      const refreshedToken = await fs.readFile(tokenFile, 'utf8');
+      assert.ok(refreshedToken.trim().length > 0, 'Expected module-push auth bootstrap to refresh the cached token file');
+    } finally {
+      if (originalToken === null) {
+        await fs.rm(tokenFile, { force: true });
+      } else {
+        await fs.writeFile(tokenFile, originalToken);
+      }
+    }
+  });
+
   it('retries individual replacement requests without restarting the full destructive flow', async () => {
     let loginCalls = 0;
     let removedModuleIds: string[] = [];
@@ -328,7 +361,7 @@ describe('module-import CLI', () => {
     assert.equal(reinstalledGameServers.at(-1), 'gs-125');
   });
 
-  it('preserves module-scoped variables and role permission assignments across replacement imports', async () => {
+  it('preserves durable module-scoped variables and role permission assignments across replacement imports', async () => {
     const createdVariables: Array<{ moduleId?: string; key: string; value: string; gameServerId?: string }> = [];
     const updatedRoles: Array<{ roleId: string; permissions: Array<{ permissionId: string; count?: number }> }> = [];
     let searchCalls = 0;
@@ -364,6 +397,25 @@ describe('module-import CLI', () => {
                     key: 'server_messages_state',
                     value: '{"sequentialIndex":1}',
                     gameServerId: 'gs-1',
+                  },
+                  {
+                    id: 'old-var-2',
+                    key: 'server_messages_lock',
+                    value: '{"token":"transient"}',
+                    gameServerId: 'gs-1',
+                  },
+                  {
+                    id: 'old-var-3',
+                    key: 'server_messages_delivery_receipt',
+                    value: '{"messageIndex":0}',
+                    gameServerId: 'gs-1',
+                  },
+                  {
+                    id: 'old-var-4',
+                    key: 'expired_config_snapshot',
+                    value: '{"stale":true}',
+                    gameServerId: 'gs-1',
+                    expiresAt: '2000-01-01T00:00:00.000Z',
                   },
                 ],
                 meta: { total: 1 },
@@ -424,7 +476,7 @@ describe('module-import CLI', () => {
           expiresAt: undefined,
         },
       ],
-      'Expected module-scoped runtime variables to migrate to the replacement module id',
+      'Expected only durable module-scoped variables to migrate to the replacement module id',
     );
     assert.deepEqual(
       updatedRoles,
@@ -537,6 +589,197 @@ describe('module-import CLI', () => {
       assert.ok((latestVersion?.functions as unknown[] | undefined)?.length, 'Expected exported module to keep functions');
     } finally {
       await fs.rm(richModuleDir, { recursive: true, force: true });
+    }
+  });
+
+  it('replays replacement snapshots through the token-only import path and skips transient variables', async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ path: string; method: string; body?: any }> = [];
+    let searchCalls = 0;
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+      const requestPath = new URL(url).pathname;
+      const method = init?.method ?? 'POST';
+      const body = typeof init?.body === 'string' && init.body.length > 0 ? JSON.parse(init.body) : undefined;
+      requests.push({ path: requestPath, method, body });
+
+      const json = (payload: unknown) => new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      if (requestPath === '/module/search') {
+        searchCalls += 1;
+        if (searchCalls === 1) {
+          return json({ data: [{ id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } }] });
+        }
+        return json({ data: [{ id: 'new-module', name: MODULE_NAME, latestVersion: { id: 'new-version' } }] });
+      }
+
+      if (requestPath === '/module/installation/search') {
+        return json({
+          data: [{ gameserverId: 'gs-1', userConfig: { foo: 'bar' }, systemConfig: { cron: true } }],
+          meta: { total: 1 },
+        });
+      }
+
+      if (requestPath === '/module/old-module/export') {
+        return json({ data: { name: MODULE_NAME, versions: [] } });
+      }
+
+      if (requestPath === '/module/old-module' && method === 'DELETE') {
+        return json({ data: {} });
+      }
+
+      if (requestPath === '/module/import') {
+        return json({ data: {} });
+      }
+
+      if (requestPath === '/variables/search') {
+        if (body?.filters?.moduleId?.[0] === 'old-module' && !body?.filters?.key) {
+          return json({
+            data: [
+              { key: 'server_messages_state', value: '{"sequentialIndex":1}', gameServerId: 'gs-1' },
+              { key: 'server_messages_lock', value: '{"token":"transient"}', gameServerId: 'gs-1' },
+              { key: 'server_messages_delivery_receipt', value: '{"messageIndex":0}', gameServerId: 'gs-1' },
+            ],
+            meta: { total: 3 },
+          });
+        }
+
+        return json({ data: [], meta: { total: 0 } });
+      }
+
+      if (requestPath === '/variables' && method === 'POST') {
+        return json({ data: body });
+      }
+
+      if (requestPath === '/permissions' && method === 'GET') {
+        return json({
+          data: [
+            { id: 'old-perm', permission: 'HELLO_USE', module: { id: 'old-module', name: MODULE_NAME } },
+            { id: 'new-perm', permission: 'HELLO_USE', module: { id: 'new-module', name: MODULE_NAME } },
+          ],
+        });
+      }
+
+      if (requestPath === '/role/search') {
+        return json({
+          data: [{ id: 'role-1', permissions: [{ permissionId: 'old-perm', count: 2 }] }],
+          meta: { total: 1 },
+        });
+      }
+
+      if (requestPath === '/role/role-1' && method === 'PUT') {
+        return json({ data: {} });
+      }
+
+      if (requestPath === '/module/installation/' && method === 'POST') {
+        return json({ data: {} });
+      }
+
+      throw new Error(`Unexpected fetch request: ${method} ${requestPath}`);
+    }) as typeof fetch;
+
+    try {
+      await importModuleExportWithToken(
+        { url: 'https://takaro.invalid', domainId: 'domain-1', token: 'token-only' },
+        { name: MODULE_NAME, versions: [] } as any,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    const createdVariableBodies = requests
+      .filter((request) => request.path === '/variables' && request.method === 'POST')
+      .map((request) => request.body);
+
+    assert.deepEqual(createdVariableBodies, [
+      {
+        key: 'server_messages_state',
+        value: '{"sequentialIndex":1}',
+        expiresAt: undefined,
+        gameServerId: 'gs-1',
+        playerId: undefined,
+        moduleId: 'new-module',
+      },
+    ]);
+    assert.ok(
+      requests.some((request) => request.path === '/module/installation/' && request.method === 'POST'),
+      'Expected token-only replacement flow to reinstall prior installations',
+    );
+    assert.ok(
+      requests.some((request) => request.path === '/role/role-1' && request.method === 'PUT'),
+      'Expected token-only replacement flow to rebind role permissions',
+    );
+  });
+
+  it('surfaces structured rollback errors with readable messages', async () => {
+    const fakeClient = {
+      module: {
+        moduleControllerSearch: async () => ({ data: { data: [{ id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } }] } }),
+        moduleInstallationsControllerGetInstalledModules: async () => ({ data: { data: [], meta: { total: 0 } } }),
+        moduleControllerExport: async () => ({ data: { data: { name: MODULE_NAME, versions: [] } } }),
+        moduleControllerRemove: async () => {},
+        moduleControllerImport: async () => {
+          throw { response: { data: { meta: { error: { message: 'replacement exploded' } } } } };
+        },
+      },
+      variable: {
+        variableControllerSearch: async () => ({ data: { data: [], meta: { total: 0 } } }),
+      },
+      role: {
+        roleControllerGetPermissions: async () => ({ data: { data: [] } }),
+        roleControllerSearch: async () => ({ data: { data: [], meta: { total: 0 } } }),
+        roleControllerUpdate: async () => ({ data: { data: {} } }),
+      },
+    } as unknown as Client;
+
+    await assert.rejects(
+      importModuleExport(fakeClient, { name: MODULE_NAME, versions: [] } as any),
+      /replacement exploded/,
+    );
+  });
+
+  it('fails fast with actionable module.json errors for missing module metadata', async () => {
+    const emptyDir = await fs.mkdtemp(path.join(os.tmpdir(), 'takaro-module-push-empty-'));
+
+    try {
+      await assert.rejects(
+        execFileAsync('bash', [MODULE_PUSH_SCRIPT, emptyDir], {
+          env: {
+            PATH: process.env.PATH,
+            HOME: process.env.HOME,
+          },
+        }),
+        /Missing module metadata file|module\.json/i,
+      );
+    } finally {
+      await fs.rm(emptyDir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails fast with actionable module.json errors for invalid module metadata', async () => {
+    const badDir = await fs.mkdtemp(path.join(os.tmpdir(), 'takaro-module-push-bad-'));
+    await fs.writeFile(path.join(badDir, 'module.json'), '{"name": ');
+
+    try {
+      await assert.rejects(
+        execFileAsync('bash', [MODULE_PUSH_SCRIPT, badDir], {
+          env: {
+            PATH: process.env.PATH,
+            HOME: process.env.HOME,
+          },
+        }),
+        /Invalid module metadata|module\.json must be valid JSON/i,
+      );
+    } finally {
+      await fs.rm(badDir, { recursive: true, force: true });
     }
   });
 
