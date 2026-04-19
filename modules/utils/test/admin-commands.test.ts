@@ -120,14 +120,21 @@ describe('utils: admin commands', () => {
     throw new Error(`Timed out waiting for player ${playerId} online=${expectedOnline}`);
   }
 
-  async function clearBans(playerId: string) {
+  async function getBans(playerId: string) {
     const bans = await client.player.banControllerSearch({
       filters: {
         gameServerId: [ctx.gameServer.id],
         playerId: [playerId],
       },
+      sortBy: 'createdAt',
+      sortDirection: 'desc',
     });
-    for (const ban of bans.data.data) {
+    return bans.data.data;
+  }
+
+  async function clearBans(playerId: string) {
+    const bans = await getBans(playerId);
+    for (const ban of bans) {
       await client.player.banControllerDelete(ban.id);
     }
   }
@@ -209,6 +216,16 @@ describe('utils: admin commands', () => {
     assert.ok(res.logs.some((msg) => msg.includes('Invalid duration.')), JSON.stringify(res.logs));
   });
 
+  it('rejects oversized /ban durations with the friendly validation message', async () => {
+    const target = ctx.players[1];
+    const targetName = await getPlayerName(target.playerId);
+    const res = await trigger(ctx.players[0].playerId, `${prefix}ban ${targetName} 999999999999999999999w`);
+
+    assert.equal(res.success, false, 'Expected oversized duration to fail');
+    assert.ok(res.logs.some((msg) => msg.includes('Invalid duration.')), JSON.stringify(res.logs));
+    assert.ok(!res.logs.some((msg) => msg.includes('Invalid time value')), JSON.stringify(res.logs));
+  });
+
   it('denies self /ban', async () => {
     const self = ctx.players[0];
     const selfName = await getPlayerName(self.playerId);
@@ -231,6 +248,11 @@ describe('utils: admin commands', () => {
     assert.ok(res.logs.some((msg) => msg.includes(`Banned ${targetName} for 10 minutes. Reason: griefing`)), JSON.stringify(res.logs));
     assert.ok(res.logs.some((msg) => msg.includes(`${targetName} was banned`) && msg.includes('10 minutes')), JSON.stringify(res.logs));
 
+    const bans = await getBans(target.playerId);
+    assert.equal(bans.length, 1, `Expected exactly one ban record, got ${bans.length}`);
+    assert.equal(bans[0]?.reason, 'griefing');
+    assert.ok(bans[0]?.until, `Expected temporary ban to have an until timestamp, got: ${JSON.stringify(bans[0])}`);
+
     await clearBans(target.playerId);
     await ctx.server.executeConsoleCommand('connectAll');
     await waitForOnline(target.playerId, true);
@@ -246,6 +268,11 @@ describe('utils: admin commands', () => {
     assert.equal(res.success, true, `Expected permanent ban to succeed, logs: ${JSON.stringify(res.logs)}`);
     assert.ok(res.logs.some((msg) => msg.includes('utils:ban result=')), JSON.stringify(res.logs));
     assert.ok(res.logs.some((msg) => msg.includes(`Banned ${targetName} for permanent. Reason: Banned by an admin.`)), JSON.stringify(res.logs));
+
+    const bans = await getBans(target.playerId);
+    assert.equal(bans.length, 1, `Expected exactly one ban record, got ${bans.length}`);
+    assert.equal(bans[0]?.reason, 'Banned by an admin.');
+    assert.equal(bans[0]?.until, undefined, `Expected permanent ban to omit until, got: ${JSON.stringify(bans[0])}`);
 
     await clearBans(target.playerId);
     await ctx.server.executeConsoleCommand('connectAll');

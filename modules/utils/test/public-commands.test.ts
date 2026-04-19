@@ -15,6 +15,7 @@ import {
   cleanupTestModules,
   cleanupTestGameServers,
 } from '../../../test/helpers/modules.js';
+import { formatOnlinePlayersLine } from '../src/functions/utils-formatters.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -120,7 +121,40 @@ describe('utils: public commands', () => {
     assert.ok(res.logs.some((msg) => msg.includes('No players are currently online.')), JSON.stringify(res.logs));
 
     await ctx.server.executeConsoleCommand('connectAll');
-    await new Promise((resolve) => setTimeout(resolve, 4000));
+    await waitForOnlineCount(3);
+  });
+
+  it('online lists online player names in alphabetical order with a pluralized count', async () => {
+    await ctx.server.executeConsoleCommand('connectAll');
+    await waitForOnlineCount(3);
+
+    const expectedNames = (await Promise.all(ctx.players.map((player) => getPlayerName(player.playerId))))
+      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+
+    const res = await trigger(ctx.players[0].playerId, `${prefix}online`);
+
+    assert.equal(res.success, true, `Expected command to succeed, logs: ${JSON.stringify(res.logs)}`);
+    const expectedLine = `3 players online: ${expectedNames.join(', ')}`;
+    assert.ok(res.logs.some((msg) => msg.includes(expectedLine)), JSON.stringify(res.logs));
+  });
+
+  it('online formatter truncates after 10 visible names', () => {
+    const line = formatOnlinePlayersLine([
+      { playerName: 'Zed' },
+      { playerName: 'Amy' },
+      { playerName: 'Bea' },
+      { playerName: 'Cal' },
+      { playerName: 'Dex' },
+      { playerName: 'Eli' },
+      { playerName: 'Fox' },
+      { playerName: 'Gia' },
+      { playerName: 'Hal' },
+      { playerName: 'Ivy' },
+      { playerName: 'Jae' },
+      { playerName: 'Kai' },
+    ]);
+
+    assert.equal(line, '12 players online: Amy, Bea, Cal, Dex, Eli, Fox, Gia, Hal, Ivy, Jae, ...');
   });
 
   it('discord shows the configured link', async () => {

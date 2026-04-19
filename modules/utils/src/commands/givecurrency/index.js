@@ -18,7 +18,7 @@ async function main() {
   const amount = args.amount;
 
   if (!target || !Number.isInteger(amount) || amount <= 0) {
-    throw new TakaroUserError('Usage: givecurrency <player> <amount> — Amount must be a positive whole number.');
+    throw new TakaroUserError('Usage: /givecurrency <player> <amount> — Amount must be a positive whole number.');
   }
 
   const [adminName, targetName] = await Promise.all([

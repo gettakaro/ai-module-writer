@@ -40,9 +40,9 @@ async function main() {
   // pog.currency is fetched at command dispatch time; the deduct API will also reject if insufficient,
   // so this check is a fast-fail convenience, not a hard guarantee.
   if (pog.currency < amount) {
-    throw new TakaroUserError(
-      `You don't have enough currency. You have ${pog.currency} but tried to contribute ${amount}.`,
-    );
+    const message = `You don't have enough currency. You have ${pog.currency} but tried to contribute ${amount}.`;
+    console.log(message);
+    throw new TakaroUserError(message);
   }
 
   // Read fund total FIRST, compute new total, update fund THEN deduct currency.

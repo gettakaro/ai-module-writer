@@ -1,6 +1,6 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
-  extractTrailingWords,
+  extractReason,
   getPlayerName,
   isPlayerOnlineHere,
   normalizeReason,
@@ -29,7 +29,7 @@ async function main() {
     throw new TakaroUserError('That player is not currently online.');
   }
 
-  const reason = normalizeReason(extractTrailingWords(chatMessage, 2), 'Kicked by an admin.');
+  const reason = normalizeReason(extractReason(args.reason, chatMessage, [target.name]), 'Kicked by an admin.');
   const [adminName, targetName] = await Promise.all([
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),

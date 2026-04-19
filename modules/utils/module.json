@@ -129,13 +129,19 @@
           "type": "player",
           "helpText": "The player to kick",
           "position": 0
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "helpText": "Optional reason shown to the target and in broadcasts",
+          "position": 1
         }
       ]
     },
     "ban": {
       "trigger": "ban",
-      "description": "Ban a player temporarily or permanently",
-      "helpText": "Usage: /ban <player> <duration> [reason]",
+      "description": "Ban a Takaro-resolvable player temporarily or permanently",
+      "helpText": "Usage: /ban <player> <duration> [reason] — offline players may work when the integration can resolve them.",
       "function": "src/commands/ban/index.js",
       "arguments": [
         {
@@ -149,6 +155,12 @@
           "type": "string",
           "helpText": "perm/permanent or a value like 10m, 12h, 7d, or 2w",
           "position": 1
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "helpText": "Optional reason shown in the ban confirmation and broadcasts",
+          "position": 2
         }
       ]
     },

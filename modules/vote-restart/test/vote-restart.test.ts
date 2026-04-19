@@ -198,6 +198,20 @@ describe('vote-restart module', () => {
     () => moduleId,
   );
 
+  async function clearCooldown() {
+    const result = await client.variable.variableControllerSearch({
+      filters: {
+        key: ['vr_cooldown_until'],
+        gameServerId: [ctx.gameServer.id],
+        moduleId: [moduleId],
+      },
+    });
+
+    for (const variable of result.data.data) {
+      await client.variable.variableControllerDelete(variable.id);
+    }
+  }
+
   // ── Test 1: Start vote with permission ───────────────────────────────────
   // State after: vote active, players[0] auto-voted (1/2), vote NOT passed yet
 
@@ -363,6 +377,8 @@ describe('vote-restart module', () => {
   // trigger cronjob to detect expiry+set cooldown, then verify /voterestart blocked.
 
   it('should enforce cooldown after an expired vote', async () => {
+    await clearCooldown();
+
     // Start a new vote (no cooldown active since prior vote passed, not expired)
     const startEvent = await triggerCommand(ctx.players[0].playerId, 'voterestart');
     const startResult = getResult(startEvent);

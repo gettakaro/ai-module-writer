@@ -1,4 +1,5 @@
 import { takaro } from '@takaro/helpers';
+import { formatOnlinePlayersLine } from './utils-formatters.js';
 
 export function isBlank(value) {
   return value === undefined || value === null || String(value).trim() === '';
@@ -13,14 +14,34 @@ export function normalizeReason(value, fallback) {
   return trimmed === '' ? fallback : trimmed;
 }
 
-export function extractTrailingWords(chatMessage, consumedWordCount) {
-  const source = typeof chatMessage === 'string'
+function getChatMessageText(chatMessage) {
+  return typeof chatMessage === 'string'
     ? chatMessage
     : (chatMessage && typeof chatMessage.msg === 'string' ? chatMessage.msg : '');
-  const raw = trimOrEmpty(source);
-  if (raw === '') return '';
-  const parts = raw.split(/\s+/);
-  return trimOrEmpty(parts.slice(consumedWordCount).join(' '));
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function extractReason(argsReason, chatMessage, consumedValues = []) {
+  const parsedReason = trimOrEmpty(argsReason);
+  if (parsedReason !== '') return parsedReason;
+
+  let remaining = trimOrEmpty(getChatMessageText(chatMessage));
+  if (remaining === '') return '';
+
+  remaining = remaining.replace(/^\S+\s*/, '');
+
+  for (const value of consumedValues) {
+    const normalized = trimOrEmpty(value);
+    if (normalized === '') continue;
+    const flexibleWhitespace = escapeRegex(normalized).replace(/\s+/g, '\\s+');
+    const pattern = new RegExp(`^${flexibleWhitespace}(?:\\s+|$)`, 'i');
+    remaining = remaining.replace(pattern, '');
+  }
+
+  return trimOrEmpty(remaining);
 }
 
 export function compactRules(rules) {
@@ -68,9 +89,15 @@ export function parseBanDurationToken(token) {
 
   if (!unitConfig) return null;
 
+  const durationMs = amount * unitConfig.ms;
+  const expiresAtMs = Date.now() + durationMs;
+  if (!Number.isSafeInteger(durationMs) || !Number.isFinite(expiresAtMs) || expiresAtMs > 8.64e15) {
+    return null;
+  }
+
   return {
     isPermanent: false,
-    expiresAt: new Date(Date.now() + amount * unitConfig.ms).toISOString(),
+    expiresAt: new Date(expiresAtMs).toISOString(),
     humanDuration: `${amount} ${amount === 1 ? unitConfig.singular : unitConfig.plural}`,
     normalizedToken: normalized,
   };
@@ -101,11 +128,20 @@ export async function fetchOnlinePlayers(gameServerId) {
     const batch = result.data.data;
     players.push(...batch);
 
-    if (batch.length < limit) break;
+    if (players.length >= (result.data.meta?.total ?? players.length) || batch.length === 0) break;
     page += 1;
   }
 
-  return players;
+  const uniquePlayers = players.filter(
+    (player, index, all) => all.findIndex((candidate) => candidate.playerId === player.playerId) === index,
+  );
+
+  const namedPlayers = await Promise.all(uniquePlayers.map(async (player) => ({
+    ...player,
+    name: await getPlayerName(player.playerId, ''),
+  })));
+
+  return namedPlayers;
 }
 
 export async function getGameServerName(gameServerId) {
@@ -126,22 +162,6 @@ export async function getPlayerName(playerId, fallback) {
     console.error(`utils-helpers: failed to load player ${playerId}: ${err}`);
     return fallback || 'Unknown Player';
   }
-}
-
-export function formatOnlinePlayersLine(players) {
-  const names = players
-    .map((player) => trimOrEmpty(player.name))
-    .filter((name) => name !== '')
-    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-
-  if (names.length === 0) {
-    return 'No players are currently online.';
-  }
-
-  const visible = names.slice(0, 10);
-  const suffix = names.length > 10 ? ', ...' : '';
-  const noun = names.length === 1 ? 'player' : 'players';
-  return `${names.length} ${noun} online: ${visible.join(', ')}${suffix}`;
 }
 
 export async function safeBroadcast(gameServerId, message) {

@@ -1,6 +1,6 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
-  extractTrailingWords,
+  extractReason,
   getPlayerName,
   normalizeReason,
   parseBanDurationToken,
@@ -30,7 +30,7 @@ async function main() {
     throw new TakaroUserError('Invalid duration. Use perm/permanent or a value like 10m, 12h, 7d, or 2w.');
   }
 
-  const reason = normalizeReason(extractTrailingWords(chatMessage, 3), 'Banned by an admin.');
+  const reason = normalizeReason(extractReason(args.reason, chatMessage, [target.name, args.duration]), 'Banned by an admin.');
   const [adminName, targetName] = await Promise.all([
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),
