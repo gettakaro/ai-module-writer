@@ -103,12 +103,13 @@ describe('casino module', () => {
     const result = await client.event.eventControllerSearch({
       filters: {
         gameserverId: [ctx.gameServer.id],
-        eventName: ['casino-big-win' as any],
       },
       greaterThan: { createdAt: after.toISOString() },
-      limit: 20,
+      limit: 50,
+      sortBy: 'createdAt',
+      sortDirection: 'desc',
     } as any);
-    return result.data.data.find((event: any) => event.meta?.type === 'casino-big-win') ?? null;
+    return result.data.data.find((event: any) => String(event.eventName) === 'casino-big-win' || event.meta?.type === 'casino-big-win') ?? null;
   }
 
   before(async () => {
@@ -535,6 +536,9 @@ describe('casino module', () => {
     assert.equal(reset.success, true, `expected casinoresetstats success, logs=${JSON.stringify(reset.logs)}`);
     const statsRow = await getVariable('casino_stats', player.playerId);
     assert.equal(statsRow, null, 'expected casino stats row to be deleted after reset');
+    const currentWindowKey = new Date().toISOString().slice(0, 10);
+    const currentWindowRow = await getVariable(`casino_window:${currentWindowKey}`, player.playerId);
+    assert.equal(currentWindowRow, null, 'expected active cap window rows to be cleared after reset');
   });
 
   it('enforces disabled games, vip max-bet scaling, and self-service cap feedback', async () => {
@@ -633,6 +637,92 @@ describe('casino module', () => {
       const blocked = await triggerCommand(ctx.players[0]!.playerId, `${prefix}flip 10 heads`);
       assert.equal(blocked.success, false, 'expected legacy conflict to block play');
       assert.ok(blocked.logs.some((msg) => /old gambling modules are still installed/i.test(msg)), `expected legacy-conflict message, logs=${JSON.stringify(blocked.logs)}`);
+    } finally {
+      if (legacyModuleId) {
+        try {
+          await uninstallModule(client, legacyModuleId, ctx.gameServer.id);
+        } catch {}
+        try {
+          await deleteModule(client, legacyModuleId);
+        } catch {}
+      }
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects play when the player lacks CASINO_PLAY permission', async () => {
+    const player = ctx.players[2]!;
+    await cleanupRole(client, playRoleId2);
+    playRoleId2 = undefined;
+    try {
+      const blocked = await triggerCommand(player.playerId, `${prefix}flip 10 heads`);
+      assert.equal(blocked.success, false, 'expected missing CASINO_PLAY to deny play');
+      assert.ok(blocked.logs.some((msg) => /permission to play casino games/i.test(msg)), `expected CASINO_PLAY denial wording, logs=${JSON.stringify(blocked.logs)}`);
+    } finally {
+      playRoleId2 = await assignPermissions(client, player.playerId, ctx.gameServer.id, ['CASINO_PLAY']);
+    }
+  });
+
+  it('uninstalls itself at install time when a legacy gambling module is already installed', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'casino-install-conflict-'));
+    let legacyModuleId: string | undefined;
+    try {
+      await fs.writeFile(path.join(tempDir, 'module.json'), JSON.stringify({
+        name: 'roulette',
+        author: 'test',
+        description: 'Legacy install-conflict fixture',
+        version: 'latest',
+        supportedGames: ['all'],
+        config: { type: 'object', properties: {}, additionalProperties: false },
+        systemConfig: { type: 'object', properties: {}, additionalProperties: true },
+        uiSchema: {},
+        permissions: [],
+        commands: {},
+        hooks: {},
+        cronJobs: {},
+        functions: {},
+      }, null, 2));
+
+      const legacyModule = await pushModule(client, tempDir);
+      legacyModuleId = legacyModule.id;
+      await installModule(client, legacyModule.latestVersion.id, ctx.gameServer.id, {});
+
+      await uninstallModule(client, moduleId, ctx.gameServer.id);
+      const hookAfter = new Date();
+      await installModule(client, versionId, ctx.gameServer.id, {
+        userConfig: {
+          minBet: 1,
+          maxBet: 1000,
+          cooldownSeconds: 0,
+          houseEdgePct: 2,
+          jackpotContributionPct: 10,
+          bigWinThreshold: 1,
+        },
+      });
+      const hookEvent = await waitForEvent(client, {
+        eventName: EventSearchInputAllowedFiltersEventNameEnum.HookExecuted,
+        gameserverId: ctx.gameServer.id,
+        after: hookAfter,
+        timeout: 30000,
+      });
+      const hookMeta = hookEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+      assert.equal(hookMeta?.result?.success, true, `expected install hook success, logs=${JSON.stringify(hookMeta?.result?.logs ?? [])}`);
+      assert.ok((hookMeta?.result?.logs ?? []).some((log) => /install blocked/i.test(log.msg) || /legacy casino module conflict/i.test(log.msg)), `expected conflict logs, logs=${JSON.stringify(hookMeta?.result?.logs ?? [])}`);
+
+      const installation = await client.module.moduleInstallationsControllerGetModuleInstallation(moduleId, ctx.gameServer.id).catch(() => null);
+      assert.equal(installation, null, 'expected casino to uninstall itself during conflicting install');
+
+      await uninstallModule(client, legacyModuleId, ctx.gameServer.id);
+      await installModule(client, versionId, ctx.gameServer.id, {
+        userConfig: {
+          minBet: 1,
+          maxBet: 1000,
+          cooldownSeconds: 0,
+          houseEdgePct: 2,
+          jackpotContributionPct: 10,
+          bigWinThreshold: 1,
+        },
+      });
     } finally {
       if (legacyModuleId) {
         try {

@@ -5,8 +5,8 @@ export const RESTART_STATE_KEY = 'vr_restart_state';
 export const COOLDOWN_KEY = 'vr_cooldown_until';
 export const LOCK_KEY = 'vr_state_lock';
 
-export function sleep() {
-  return Promise.resolve();
+export function sleep(ms = 0) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
 // ── Generic variable CRUD ─────────────────────────────────────────────────────

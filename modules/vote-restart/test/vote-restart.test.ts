@@ -713,6 +713,107 @@ describe('vote-restart recovery paths and locked thresholds', () => {
   });
 });
 
+describe('vote-restart concurrent start locking', () => {
+  let client5: Client;
+  let ctx5: MockServerContext;
+  let moduleId5: string;
+  let versionId5: string;
+  let prefix5: string;
+  let initiateRoleId5a: string | undefined;
+  let initiateRoleId5b: string | undefined;
+  let immuneRoleId5: string | undefined;
+
+  before(async () => {
+    client5 = await createClient();
+    ctx5 = await startMockServer(client5);
+
+    const mod = await pushModule(client5, MODULE_DIR);
+    moduleId5 = mod.id;
+    versionId5 = mod.latestVersion.id;
+
+    await installModule(client5, versionId5, ctx5.gameServer.id, {
+      userConfig: {
+        voteDuration: 120,
+        cooldownDuration: 60,
+        restartDelay: 30,
+        restartCommand: 'say restart-test',
+        passThreshold: 51,
+        minimumPlayers: 2,
+      },
+    });
+
+    prefix5 = await getCommandPrefix(client5, ctx5.gameServer.id);
+    initiateRoleId5a = await assignPermissions(client5, ctx5.players[0].playerId, ctx5.gameServer.id, ['VOTE_RESTART_INITIATE']);
+    initiateRoleId5b = await assignPermissions(client5, ctx5.players[1].playerId, ctx5.gameServer.id, ['VOTE_RESTART_INITIATE']);
+    immuneRoleId5 = await assignPermissions(client5, ctx5.players[2].playerId, ctx5.gameServer.id, ['VOTE_RESTART_IMMUNE']);
+  });
+
+  after(async () => {
+    await cleanupRole(client5, initiateRoleId5a);
+    await cleanupRole(client5, initiateRoleId5b);
+    await cleanupRole(client5, immuneRoleId5);
+    try {
+      await uninstallModule(client5, moduleId5, ctx5.gameServer.id);
+    } catch (err) {
+      console.error('Cleanup: failed to uninstall locking module:', err);
+    }
+    try {
+      await deleteModule(client5, moduleId5);
+    } catch (err) {
+      console.error('Cleanup: failed to delete locking module:', err);
+    }
+    await stopMockServer(ctx5.server, client5, ctx5.gameServer.id);
+  });
+
+  it('allows only one concurrent /voterestart to create the active vote', async () => {
+    const after = new Date();
+    await Promise.all([
+      client5.command.commandControllerTrigger(ctx5.gameServer.id, { playerId: ctx5.players[0].playerId, msg: `${prefix5}voterestart` }),
+      client5.command.commandControllerTrigger(ctx5.gameServer.id, { playerId: ctx5.players[1].playerId, msg: `${prefix5}voterestart` }),
+    ]);
+
+    let events: any[] = [];
+    for (let attempt = 0; attempt < 15; attempt += 1) {
+      const result = await client5.event.eventControllerSearch({
+        filters: {
+          eventName: [EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted],
+          gameserverId: [ctx5.gameServer.id],
+        },
+        greaterThan: { createdAt: after.toISOString() },
+        sortBy: 'createdAt',
+        sortDirection: 'desc',
+        limit: 10,
+      });
+      events = result.data.data;
+      if (events.length >= 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+
+    assert.ok(events.length >= 2, `Expected two command-executed events, got ${events.length}`);
+    const results = events.slice(0, 2).map((event) => {
+      const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+      return {
+        success: meta?.result?.success ?? false,
+        logs: (meta?.result?.logs ?? []).map((l) => l.msg),
+      };
+    });
+
+    assert.equal(results.filter((r) => r.success).length, 1, `Expected exactly one successful starter, got ${JSON.stringify(results)}`);
+    assert.equal(results.filter((r) => !r.success).length, 1, `Expected exactly one rejected starter, got ${JSON.stringify(results)}`);
+    assert.ok(results.some((r) => r.logs.some((l) => l.includes('vote started'))), `Expected a start log, got ${JSON.stringify(results)}`);
+    assert.ok(results.some((r) => r.logs.some((l) => l.includes('already in progress'))), `Expected a lock rejection log, got ${JSON.stringify(results)}`);
+
+    const voteState = await client5.variable.variableControllerSearch({
+      filters: {
+        key: ['vr_vote_state'],
+        gameServerId: [ctx5.gameServer.id],
+        moduleId: [moduleId5],
+      },
+    });
+    assert.equal(voteState.data.data.length, 1, 'Expected exactly one active vote state row after concurrent starts');
+  });
+});
+
 describe('vote-restart restart failure handling', () => {
   let client4: Client;
   let ctx4: MockServerContext;

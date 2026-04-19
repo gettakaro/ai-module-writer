@@ -39,8 +39,8 @@ export function nowIso() {
   return new Date().toISOString();
 }
 
-export function sleep() {
-  return Promise.resolve();
+export function sleep(ms = 0) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
 export function formatUtcTimestamp(value) {
@@ -570,6 +570,7 @@ export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, pl
   const meta = {
     type: 'casino-big-win',
     jackpotWin,
+    playerId,
     playerName,
     game,
     net: roundCurrency(net),
@@ -578,6 +579,14 @@ export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, pl
     threshold: roundCurrency(config.bigWinThreshold),
     occurredAt: nowIso(),
     message: `${prefix} ${playerName} won ${formatCurrency(net)} on ${game}!`,
+  };
+  const payload = {
+    eventName: 'casino-big-win',
+    gameserverId: gameServerId,
+    moduleId,
+    actingModuleId: moduleId,
+    playerId,
+    meta,
   };
 
   try {
@@ -590,14 +599,15 @@ export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, pl
   }
 
   try {
-    await takaro.event.eventControllerCreate({
-      eventName: 'casino-big-win',
-      gameserverId: gameServerId,
-      moduleId,
-      actingModuleId: moduleId,
-      playerId,
-      meta,
-    });
+    if (takaro.event?.eventControllerCreate) {
+      await takaro.event.eventControllerCreate(payload);
+      return;
+    }
+    if (takaro.axios?.post) {
+      await takaro.axios.post('/event', payload);
+      return;
+    }
+    console.error(`casino-helpers: failed to emit casino-big-win event for ${playerName}: no event client available`);
   } catch (err) {
     console.error(`casino-helpers: failed to emit casino-big-win event for ${playerName}: ${err}`);
   }

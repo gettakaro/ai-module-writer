@@ -90,7 +90,8 @@ async function main() {
     if (!correct) {
       const result = await settle({ gameServerId, moduleId: mod.moduleId, player, config, game: 'hilo', betAmount: existing.stake, payout: 0, skipLock: true });
       await deletePlayerSession(gameServerId, mod.moduleId, KEY_HILO_SESSION, player.id);
-      await pog.pm(`🎴 ${cardLabel(nextCard)}. Wrong — lost ${formatCurrency(existing.stake)} coin. (Balance: ${formatCurrency(result.balance)})`);
+      const tieNote = nextCard.rank === existing.currentCard.rank ? ' Equal cards count as losses in hilo.' : '';
+      await pog.pm(`🎴 ${cardLabel(nextCard)}. Wrong — lost ${formatCurrency(existing.stake)} coin.${tieNote} (Balance: ${formatCurrency(result.balance)})`);
       return;
     }
 

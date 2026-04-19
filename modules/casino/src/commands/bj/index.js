@@ -95,12 +95,8 @@ async function main() {
         await pog.pm(`🃏 Bust at ${total}. Lost ${formatCurrency(session.stake)} coin. (Balance: ${formatCurrency(result.balance)})`);
         return;
       }
-      if (total === 21) {
-        await finishHand({ session, gameServerId, mod, player, pog, config });
-        return;
-      }
       await setPlayerSession(gameServerId, mod.moduleId, KEY_BLACKJACK_SESSION, player.id, session);
-      await pog.pm(`🃏 Your hand: ${session.playerHand.map(cardLabel).join(' ')} (${total}). Dealer shows: ${cardLabel(session.dealerHand[0])}. /bj hit or /bj stand`);
+      await pog.pm(`🃏 Your hand: ${session.playerHand.map(cardLabel).join(' ')} (${total}). Dealer shows: ${cardLabel(session.dealerHand[0])}. /bj hit, /bj stand${total === 21 ? ' — 21! Stand to resolve the hand.' : ''}`);
       return;
     }
 
