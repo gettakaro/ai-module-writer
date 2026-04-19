@@ -27,8 +27,11 @@ function parseLockValue(variable) {
     const parsed = JSON.parse(variable.value);
     const owner = typeof parsed?.owner === 'string' ? parsed.owner : '';
     const createdAt = typeof parsed?.createdAt === 'number' ? parsed.createdAt : 0;
-    if (!owner || !createdAt) return null;
-    return { owner, createdAt };
+    const refreshedAt = typeof parsed?.refreshedAt === 'number'
+      ? parsed.refreshedAt
+      : (typeof parsed?.updatedAt === 'number' ? parsed.updatedAt : createdAt);
+    if (!owner || !createdAt || !refreshedAt) return null;
+    return { owner, createdAt, refreshedAt };
   } catch {
     return null;
   }
@@ -70,12 +73,14 @@ export async function acquireFundStateLock(
   gameServerId,
   moduleId,
   owner,
-  { maxWaitMs = 5000, pollMs = 200, staleAfterMs = 15000 } = {},
+  { maxWaitMs = 5000, pollMs = 200, staleAfterMs = 120000 } = {},
 ) {
   const deadline = Date.now() + maxWaitMs;
+  const now = Date.now();
   const lockValue = {
     owner,
-    createdAt: Date.now(),
+    createdAt: now,
+    refreshedAt: now,
   };
 
   while (Date.now() < deadline) {
@@ -94,7 +99,7 @@ export async function acquireFundStateLock(
 
       const existing = await getFundVariable(gameServerId, moduleId, FUND_STATE_LOCK_KEY);
       const parsed = parseLockValue(existing);
-      const ageMs = parsed ? Date.now() - parsed.createdAt : Infinity;
+      const ageMs = parsed ? Date.now() - parsed.refreshedAt : Infinity;
 
       if (existing && ageMs > staleAfterMs) {
         try {
@@ -111,6 +116,25 @@ export async function acquireFundStateLock(
   }
 
   throw new Error('Timed out acquiring the community fund state lock');
+}
+
+export async function refreshFundStateLock(gameServerId, moduleId, owner) {
+  const existing = await getFundVariable(gameServerId, moduleId, FUND_STATE_LOCK_KEY);
+  if (!existing) return false;
+
+  const parsed = parseLockValue(existing);
+  if (!parsed || parsed.owner !== owner) {
+    return false;
+  }
+
+  await takaro.variable.variableControllerUpdate(existing.id, {
+    value: JSON.stringify({
+      owner,
+      createdAt: parsed.createdAt,
+      refreshedAt: Date.now(),
+    }),
+  });
+  return true;
 }
 
 export async function releaseFundStateLock(gameServerId, moduleId, owner) {

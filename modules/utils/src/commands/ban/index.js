@@ -20,7 +20,7 @@ async function main() {
 
   const target = getCommandTargetPlayer(args.player);
   if (!target) {
-    throw new TakaroUserError('Please specify a valid player.');
+    throw new TakaroUserError('Please specify a valid player that Takaro can resolve. Offline bans only work for players already known to Takaro.');
   }
 
   if (target.playerId === player.id) {

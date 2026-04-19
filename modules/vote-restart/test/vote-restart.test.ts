@@ -137,7 +137,7 @@ describe('vote-restart module', () => {
       userConfig: {
         voteDuration: 120,
         cooldownDuration: 60,
-        restartDelay: 5,
+        restartDelay: 15,
         restartCommand: 'say restart-test',
         passThreshold: 51,
         minimumPlayers: 2,
@@ -318,7 +318,7 @@ describe('vote-restart module', () => {
   });
 
   // ── Test 8: /votestatus shows passed vote with time remaining ─────────────
-  // Vote just passed with restartDelay=5, should show passed state
+  // Vote just passed with restartDelay=15, should show passed state
 
   it('should show passed vote status after vote passes', async () => {
     const event = await triggerCommand(ctx.players[0].playerId, 'votestatus');
@@ -345,7 +345,7 @@ describe('vote-restart module', () => {
     assert.ok(varSearch.data.data.length > 0, 'Expected vr_vote_state variable to exist before restart cronjob');
     const varRecord = varSearch.data.data[0]!;
     const currentState = JSON.parse(varRecord.value);
-    currentState.passedAt = new Date(Date.now() - 6 * 1000).toISOString();
+    currentState.passedAt = new Date(Date.now() - 16 * 1000).toISOString();
     await client.variable.variableControllerUpdate(varRecord.id, {
       value: JSON.stringify(currentState),
     });

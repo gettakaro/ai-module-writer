@@ -1,6 +1,5 @@
 import { data } from '@takaro/helpers';
-import { fetchOnlinePlayers } from './utils-helpers.js';
-import { formatOnlinePlayersLine } from './utils-formatters.js';
+import { fetchOnlinePlayers, formatOnlinePlayersLine } from './utils-helpers.js';
 
 async function main() {
   const { gameServerId, pog } = data;

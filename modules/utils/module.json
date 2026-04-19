@@ -193,12 +193,6 @@
   "functions": {
     "utils-helpers": {
       "function": "src/functions/utils-helpers.js"
-    },
-    "utils-formatters": {
-      "function": "src/functions/utils-formatters.js"
-    },
-    "utils-pure": {
-      "function": "src/functions/utils-pure.js"
     }
   }
 }

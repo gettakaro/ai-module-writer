@@ -1,10 +1,13 @@
 import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers';
 import {
   acquireFundStateLock,
+  FUND_STATE_LOCK_KEY,
   getFundTotal,
   setFundTotal,
+  setFundVariable,
   incrementFundCycle,
   recordCompletion,
+  refreshFundStateLock,
   releaseFundStateLock,
 } from './fund-helpers.js';
 
@@ -62,9 +65,11 @@ async function main() {
 
     // The fund state lock serializes contributions so each paid deposit sees the latest total.
     try {
+      await refreshFundStateLock(gameServerId, moduleId, lockOwner);
       await takaro.playerOnGameserver.playerOnGameServerControllerDeductCurrency(gameServerId, pog.playerId, {
         currency: amount,
       });
+      await refreshFundStateLock(gameServerId, moduleId, lockOwner);
     } catch (deductErr) {
       console.error(`Fund: currency deduction failed for player ${player.name} (amount=${amount}). Contribution aborted. Error: ${deductErr}`);
       throw new TakaroUserError('Your contribution could not be processed because your currency could not be deducted. Please try again.');
@@ -75,6 +80,7 @@ async function main() {
         throw new Error('Debug-forced contribution state failure after deduct');
       }
 
+      await refreshFundStateLock(gameServerId, moduleId, lockOwner);
       currentTotal = await getFundTotal(gameServerId, moduleId);
       newTotal = currentTotal + amount;
 
@@ -84,7 +90,9 @@ async function main() {
         thresholdReached = true;
         const carryover = newTotal - threshold;
         await setFundTotal(gameServerId, moduleId, carryover);
+        await refreshFundStateLock(gameServerId, moduleId, lockOwner);
         newCycle = await incrementFundCycle(gameServerId, moduleId);
+        await refreshFundStateLock(gameServerId, moduleId, lockOwner);
         await recordCompletion(gameServerId, moduleId, newCycle, player.name);
       } else {
         await setFundTotal(gameServerId, moduleId, newTotal);
@@ -108,9 +116,20 @@ async function main() {
 
       throw new TakaroUserError('Your contribution could not be recorded, and we could not confirm your refund. Please contact an admin immediately.');
     }
+
+    if (config.debugReplaceLockOwnerBeforeRelease) {
+      await setFundVariable(gameServerId, moduleId, FUND_STATE_LOCK_KEY, {
+        owner: `${lockOwner}:other-owner`,
+        createdAt: Date.now(),
+        refreshedAt: Date.now(),
+      });
+    }
   } finally {
     try {
-      await releaseFundStateLock(gameServerId, moduleId, lockOwner);
+      const released = await releaseFundStateLock(gameServerId, moduleId, lockOwner);
+      if (!released) {
+        console.warn(`Fund: contribution lock for player ${player.name} was not released because ownership changed or the lock was already cleared.`);
+      }
     } catch (releaseErr) {
       console.error(`Fund: failed to release contribution lock for player ${player.name}. Error: ${releaseErr}`);
     }

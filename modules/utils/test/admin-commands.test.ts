@@ -304,7 +304,7 @@ describe('utils: admin commands', () => {
     assert.ok(res.logs.some((msg) => msg.includes(`${targetName} was banned`) && msg.includes('10 minutes')), JSON.stringify(res.logs));
 
     assert.ok(
-      res.logs.some((msg) => msg.includes('utils:ban payload=') && msg.includes('"reason":"griefing"') && msg.includes('"expiresAt":"')),
+      res.logs.some((msg) => msg.includes('utils:ban payload=') && msg.includes('"reason":"griefing"') && msg.includes('"until":"')),
       JSON.stringify(res.logs),
     );
 

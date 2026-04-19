@@ -43,6 +43,11 @@
         "type": "boolean",
         "default": false,
         "description": "Testing-only flag that forces the post-deduction state write path to fail so refund handling can be verified."
+      },
+      "debugReplaceLockOwnerBeforeRelease": {
+        "type": "boolean",
+        "default": false,
+        "description": "Testing-only flag that swaps the fund lock owner before release so owner-mismatch cleanup behavior can be verified."
       }
     },
     "required": [],

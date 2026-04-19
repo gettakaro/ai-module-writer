@@ -133,12 +133,37 @@ describe('community-fund: fund-contribute command', () => {
       filters: {
         gameServerId: [ctx.gameServer.id],
         moduleId: [moduleId],
-        key: ['fund_total', 'fund_cycle', 'fund_last_completion'],
+        key: ['fund_total', 'fund_cycle', 'fund_last_completion', 'fund_state_lock'],
       },
       limit: 100,
     });
 
     await Promise.all(vars.data.data.map((variable) => client.variable.variableControllerDelete(variable.id)));
+  }
+
+  async function upsertLockValue(value: string) {
+    const existing = await client.variable.variableControllerSearch({
+      filters: {
+        key: ['fund_state_lock'],
+        gameServerId: [ctx.gameServer.id],
+        moduleId: [moduleId],
+      },
+      limit: 10,
+    });
+
+    const record = existing.data.data[0];
+    if (record) {
+      await client.variable.variableControllerUpdate(record.id, { value });
+      return record.id;
+    }
+
+    const created = await client.variable.variableControllerCreate({
+      key: 'fund_state_lock',
+      value,
+      gameServerId: ctx.gameServer.id,
+      moduleId,
+    });
+    return created.data.data.id;
   }
 
   async function setCurrencyExact(playerId: string, desiredCurrency: number) {
@@ -532,6 +557,105 @@ describe('community-fund: fund-contribute command', () => {
     );
   });
 
+  it('should evict a stale lock before processing a new contribution', async () => {
+    const player = ctx.players[0]!;
+    await resetFundState();
+    await setCurrencyExact(player.playerId, 25);
+    await upsertLockValue(JSON.stringify({
+      owner: 'stale-owner',
+      createdAt: Date.now() - 130000,
+      refreshedAt: Date.now() - 130000,
+    }));
+
+    const before = new Date();
+    await client.command.commandControllerTrigger(ctx.gameServer.id, {
+      msg: `${prefix}fund 10`,
+      playerId: player.playerId,
+    });
+
+    const event = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(meta?.result?.success, true, 'Expected contribution to succeed after stale-lock eviction');
+
+    const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
+    assert.ok(
+      logs.some((msg) => msg.includes('removed stale fund lock owned by stale-owner')),
+      `Expected stale-lock eviction log, got: ${JSON.stringify(logs)}`,
+    );
+    assert.ok(
+      logs.some((msg) => msg.includes('Fund contribution')),
+      `Expected contribution log after stale-lock eviction, got: ${JSON.stringify(logs)}`,
+    );
+  });
+
+  it('should recover from a malformed lock payload by clearing it as stale', async () => {
+    const player = ctx.players[0]!;
+    await resetFundState();
+    await setCurrencyExact(player.playerId, 25);
+    await upsertLockValue('not-json-at-all');
+
+    const before = new Date();
+    await client.command.commandControllerTrigger(ctx.gameServer.id, {
+      msg: `${prefix}fund 10`,
+      playerId: player.playerId,
+    });
+
+    const event = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(meta?.result?.success, true, 'Expected contribution to succeed after malformed-lock recovery');
+
+    const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
+    assert.ok(
+      logs.some((msg) => msg.includes('removed stale fund lock owned by unknown')),
+      `Expected malformed lock to be treated as stale, got: ${JSON.stringify(logs)}`,
+    );
+  });
+
+  it('should fail cleanly when a live lock is held by another contributor', async () => {
+    const player = ctx.players[0]!;
+    await resetFundState();
+    await setCurrencyExact(player.playerId, 25);
+    await upsertLockValue(JSON.stringify({
+      owner: 'active-owner',
+      createdAt: Date.now(),
+      refreshedAt: Date.now(),
+    }));
+
+    const before = new Date();
+    await client.command.commandControllerTrigger(ctx.gameServer.id, {
+      msg: `${prefix}fund 10`,
+      playerId: player.playerId,
+    });
+
+    const event = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(meta?.result?.success, false, 'Expected contribution to fail while a live lock is held');
+
+    const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
+    assert.ok(
+      logs.some((msg) => msg.includes('busy processing another contribution')),
+      `Expected friendly lock-timeout message, got: ${JSON.stringify(logs)}`,
+    );
+  });
+
   it('should serialize simultaneous valid deposits from different players without losing either contribution', async () => {
     const firstPlayer = ctx.players[0]!;
     const secondPlayer = ctx.players[2]!;
@@ -599,6 +723,107 @@ describe('community-fund: fund-contribute command', () => {
       statusLogs.some((msg) => msg.includes('total=20')),
       `Expected both serialized deposits to persist in fund state, got: ${JSON.stringify(statusLogs)}`,
     );
+  });
+});
+
+describe('community-fund: lock owner mismatch during release', () => {
+  let client: Client;
+  let ctx: MockServerContext;
+  let moduleId: string;
+  let versionId: string;
+  let prefix: string;
+  let contributeRoleId: string;
+
+  before(async () => {
+    client = await createClient();
+    await cleanupTestModules(client);
+    await cleanupTestGameServers(client);
+    ctx = await startMockServer(client);
+
+    await client.settings.settingsControllerSet('economyEnabled', {
+      gameServerId: ctx.gameServer.id,
+      value: 'true',
+    });
+
+    const mod = await pushModule(client, MODULE_DIR);
+    moduleId = mod.id;
+    versionId = mod.latestVersion.id;
+
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        fundThreshold: 100,
+        minimumContribution: 10,
+        completionMessage: 'The community fund reached {threshold}!',
+        completionCommands: [],
+        broadcastContributions: false,
+        debugReplaceLockOwnerBeforeRelease: true,
+      },
+    });
+    prefix = await getCommandPrefix(client, ctx.gameServer.id);
+
+    contributeRoleId = await assignPermissions(
+      client,
+      ctx.players[0].playerId,
+      ctx.gameServer.id,
+      ['COMMUNITY_FUND_CONTRIBUTE'],
+    );
+
+    await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(ctx.gameServer.id, ctx.players[0].playerId, {
+      currency: 50,
+    });
+  });
+
+  after(async () => {
+    await cleanupRole(client, contributeRoleId);
+    try {
+      await uninstallModule(client, moduleId, ctx.gameServer.id);
+    } catch (err) {
+      console.error('Cleanup: failed to uninstall owner-mismatch module:', err);
+    }
+    try {
+      await deleteModule(client, moduleId);
+    } catch (err) {
+      console.error('Cleanup: failed to delete owner-mismatch module:', err);
+    }
+    await stopMockServer(ctx.server, client, ctx.gameServer.id);
+  });
+
+  it('logs a warning and leaves the lock record alone when ownership changes before release', async () => {
+    const player = ctx.players[0]!;
+    const before = new Date();
+
+    await client.command.commandControllerTrigger(ctx.gameServer.id, {
+      msg: `${prefix}fund 10`,
+      playerId: player.playerId,
+    });
+
+    const event = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(meta?.result?.success, true, 'Expected contribution to succeed even if release sees an owner mismatch');
+
+    const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
+    assert.ok(
+      logs.some((msg) => msg.includes('was not released because ownership changed')),
+      `Expected release owner-mismatch warning, got: ${JSON.stringify(logs)}`,
+    );
+
+    const lockSearch = await client.variable.variableControllerSearch({
+      filters: {
+        key: ['fund_state_lock'],
+        gameServerId: [ctx.gameServer.id],
+        moduleId: [moduleId],
+      },
+      limit: 10,
+    });
+    assert.equal(lockSearch.data.data.length, 1, `Expected mismatched lock to remain for inspection, got: ${JSON.stringify(lockSearch.data.data)}`);
+
+    await client.variable.variableControllerDelete(lockSearch.data.data[0].id);
   });
 });
 

@@ -19,7 +19,11 @@ async function main() {
   }
 
   const target = getCommandTargetPlayer(args.player);
-  if (!target || !isPlayerOnlineHere(target, gameServerId)) {
+  if (!target) {
+    throw new TakaroUserError('Please specify a valid player.');
+  }
+
+  if (!isPlayerOnlineHere(target, gameServerId)) {
     throw new TakaroUserError('That player is not currently online.');
   }
 
@@ -34,9 +38,14 @@ async function main() {
   const [targetToken] = getCommandArgumentTokens(chatMessage);
   const reason = normalizeReason(extractReason(args.reason, chatMessage, [targetToken]), 'Kicked by an admin.');
 
-  await takaro.gameserver.gameServerControllerKickPlayer(gameServerId, target.playerId, {
-    reason,
-  });
+  try {
+    await takaro.gameserver.gameServerControllerKickPlayer(gameServerId, target.playerId, {
+      reason,
+    });
+  } catch (err) {
+    console.error(`utils:kick failed for target=${target.playerId}: ${err}`);
+    throw new TakaroUserError('That player could not be kicked right now. They may have just disconnected, or the game server rejected the kick.');
+  }
 
   console.log(`utils:kick admin=${adminName} target=${targetName} reason=${reason}`);
 
