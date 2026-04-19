@@ -69,6 +69,14 @@ export const DEFAULT_STATS = {
   },
 };
 
+const STARTER_WORDLE_WORDS = ['crane', 'slate', 'flint', 'pride', 'crown', 'spark', 'grape', 'stone', 'flame', 'track'];
+const STARTER_WORDLIST_WORDS = ['takaro', 'module', 'plugin', 'server', 'puzzle', 'winner', 'travel', 'garden', 'planet', 'rocket'];
+const STARTER_TRIVIA_QUESTIONS = [
+  { question: 'What color do you get when you mix red and yellow?', answer: 'orange', incorrectAnswers: ['purple', 'green', 'blue'], type: 'multiple' },
+  { question: 'How many days are in a leap year?', answer: '366', incorrectAnswers: ['365', '364', '360'], type: 'multiple' },
+  { question: 'True or false: The Pacific Ocean is larger than the Atlantic Ocean.', answer: 'true', incorrectAnswers: ['false'], type: 'boolean' },
+];
+
 export function getConfig(mod) {
   const raw = mod?.userConfig || {};
   return {
@@ -89,6 +97,7 @@ export function getConfig(mod) {
     triviaApiCategory: Array.isArray(raw.triviaApiCategory) && raw.triviaApiCategory.length > 0 ? raw.triviaApiCategory : ['any'],
     triviaApiDifficulty: raw.triviaApiDifficulty ?? 'any',
     triviaApiType: raw.triviaApiType ?? 'any',
+    triviaApiBaseUrl: raw.triviaApiBaseUrl || 'https://opentdb.com/api.php',
     games: {
       wordle: raw.games?.wordle ?? true,
       hangman: raw.games?.hangman ?? true,
@@ -508,6 +517,8 @@ export async function emitBigScoreEvent({ gameServerId, moduleId, playerId, play
     async () => takaro.event?.eventControllerCreate?.(basePayload),
     async () => takaro.axios?.post?.('/event', basePayload),
     async () => takaro.axios?.post?.('/event', { ...basePayload, gameServerId }),
+    async () => takaro.axios?.post?.('/event', { ...basePayload, gameServerId, meta, data: meta }),
+    async () => takaro.axios?.post?.('/event', { eventName: BIG_SCORE_EVENT_NAME, gameserverId: gameServerId, playerId, moduleId, actingModuleId: moduleId, ...meta }),
     async () => takaro.axios?.post?.('/events', basePayload),
   ];
 
@@ -640,7 +651,7 @@ export async function getPuzzleToday(gameServerId, moduleId) {
 }
 
 export async function getWordleBank(gameServerId, moduleId) {
-  const content = await ensureContentVariable(gameServerId, moduleId, CONTENT_WORDLE_KEY, { words: [] });
+  const content = await ensureContentVariable(gameServerId, moduleId, CONTENT_WORDLE_KEY, { words: STARTER_WORDLE_WORDS });
   const words = Array.isArray(content.words)
     ? content.words.map((w) => String(w).trim().toLowerCase()).filter((w) => /^[a-z]{5}$/.test(w))
     : [];
@@ -648,7 +659,7 @@ export async function getWordleBank(gameServerId, moduleId) {
 }
 
 export async function getWordlistBank(gameServerId, moduleId) {
-  const content = await ensureContentVariable(gameServerId, moduleId, CONTENT_WORDLIST_KEY, { words: [] });
+  const content = await ensureContentVariable(gameServerId, moduleId, CONTENT_WORDLIST_KEY, { words: STARTER_WORDLIST_WORDS });
   const words = Array.isArray(content.words)
     ? content.words.map((w) => String(w).trim().toLowerCase()).filter((w) => /^[a-z]{4,}$/.test(w))
     : [];
@@ -656,7 +667,7 @@ export async function getWordlistBank(gameServerId, moduleId) {
 }
 
 export async function getTriviaBank(gameServerId, moduleId) {
-  const content = await ensureContentVariable(gameServerId, moduleId, CONTENT_TRIVIA_KEY, { questions: [] });
+  const content = await ensureContentVariable(gameServerId, moduleId, CONTENT_TRIVIA_KEY, { questions: STARTER_TRIVIA_QUESTIONS });
   const questions = Array.isArray(content.questions) ? content.questions : [];
   return questions.map(normalizeTriviaQuestion).filter(Boolean);
 }
@@ -1186,7 +1197,8 @@ export async function fetchTriviaQuestion(config) {
   if (config.triviaQuestionSource !== 'api') return null;
   const categories = Array.isArray(config.triviaApiCategory) ? config.triviaApiCategory.filter(Boolean) : [];
   const pickedCategory = categories.length > 0 ? pickRandom(categories) : 'any';
-  let url = 'https://opentdb.com/api.php?amount=1';
+  const baseUrl = String(config.triviaApiBaseUrl || 'https://opentdb.com/api.php').replace(/\?$/, '');
+  let url = `${baseUrl}?amount=1`;
   if (pickedCategory && pickedCategory !== 'any' && OPENTDB_CATEGORIES[pickedCategory]) {
     url += `&category=${OPENTDB_CATEGORIES[pickedCategory]}`;
   }
@@ -1909,14 +1921,18 @@ export async function expireBans(gameServerId, moduleId) {
     try {
       const value = JSON.parse(variable.value);
       if (value.expiresAt && new Date(value.expiresAt).getTime() <= Date.now()) {
+        const markerRemoved = await removeBanMarkerRole({ roleId: value.roleId, playerId: variable.playerId, gameServerId });
+        if (value.roleId && markerRemoved === false) {
+          console.error(`minigames: expireBans kept record ${variable.id} because ban marker cleanup failed for player=${variable.playerId}`);
+          continue;
+        }
         await takaro.variable.variableControllerDelete(variable.id);
-        await removeBanMarkerRole({ roleId: value.roleId, playerId: variable.playerId, gameServerId });
         removed += 1;
       }
     } catch (err) {
-      console.error(`minigames: expireBans deleting invalid ban ${variable.id}. Error: ${err}`);
-      await takaro.variable.variableControllerDelete(variable.id);
+      console.error(`minigames: expireBans cleaning invalid ban ${variable.id}. Error: ${err}`);
       await removeBanMarkerRole({ playerId: variable.playerId, gameServerId });
+      await takaro.variable.variableControllerDelete(variable.id);
       removed += 1;
     }
   }

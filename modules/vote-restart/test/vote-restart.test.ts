@@ -89,6 +89,15 @@ function makeCronjobHelper(
   };
 }
 
+function newestVariable<T extends { id: string; createdAt?: string; updatedAt?: string }>(records: T[]) {
+  return [...records].sort((left, right) => {
+    const leftTs = new Date(left.updatedAt || left.createdAt || 0).getTime();
+    const rightTs = new Date(right.updatedAt || right.createdAt || 0).getTime();
+    if (leftTs !== rightTs) return rightTs - leftTs;
+    return String(right.id).localeCompare(String(left.id));
+  })[0];
+}
+
 async function upsertVariable(client: Client, gameServerId: string, moduleId: string, key: string, value: unknown) {
   const existing = await client.variable.variableControllerSearch({
     filters: {
@@ -96,12 +105,18 @@ async function upsertVariable(client: Client, gameServerId: string, moduleId: st
       gameServerId: [gameServerId],
       moduleId: [moduleId],
     },
+    limit: 100,
   });
-  const record = existing.data.data[0];
+  const record = newestVariable(existing.data.data);
   const payload = JSON.stringify(value);
   if (record) {
-    await client.variable.variableControllerUpdate(record.id, { value: payload });
-    return record.id;
+    try {
+      await client.variable.variableControllerUpdate(record.id, { value: payload });
+      await Promise.allSettled(existing.data.data.filter((entry) => entry.id !== record.id).map((entry) => client.variable.variableControllerDelete(entry.id)));
+      return record.id;
+    } catch {
+      await Promise.allSettled(existing.data.data.map((entry) => client.variable.variableControllerDelete(entry.id)));
+    }
   }
   const created = await client.variable.variableControllerCreate({ key, value: payload, gameServerId, moduleId });
   return created.data.data.id;
@@ -114,8 +129,9 @@ async function readVariable(client: Client, gameServerId: string, moduleId: stri
       gameServerId: [gameServerId],
       moduleId: [moduleId],
     },
+    limit: 100,
   });
-  const record = existing.data.data[0];
+  const record = newestVariable(existing.data.data);
   return record ? JSON.parse(record.value) : null;
 }
 
@@ -433,6 +449,14 @@ describe('vote-restart module', () => {
     assert.ok(
       logs.some((l) => l.includes('recently failed') || l.includes('wait')),
       `Expected cooldown message in logs, got: ${JSON.stringify(logs)}`,
+    );
+
+    const statusEvent = await triggerCommand(ctx.players[0].playerId, 'votestatus');
+    const status = getResult(statusEvent);
+    assert.equal(status.success, true, `Expected votestatus during cooldown to succeed, logs: ${JSON.stringify(status.logs)}`);
+    assert.ok(
+      status.logs.some((l) => l.includes('Another vote can be started in') || l.includes('cooldown active')),
+      `Expected votestatus to surface cooldown time, got: ${JSON.stringify(status.logs)}`,
     );
   });
 });

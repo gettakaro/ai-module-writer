@@ -28,6 +28,7 @@
       },
       "triviaApiDifficulty": { "type": "string", "enum": ["any", "easy", "medium", "hard"], "default": "any" },
       "triviaApiType": { "type": "string", "enum": ["any", "multiple", "boolean"], "default": "any" },
+      "triviaApiBaseUrl": { "type": "string", "default": "https://opentdb.com/api.php", "description": "Optional override for the OpenTDB endpoint. Primarily useful for testing fallback behaviour." },
       "games": {
         "type": "object",
         "properties": {
@@ -151,8 +152,8 @@
     },
     "minigamestop": {
       "trigger": "minigamestop",
-      "description": "View cached mini-games leaderboards.",
-      "helpText": "Usage: /minigamestop <points|wordle|hangman|streak>",
+      "description": "Legacy alias for /minigamesleaderboard.",
+      "helpText": "Usage: /minigamestop <points|wordle|hangman|streak> (legacy alias for /minigamesleaderboard)",
       "function": "src/commands/minigamestop/index.js",
       "arguments": [
         { "name": "category", "type": "string", "helpText": "points, wordle, hangman, or streak", "position": 0, "defaultValue": "__MINIGAMES_NONE__" }
@@ -160,7 +161,7 @@
     },
     "minigamesleaderboard": {
       "trigger": "minigamesleaderboard",
-      "description": "Legacy alias for /minigamestop.",
+      "description": "View cached mini-games leaderboards.",
       "helpText": "Usage: /minigamesleaderboard <points|wordle|hangman|streak>",
       "function": "src/commands/minigamesleaderboard/index.js",
       "arguments": [

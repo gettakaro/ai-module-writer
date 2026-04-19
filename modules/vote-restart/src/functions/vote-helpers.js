@@ -9,37 +9,64 @@ const RESTART_EXECUTION_LOCK_TTL_MS = 2 * 60 * 1000;
 
 // ── Generic variable CRUD ─────────────────────────────────────────────────────
 
-export async function findVariable(gameServerId, moduleId, key) {
+function compareVariableRecency(left, right) {
+  const leftTimestamp = new Date(left?.updatedAt || left?.createdAt || 0).getTime();
+  const rightTimestamp = new Date(right?.updatedAt || right?.createdAt || 0).getTime();
+  if (leftTimestamp !== rightTimestamp) {
+    return rightTimestamp - leftTimestamp;
+  }
+  return String(right?.id || '').localeCompare(String(left?.id || ''));
+}
+
+export async function findVariables(gameServerId, moduleId, key) {
   const res = await takaro.variable.variableControllerSearch({
     filters: {
       key: [key],
       gameServerId: [gameServerId],
       moduleId: [moduleId],
     },
+    limit: 100,
   });
-  return res.data.data.length > 0 ? res.data.data[0] : null;
+  return [...res.data.data].sort(compareVariableRecency);
+}
+
+export async function findVariable(gameServerId, moduleId, key) {
+  const variables = await findVariables(gameServerId, moduleId, key);
+  return variables[0] || null;
 }
 
 export async function writeVariable(gameServerId, moduleId, key, value) {
-  const existing = await findVariable(gameServerId, moduleId, key);
+  const existing = await findVariables(gameServerId, moduleId, key);
   const serialized = JSON.stringify(value);
-  if (existing) {
-    await takaro.variable.variableControllerUpdate(existing.id, { value: serialized });
-  } else {
-    await takaro.variable.variableControllerCreate({
-      key,
-      value: serialized,
-      gameServerId,
-      moduleId,
-    });
+  const [primary, ...duplicates] = existing;
+
+  if (primary) {
+    try {
+      await takaro.variable.variableControllerUpdate(primary.id, { value: serialized });
+      await Promise.allSettled(duplicates.map((entry) => takaro.variable.variableControllerDelete(entry.id)));
+      return primary.id;
+    } catch (err) {
+      console.error(`vote-helpers: failed to update variable ${key} primary=${primary.id}, recreating. Error: ${err}`);
+      await Promise.allSettled(existing.map((entry) => takaro.variable.variableControllerDelete(entry.id)));
+    }
   }
+
+  const created = await takaro.variable.variableControllerCreate({
+    key,
+    value: serialized,
+    gameServerId,
+    moduleId,
+  });
+  return created.data.data.id;
 }
 
 export async function removeVariable(gameServerId, moduleId, key) {
-  const existing = await findVariable(gameServerId, moduleId, key);
-  if (existing) {
-    await takaro.variable.variableControllerDelete(existing.id);
+  const existing = await findVariables(gameServerId, moduleId, key);
+  if (existing.length === 0) {
+    return false;
   }
+  await Promise.allSettled(existing.map((entry) => takaro.variable.variableControllerDelete(entry.id)));
+  return true;
 }
 
 function isExpiredExecutionLock(lockValue, ttlMs = RESTART_EXECUTION_LOCK_TTL_MS) {

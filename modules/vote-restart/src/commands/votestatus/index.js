@@ -2,6 +2,7 @@ import { data } from '@takaro/helpers';
 import {
   getVoteState,
   getRestartPending,
+  getCooldownUntil,
   getOnlineNonImmunePlayers,
   computeThreshold,
 } from './vote-helpers.js';
@@ -17,6 +18,13 @@ async function main() {
     : await getRestartPending(gameServerId, moduleId);
 
   if (!voteState && !restartPending) {
+    const cooldownUntil = await getCooldownUntil(gameServerId, moduleId);
+    const cooldownRemaining = Math.ceil((new Date(cooldownUntil || 0).getTime() - Date.now()) / 1000);
+    if (cooldownUntil && cooldownRemaining > 0) {
+      console.log(`vote-status: cooldown active ${cooldownRemaining}s remaining`);
+      await pog.pm(`[Vote Restart] No active restart vote. Another vote can be started in ${cooldownRemaining}s.`);
+      return;
+    }
     console.log('vote-status: No active restart vote');
     await pog.pm('[Vote Restart] No active restart vote.');
     return;

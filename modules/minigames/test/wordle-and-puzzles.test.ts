@@ -30,6 +30,15 @@ const KEY_STATS = 'minigames_stats';
 const KEY_WINDOW = 'minigames_window';
 const KEY_HISTORY = 'minigames_daily_history';
 
+function newestVariable<T extends { id: string; createdAt?: string; updatedAt?: string }>(records: T[]) {
+  return [...records].sort((left, right) => {
+    const leftTs = new Date(left.updatedAt || left.createdAt || 0).getTime();
+    const rightTs = new Date(right.updatedAt || right.createdAt || 0).getTime();
+    if (leftTs !== rightTs) return rightTs - leftTs;
+    return String(right.id).localeCompare(String(left.id));
+  })[0];
+}
+
 async function upsertVariable(client: Client, gameServerId: string, moduleId: string, key: string, value: unknown, playerId?: string) {
   const res = await client.variable.variableControllerSearch({
     filters: {
@@ -38,14 +47,20 @@ async function upsertVariable(client: Client, gameServerId: string, moduleId: st
       moduleId: [moduleId],
       ...(playerId ? { playerId: [playerId] } : {}),
     },
+    limit: 100,
   });
   const serialized = JSON.stringify(value);
-  const existing = res.data.data[0];
+  const existing = newestVariable(res.data.data);
   if (existing) {
-    await client.variable.variableControllerUpdate(existing.id, { value: serialized });
-  } else {
-    await client.variable.variableControllerCreate({ key, value: serialized, gameServerId, moduleId, ...(playerId ? { playerId } : {}) });
+    try {
+      await client.variable.variableControllerUpdate(existing.id, { value: serialized });
+      await Promise.allSettled(res.data.data.filter((entry) => entry.id !== existing.id).map((entry) => client.variable.variableControllerDelete(entry.id)));
+      return;
+    } catch {
+      await Promise.allSettled(res.data.data.map((entry) => client.variable.variableControllerDelete(entry.id)));
+    }
   }
+  await client.variable.variableControllerCreate({ key, value: serialized, gameServerId, moduleId, ...(playerId ? { playerId } : {}) });
 }
 
 async function readVariable(client: Client, gameServerId: string, moduleId: string, key: string, playerId?: string) {
@@ -56,8 +71,9 @@ async function readVariable(client: Client, gameServerId: string, moduleId: stri
       moduleId: [moduleId],
       ...(playerId ? { playerId: [playerId] } : {}),
     },
+    limit: 100,
   });
-  const existing = res.data.data[0];
+  const existing = newestVariable(res.data.data);
   return existing ? JSON.parse(existing.value) : null;
 }
 

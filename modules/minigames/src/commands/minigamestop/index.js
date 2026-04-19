@@ -6,7 +6,7 @@ async function main() {
   const moduleId = mod.moduleId;
   await requirePlayable({ gameServerId, moduleId, pog, playerId: player.id });
   const category = normalizeOptionalStringArg(args.category).toLowerCase();
-  if (!category) throw new TakaroUserError('Usage: /minigamestop <points|wordle|hangman|streak>');
+  if (!category) throw new TakaroUserError('Usage: /minigamestop <points|wordle|hangman|streak> (legacy alias for /minigamesleaderboard)');
 
   let cache = await getLeaderboardCache(gameServerId, moduleId);
   if (!cache.refreshedAt) cache = await refreshLeaderboards(gameServerId, moduleId);
@@ -21,7 +21,7 @@ async function main() {
   if (!selected) throw new TakaroUserError('Category must be one of: points, wordle, hangman, streak.');
   const message = renderLeaderboard(selected[0], selected[1]);
   await pog.pm(message);
-  console.log(`minigames: leaderboard category=${category} summary=${message.replace(/\n/g, ' | ')}`);
+  console.log(`minigames: leaderboard alias=minigamestop category=${category} summary=${message.replace(/\n/g, ' | ')}`);
 }
 
 await main();

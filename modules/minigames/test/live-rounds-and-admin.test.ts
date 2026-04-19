@@ -33,6 +33,15 @@ const KEY_WINDOW = 'minigames_window';
 const KEY_HISTORY = 'minigames_daily_history';
 const KEY_LAST = 'minigames_last_round_fired_at';
 
+function newestVariable<T extends { id: string; createdAt?: string; updatedAt?: string }>(records: T[]) {
+  return [...records].sort((left, right) => {
+    const leftTs = new Date(left.updatedAt || left.createdAt || 0).getTime();
+    const rightTs = new Date(right.updatedAt || right.createdAt || 0).getTime();
+    if (leftTs !== rightTs) return rightTs - leftTs;
+    return String(right.id).localeCompare(String(left.id));
+  })[0];
+}
+
 async function upsertVariable(client: Client, gameServerId: string, moduleId: string, key: string, value: unknown, playerId?: string) {
   const res = await client.variable.variableControllerSearch({
     filters: {
@@ -41,14 +50,20 @@ async function upsertVariable(client: Client, gameServerId: string, moduleId: st
       moduleId: [moduleId],
       ...(playerId ? { playerId: [playerId] } : {}),
     },
+    limit: 100,
   });
   const serialized = JSON.stringify(value);
-  const existing = res.data.data[0];
+  const existing = newestVariable(res.data.data);
   if (existing) {
-    await client.variable.variableControllerUpdate(existing.id, { value: serialized });
-  } else {
-    await client.variable.variableControllerCreate({ key, value: serialized, gameServerId, moduleId, ...(playerId ? { playerId } : {}) });
+    try {
+      await client.variable.variableControllerUpdate(existing.id, { value: serialized });
+      await Promise.allSettled(res.data.data.filter((entry) => entry.id !== existing.id).map((entry) => client.variable.variableControllerDelete(entry.id)));
+      return;
+    } catch {
+      await Promise.allSettled(res.data.data.map((entry) => client.variable.variableControllerDelete(entry.id)));
+    }
   }
+  await client.variable.variableControllerCreate({ key, value: serialized, gameServerId, moduleId, ...(playerId ? { playerId } : {}) });
 }
 
 async function readVariable(client: Client, gameServerId: string, moduleId: string, key: string, playerId?: string) {
@@ -59,8 +74,9 @@ async function readVariable(client: Client, gameServerId: string, moduleId: stri
       moduleId: [moduleId],
       ...(playerId ? { playerId: [playerId] } : {}),
     },
+    limit: 100,
   });
-  const existing = res.data.data[0];
+  const existing = newestVariable(res.data.data);
   return existing ? JSON.parse(existing.value) : null;
 }
 
@@ -876,5 +892,88 @@ describe('minigames: trivia sources and live-round gating branches', () => {
     const warnings = await readVariable(client, ctx.gameServer.id, moduleId, 'minigames_admin_warned_empty_bank');
     assert.ok(!round || round.game !== 'scramble', 'scramble should not become active when the bank is empty');
     assert.ok(Array.isArray(warnings?.keys) && warnings.keys.includes(KEY_WORDLIST), `expected empty-bank warning to mention ${KEY_WORDLIST}, got ${JSON.stringify(warnings)}`);
+  });
+});
+
+describe('minigames: trivia api fallback', () => {
+  let client: Client;
+  let ctx: MockServerContext;
+  let moduleId: string;
+  let versionId: string;
+  let prefix: string;
+  let adminRoleId: string | undefined;
+
+  before(async () => {
+    client = await createClient();
+    await cleanupTestModules(client);
+    await cleanupTestGameServers(client);
+    ctx = await startMockServer(client);
+
+    const mod = await pushModule(client, MODULE_DIR);
+    moduleId = mod.id;
+    versionId = mod.latestVersion.id;
+
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        triviaQuestionSource: 'api',
+        triviaApiBaseUrl: 'http://127.0.0.1:1/api.php',
+        liveRoundIntervalMinutes: 5,
+        minPlayersForLiveRound: 1,
+        games: {
+          wordle: true,
+          hangman: true,
+          hotcold: true,
+          trivia: true,
+          scramble: false,
+          mathrace: false,
+          reactionrace: false,
+        },
+      },
+    });
+
+    prefix = await getCommandPrefix(client, ctx.gameServer.id);
+    adminRoleId = await assignPermissions(client, ctx.players[0].playerId, ctx.gameServer.id, ['MINIGAMES_PLAY', 'MINIGAMES_MANAGE']);
+    await upsertVariable(client, ctx.gameServer.id, moduleId, KEY_TRIVIA, {
+      questions: [{ question: 'Fallback question?', answer: 'fallback' }],
+    });
+  });
+
+  after(async () => {
+    await cleanupRole(client, adminRoleId);
+    try {
+      await uninstallModule(client, moduleId, ctx.gameServer.id);
+    } catch (err) {
+      console.error('Cleanup: failed to uninstall fallback module:', err);
+    }
+    try {
+      await deleteModule(client, moduleId);
+    } catch (err) {
+      console.error('Cleanup: failed to delete fallback module:', err);
+    }
+    await stopMockServer(ctx.server, client, ctx.gameServer.id);
+  });
+
+  async function triggerCommand(playerId: string, msg: string) {
+    const before = new Date();
+    await client.command.commandControllerTrigger(ctx.gameServer.id, { playerId, msg });
+    return waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+  }
+
+  it('falls back to the stored trivia bank when the api request fails', async () => {
+    const event = await triggerCommand(ctx.players[0].playerId, `${prefix}minigamesfirenow trivia`);
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(meta?.result?.success, true, `forced trivia round should succeed via fallback, logs=${JSON.stringify(logs)}`);
+    assert.ok(logs.some((msg) => msg.includes('trivia api fetch failed, using fallback')), `expected fallback log, got ${JSON.stringify(logs)}`);
+
+    const round = await readVariable(client, ctx.gameServer.id, moduleId, KEY_ACTIVE);
+    assert.equal(round?.game, 'trivia');
+    assert.equal(round?.prompt, 'Fallback question?');
+    assert.equal(round?.answer, 'fallback');
   });
 });
