@@ -206,6 +206,65 @@ describe('casino module', () => {
       `expected insufficient-funds message, logs=${JSON.stringify(result.logs)}`);
   });
 
+  it('covers slots loss, pair, triple, and jackpot branches', async () => {
+    const player = ctx.players[0]!;
+
+    const setSlotsOverride = async (reels: string[]) => {
+      const existing = await getVariable('casino_slots_override', player.playerId);
+      if (existing) {
+        await client.variable.variableControllerUpdate(existing.id, { value: JSON.stringify({ reels }) });
+      } else {
+        await client.variable.variableControllerCreate({
+          key: 'casino_slots_override',
+          value: JSON.stringify({ reels }),
+          gameServerId: ctx.gameServer.id,
+          moduleId,
+          playerId: player.playerId,
+        });
+      }
+    };
+
+    await setSlotsOverride(['🍒', '🔔', '🍇']);
+    const loss = await triggerCommand(player.playerId, `${prefix}slots 10`);
+    assert.equal(loss.success, true, `expected slots loss success, logs=${JSON.stringify(loss.logs)}`);
+    assert.ok(loss.logs.some((msg) => /No luck/i.test(msg)), `expected loss wording, logs=${JSON.stringify(loss.logs)}`);
+
+    await setSlotsOverride(['🍒', '🍒', '🍋']);
+    const pair = await triggerCommand(player.playerId, `${prefix}slots 10`);
+    assert.equal(pair.success, true, `expected slots pair success, logs=${JSON.stringify(pair.logs)}`);
+    assert.ok(pair.logs.some((msg) => /Pair!/i.test(msg)), `expected pair wording, logs=${JSON.stringify(pair.logs)}`);
+
+    await setSlotsOverride(['⭐', '⭐', '⭐']);
+    const triple = await triggerCommand(player.playerId, `${prefix}slots 10`);
+    assert.equal(triple.success, true, `expected slots triple success, logs=${JSON.stringify(triple.logs)}`);
+    assert.ok(triple.logs.some((msg) => /Triple!/i.test(msg)), `expected triple wording, logs=${JSON.stringify(triple.logs)}`);
+
+    const jackpotRow = await getVariable('casino_jackpot');
+    if (jackpotRow) {
+      await client.variable.variableControllerUpdate(jackpotRow.id, {
+        value: JSON.stringify({ amount: 4321, lastWinner: null, lastWinAt: null, lastWinGame: null }),
+      });
+    } else {
+      await client.variable.variableControllerCreate({
+        key: 'casino_jackpot',
+        value: JSON.stringify({ amount: 4321, lastWinner: null, lastWinAt: null, lastWinGame: null }),
+        gameServerId: ctx.gameServer.id,
+        moduleId,
+      });
+    }
+
+    await setSlotsOverride(['7️⃣', '7️⃣', '7️⃣']);
+    const jackpot = await triggerCommand(player.playerId, `${prefix}slots 10`);
+    assert.equal(jackpot.success, true, `expected slots jackpot success, logs=${JSON.stringify(jackpot.logs)}`);
+    assert.ok(jackpot.logs.some((msg) => /JACKPOT!/i.test(msg)), `expected jackpot wording, logs=${JSON.stringify(jackpot.logs)}`);
+
+    const jackpotAfter = await getVariable('casino_jackpot');
+    assert.ok(jackpotAfter, 'expected casino_jackpot variable after jackpot win');
+    const parsedJackpot = JSON.parse(jackpotAfter!.value);
+    assert.equal(parsedJackpot.amount, 0, 'expected jackpot pot reset after triple sevens');
+    assert.equal(parsedJackpot.lastWinGame, 'slots', 'expected slots jackpot history update');
+  });
+
   it('prevents stacked duel challenges on the same target and resolves a full duel flow', async () => {
     const challenger = ctx.players[0]!;
     const target = ctx.players[1]!;
@@ -285,6 +344,31 @@ describe('casino module', () => {
     const pool = await getVariable('casino_race_pool');
     const parsed = JSON.parse(pool!.value);
     assert.deepEqual(parsed, { participants: [], drawAt: null, status: 'open' });
+  });
+
+  it('settles every race entry even when the same player joins multiple times', async () => {
+    const p1 = ctx.players[0]!;
+    const p2 = ctx.players[1]!;
+    const before1 = await getPlayerCurrency(p1.playerId);
+    const before2 = await getPlayerCurrency(p2.playerId);
+
+    const join1 = await triggerCommand(p1.playerId, `${prefix}race 11`);
+    const join2 = await triggerCommand(p1.playerId, `${prefix}race 13`);
+    const join3 = await triggerCommand(p2.playerId, `${prefix}race 17`);
+    assert.equal(join1.success && join2.success && join3.success, true, `expected race joins to succeed, logs=${JSON.stringify([join1.logs, join2.logs, join3.logs])}`);
+
+    await updateVariable('casino_race_pool', undefined, (pool) => ({ ...pool, drawAt: new Date(Date.now() - 1000).toISOString() }));
+    const draw = await triggerCronjob(drawRaceCronjobId);
+    assert.equal(draw.success, true, `expected draw-race success for duplicate entries, logs=${JSON.stringify(draw.logs)}`);
+
+    const stats1 = JSON.parse((await getVariable('casino_stats', p1.playerId))!.value);
+    const stats2 = JSON.parse((await getVariable('casino_stats', p2.playerId))!.value);
+    assert.ok((stats1.perGame.race?.plays ?? 0) >= 2, `expected both of player one's race tickets to settle, stats=${JSON.stringify(stats1.perGame.race)}`);
+    assert.ok((stats2.perGame.race?.plays ?? 0) >= 1, `expected player two race ticket to settle, stats=${JSON.stringify(stats2.perGame.race)}`);
+
+    const after1 = await getPlayerCurrency(p1.playerId);
+    const after2 = await getPlayerCurrency(p2.playerId);
+    assert.ok(after1 !== before1 - 24 || after2 !== before2 - 17, 'expected race settlement to resolve the pot instead of leaving raw deductions behind');
   });
 
   it('covers hilo win, cashout, and loss branches', async () => {
@@ -398,6 +482,82 @@ describe('casino module', () => {
     const afterRefundBalance = await getPlayerCurrency(player.playerId);
     assert.equal(afterRefundBalance, beforeBalance, 'expected blackjack session refund on disconnect');
     assert.equal(await getVariable('casino_session_blackjack', player.playerId), null, 'expected blackjack session deletion');
+
+    await ctx.server.executeConsoleCommand('connectAll');
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  });
+
+  it('refunds hilo sessions when the player disconnects', async () => {
+    const player = ctx.players[0]!;
+    const beforeBalance = await getPlayerCurrency(player.playerId);
+
+    const start = await triggerCommand(player.playerId, `${prefix}hilo 19`);
+    assert.equal(start.success, true, `expected hilo start success, logs=${JSON.stringify(start.logs)}`);
+    assert.equal(beforeBalance - await getPlayerCurrency(player.playerId), 19, 'expected hilo stake deduction');
+
+    const beforeHook = new Date();
+    await ctx.server.executeConsoleCommand('disconnectAll');
+    const hookEvent = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.HookExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: beforeHook,
+      timeout: 30000,
+    });
+    const hookMeta = hookEvent.meta as { result?: { success?: boolean } };
+    assert.equal(hookMeta?.result?.success, true, 'expected disconnect hook success for hilo');
+
+    assert.equal(await getPlayerCurrency(player.playerId), beforeBalance, 'expected hilo session refund on disconnect');
+    assert.equal(await getVariable('casino_session_hilo', player.playerId), null, 'expected hilo session deletion on disconnect');
+
+    await ctx.server.executeConsoleCommand('connectAll');
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  });
+
+  it('refunds pending and accepted duels when players disconnect', async () => {
+    const challenger = ctx.players[0]!;
+    const target = ctx.players[1]!;
+    const targetName = (await client.player.playerControllerGetOne(target.playerId)).data.data.name;
+
+    const beforePending = await getPlayerCurrency(challenger.playerId);
+    const pending = await triggerCommand(challenger.playerId, `${prefix}duel ${targetName} 17`);
+    assert.equal(pending.success, true, `expected pending duel success, logs=${JSON.stringify(pending.logs)}`);
+
+    let beforeHook = new Date();
+    await ctx.server.executeConsoleCommand('disconnectAll');
+    let hookEvent = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.HookExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: beforeHook,
+      timeout: 30000,
+    });
+    let hookMeta = hookEvent.meta as { result?: { success?: boolean } };
+    assert.equal(hookMeta?.result?.success, true, 'expected disconnect hook success for pending duel');
+    assert.equal(await getVariable('casino_duel', challenger.playerId), null, 'expected pending duel deletion on disconnect');
+    assert.equal(await getPlayerCurrency(challenger.playerId), beforePending, 'expected pending duel refund on disconnect');
+
+    await ctx.server.executeConsoleCommand('connectAll');
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    const beforeAccepted1 = await getPlayerCurrency(challenger.playerId);
+    const beforeAccepted2 = await getPlayerCurrency(target.playerId);
+    const challenge = await triggerCommand(challenger.playerId, `${prefix}duel ${targetName} 21`);
+    assert.equal(challenge.success, true, `expected accepted duel challenge success, logs=${JSON.stringify(challenge.logs)}`);
+    const accept = await triggerCommand(target.playerId, `${prefix}duel accept`);
+    assert.equal(accept.success, true, `expected accepted duel acceptance success, logs=${JSON.stringify(accept.logs)}`);
+
+    beforeHook = new Date();
+    await ctx.server.executeConsoleCommand('disconnectAll');
+    hookEvent = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.HookExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: beforeHook,
+      timeout: 30000,
+    });
+    hookMeta = hookEvent.meta as { result?: { success?: boolean } };
+    assert.equal(hookMeta?.result?.success, true, 'expected disconnect hook success for accepted duel');
+    assert.equal(await getVariable('casino_duel', challenger.playerId), null, 'expected accepted duel deletion on disconnect');
+    assert.equal(await getPlayerCurrency(challenger.playerId), beforeAccepted1, 'expected challenger refund on accepted-duel disconnect');
+    assert.equal(await getPlayerCurrency(target.playerId), beforeAccepted2, 'expected opponent refund on accepted-duel disconnect');
 
     await ctx.server.executeConsoleCommand('connectAll');
     await new Promise((resolve) => setTimeout(resolve, 1500));

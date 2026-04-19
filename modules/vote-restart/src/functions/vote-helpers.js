@@ -5,8 +5,8 @@ export const RESTART_STATE_KEY = 'vr_restart_state';
 export const COOLDOWN_KEY = 'vr_cooldown_until';
 export const LOCK_KEY = 'vr_state_lock';
 
-export function sleep(ms = 0) {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+export function sleep() {
+  throw new Error('vote-helpers: sleep() is unavailable in the Takaro runtime');
 }
 
 // ── Generic variable CRUD ─────────────────────────────────────────────────────
@@ -47,7 +47,10 @@ export async function removeVariable(gameServerId, moduleId, key) {
 export async function acquireVoteLock(gameServerId, moduleId, { ttlMs = 15000, timeoutMs = 10000, retryMs = 100 } = {}) {
   const owner = `${Date.now()}:${Math.random().toString(36).slice(2)}`;
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  const maxAttempts = Math.max(10, Math.ceil(timeoutMs / Math.max(1, retryMs)));
+  let attempts = 0;
+  while (Date.now() < deadline && attempts < maxAttempts) {
+    attempts += 1;
     try {
       await takaro.variable.variableControllerCreate({
         key: LOCK_KEY,
@@ -83,7 +86,6 @@ export async function acquireVoteLock(gameServerId, moduleId, { ttlMs = 15000, t
           continue;
         }
       }
-      await sleep(retryMs);
     }
   }
   throw new Error('Timed out acquiring vote-restart state lock');

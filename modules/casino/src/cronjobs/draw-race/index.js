@@ -6,14 +6,11 @@ function emptyPool() {
     participants: [],
     drawAt: null,
     status: 'open',
-    drawId: null,
-    winnerId: null,
-    winnerName: null,
-    payout: null,
-    totalPot: null,
-    settledPlayerIds: [],
-    cancelled: false,
   };
+}
+
+function getParticipantEntryKey(participant, index) {
+  return participant?.ticketId ?? `${participant?.playerId ?? 'unknown'}:${index}`;
 }
 
 async function main() {
@@ -24,23 +21,16 @@ async function main() {
     const participants = Array.isArray(pool.participants) ? [...pool.participants] : [];
     const due = pool.drawAt && new Date(pool.drawAt).getTime() <= Date.now();
     const recoverableDrawing = pool.status === 'drawing' && participants.length > 0;
-    const allSettled = recoverableDrawing && participants.every((participant) => (pool.settledPlayerIds ?? []).includes(participant.playerId));
+    const settledEntryKeys = new Set(Array.isArray(pool.settledEntryKeys) ? pool.settledEntryKeys : []);
     if (!recoverableDrawing && !due) {
       return undefined;
     }
 
     if (recoverableDrawing) {
-      if (allSettled) {
-        return {
-          ...pool,
-          participants,
-          settledPlayerIds: Array.isArray(pool.settledPlayerIds) ? [...pool.settledPlayerIds] : [],
-        };
-      }
       return {
         ...pool,
         participants,
-        settledPlayerIds: Array.isArray(pool.settledPlayerIds) ? [...pool.settledPlayerIds] : [],
+        settledEntryKeys: [...settledEntryKeys],
       };
     }
 
@@ -57,7 +47,7 @@ async function main() {
       winnerName: winner?.name ?? null,
       payout,
       totalPot,
-      settledPlayerIds: Array.isArray(pool.settledPlayerIds) ? [...pool.settledPlayerIds] : [],
+      settledEntryKeys: Array.isArray(pool.settledEntryKeys) ? [...pool.settledEntryKeys] : [],
       cancelled,
     };
   });
@@ -70,16 +60,17 @@ async function main() {
   try {
     const participants = Array.isArray(snapshot.participants) ? snapshot.participants : [];
 
-    for (const participant of participants) {
+    for (const [index, participant] of participants.entries()) {
       let shouldProcess = false;
       snapshot = await mutateRacePool(gameServerId, mod.moduleId, async (pool) => {
-        const settled = new Set(Array.isArray(pool.settledPlayerIds) ? pool.settledPlayerIds : []);
-        if (settled.has(participant.playerId)) return { ...pool, settledPlayerIds: [...settled] };
-        settled.add(participant.playerId);
+        const settled = new Set(Array.isArray(pool.settledEntryKeys) ? pool.settledEntryKeys : []);
+        const entryKey = getParticipantEntryKey(participant, index);
+        if (settled.has(entryKey)) return { ...pool, settledEntryKeys: [...settled] };
+        settled.add(entryKey);
         shouldProcess = true;
         return {
           ...pool,
-          settledPlayerIds: [...settled],
+          settledEntryKeys: [...settled],
         };
       });
 

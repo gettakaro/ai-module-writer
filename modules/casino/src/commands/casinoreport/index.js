@@ -1,10 +1,20 @@
-import { data } from '@takaro/helpers';
+import { data, TakaroUserError } from '@takaro/helpers';
 import { requireManagePermission, generateReport, formatCurrency } from './casino-helpers.js';
 
 async function main() {
   const { pog, gameServerId, module: mod, arguments: args } = data;
   requireManagePermission(pog);
-  const days = Math.max(1, Math.min(365, Math.floor(Number(args.days ?? 7) || 7)));
+
+  const rawDays = args.days;
+  let days = 7;
+  if (rawDays !== undefined && rawDays !== null && String(rawDays).trim() !== '') {
+    const parsed = Number(rawDays);
+    if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 1 || parsed > 365) {
+      throw new TakaroUserError('Days must be a whole number between 1 and 365.');
+    }
+    days = parsed;
+  }
+
   const report = await generateReport(gameServerId, mod.moduleId, days);
   const perGameLines = Object.entries(report.perGame).map(([game, row]) => `${game}: wagered ${formatCurrency(row.wagered)}, won ${formatCurrency(row.won)}, plays ${row.plays}`);
   const lines = [

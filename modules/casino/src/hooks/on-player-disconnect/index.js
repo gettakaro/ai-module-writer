@@ -4,8 +4,18 @@ import { getDefaultConfig, handleDisconnect } from './casino-helpers.js';
 async function main() {
   const { gameServerId, player, eventData, module: mod } = data;
   const config = getDefaultConfig(mod.userConfig);
-  const playerId = player?.id ?? eventData?.playerId ?? eventData?.player?.id;
-  const playerName = player?.name ?? eventData?.playerName ?? eventData?.player?.name ?? playerId;
+  const playerId = player?.id
+    ?? eventData?.playerId
+    ?? eventData?.player?.id
+    ?? eventData?.player?.playerId
+    ?? eventData?.playerOnGameServer?.playerId
+    ?? eventData?.pog?.playerId;
+  const playerName = player?.name
+    ?? eventData?.playerName
+    ?? eventData?.player?.name
+    ?? eventData?.playerOnGameServer?.name
+    ?? eventData?.pog?.name
+    ?? playerId;
   if (!playerId) {
     console.log('casino.onPlayerDisconnect: no playerId on disconnect event');
     return;

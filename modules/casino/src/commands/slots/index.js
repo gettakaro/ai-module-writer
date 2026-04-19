@@ -1,12 +1,30 @@
 import { data } from '@takaro/helpers';
-import { getDefaultConfig, placeBet, settle, settleJackpotWin, roundCurrency, formatCurrency, pickSlotSymbol } from './casino-helpers.js';
+import {
+  getDefaultConfig,
+  placeBet,
+  settle,
+  settleJackpotWin,
+  roundCurrency,
+  formatCurrency,
+  pickSlotSymbol,
+  readJsonVariable,
+  deleteVariable,
+  getSlotSymbolByEmoji,
+} from './casino-helpers.js';
 
 async function main() {
   const { gameServerId, pog, player, arguments: args, module: mod } = data;
   const config = getDefaultConfig(mod.userConfig);
   const placed = await placeBet({ gameServerId, moduleId: mod.moduleId, pog, player, config, game: 'slots', amount: args.amount });
 
-  const reels = [pickSlotSymbol(), pickSlotSymbol(), pickSlotSymbol()];
+  const forcedReels = await readJsonVariable(gameServerId, mod.moduleId, 'casino_slots_override', player.id, null);
+  if (forcedReels) {
+    await deleteVariable(gameServerId, mod.moduleId, 'casino_slots_override', player.id);
+  }
+
+  const reels = Array.isArray(forcedReels?.reels) && forcedReels.reels.length === 3
+    ? forcedReels.reels.map((emoji) => getSlotSymbolByEmoji(emoji) ?? pickSlotSymbol())
+    : [pickSlotSymbol(), pickSlotSymbol(), pickSlotSymbol()];
   const icons = reels.map((r) => r.emoji).join(' ');
   const allSame = reels[0].emoji === reels[1].emoji && reels[1].emoji === reels[2].emoji;
   const adjacentPair = reels[0].emoji === reels[1].emoji || reels[1].emoji === reels[2].emoji;

@@ -23,10 +23,10 @@ async function main() {
   const rows = cache[key] ?? [];
   const lines = [`🏆 ${title}`];
   if (cache.refreshedAt) {
-    lines.push(`Cache refreshed ${formatPastTime(cache.refreshedAt)}${stale ? ' — waiting for the next cron refresh.' : ''}`);
+    lines.push(`Cache refreshed ${formatPastTime(cache.refreshedAt)}${stale ? ' — updating again soon.' : ''}`);
   }
   if (rows.length === 0) {
-    lines.push('No casino leaderboard data yet. Wait for the refresh-leaderboards cronjob to populate the cache.');
+    lines.push('No casino leaderboard data is ready yet. Play a few rounds and check back in a moment.');
     await pog.pm(lines.join('\n'));
     return;
   }

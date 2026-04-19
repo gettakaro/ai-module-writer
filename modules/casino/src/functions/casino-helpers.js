@@ -39,8 +39,8 @@ export function nowIso() {
   return new Date().toISOString();
 }
 
-export function sleep(ms = 0) {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+export function sleep() {
+  throw new Error('casino-helpers: sleep() is unavailable in the Takaro runtime');
 }
 
 export function formatUtcTimestamp(value) {
@@ -248,8 +248,11 @@ export async function acquireLock(gameServerId, moduleId, scope, { ttlMs = 15000
   const key = getLockKey(scope);
   const owner = `${nowIso()}:${Math.random().toString(36).slice(2)}`;
   const deadline = Date.now() + timeoutMs;
+  const maxAttempts = Math.max(10, Math.ceil(timeoutMs / Math.max(1, retryMs)));
+  let attempts = 0;
 
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && attempts < maxAttempts) {
+    attempts += 1;
     const expiresAt = new Date(Date.now() + ttlMs).toISOString();
     try {
       await takaro.variable.variableControllerCreate({
@@ -288,7 +291,6 @@ export async function acquireLock(gameServerId, moduleId, scope, { ttlMs = 15000
           continue;
         }
       }
-      await sleep(retryMs);
     }
   }
 
@@ -533,34 +535,38 @@ export async function assertNoLegacyCasinoModules(gameServerId, moduleId) {
 }
 
 export async function recordReportDay(gameServerId, moduleId, { playerId, playerName, game, betAmount, payout, occurredAt = nowIso() }) {
-  const dayKey = `${KEY_REPORT_DAY_PREFIX}:${String(occurredAt).slice(0, 10)}`;
-  const current = await readJsonVariable(gameServerId, moduleId, dayKey, undefined, {
-    day: String(occurredAt).slice(0, 10),
-    totalWagered: 0,
-    totalWon: 0,
-    houseProfit: 0,
-    perGame: {},
-    players: {},
+  const day = String(occurredAt).slice(0, 10);
+  const dayKey = `${KEY_REPORT_DAY_PREFIX}:${day}`;
+
+  await withCasinoLocks(gameServerId, moduleId, [`report-day:${day}`], async () => {
+    const current = await readJsonVariable(gameServerId, moduleId, dayKey, undefined, {
+      day,
+      totalWagered: 0,
+      totalWon: 0,
+      houseProfit: 0,
+      perGame: {},
+      players: {},
+    });
+
+    current.totalWagered = Number(current.totalWagered ?? 0) + roundCurrency(betAmount);
+    current.totalWon = Number(current.totalWon ?? 0) + roundCurrency(payout);
+    current.houseProfit = Number(current.houseProfit ?? 0) + roundCurrency(betAmount) - roundCurrency(payout);
+
+    const gameRow = current.perGame?.[game] ?? { wagered: 0, won: 0, plays: 0 };
+    gameRow.wagered += roundCurrency(betAmount);
+    gameRow.won += roundCurrency(payout);
+    gameRow.plays += 1;
+    current.perGame = { ...(current.perGame ?? {}), [game]: gameRow };
+
+    const playerRow = current.players?.[playerId] ?? { name: playerName, wagered: 0, won: 0, net: 0 };
+    playerRow.name = playerName;
+    playerRow.wagered += roundCurrency(betAmount);
+    playerRow.won += roundCurrency(payout);
+    playerRow.net += roundCurrency(payout) - roundCurrency(betAmount);
+    current.players = { ...(current.players ?? {}), [playerId]: playerRow };
+
+    await writeVariable(gameServerId, moduleId, dayKey, current);
   });
-
-  current.totalWagered = Number(current.totalWagered ?? 0) + roundCurrency(betAmount);
-  current.totalWon = Number(current.totalWon ?? 0) + roundCurrency(payout);
-  current.houseProfit = Number(current.houseProfit ?? 0) + roundCurrency(betAmount) - roundCurrency(payout);
-
-  const gameRow = current.perGame?.[game] ?? { wagered: 0, won: 0, plays: 0 };
-  gameRow.wagered += roundCurrency(betAmount);
-  gameRow.won += roundCurrency(payout);
-  gameRow.plays += 1;
-  current.perGame = { ...(current.perGame ?? {}), [game]: gameRow };
-
-  const playerRow = current.players?.[playerId] ?? { name: playerName, wagered: 0, won: 0, net: 0 };
-  playerRow.name = playerName;
-  playerRow.wagered += roundCurrency(betAmount);
-  playerRow.won += roundCurrency(payout);
-  playerRow.net += roundCurrency(payout) - roundCurrency(betAmount);
-  current.players = { ...(current.players ?? {}), [playerId]: playerRow };
-
-  await writeVariable(gameServerId, moduleId, dayKey, current);
 }
 
 export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, playerName, game, net, config, jackpotWin = false, payout = 0, betAmount = 0 }) {
@@ -581,7 +587,7 @@ export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, pl
     message: `${prefix} ${playerName} won ${formatCurrency(net)} on ${game}!`,
   };
   const payload = {
-    eventName: 'casino-big-win',
+    eventName: 'chat-message',
     gameserverId: gameServerId,
     moduleId,
     actingModuleId: moduleId,
@@ -911,23 +917,28 @@ export function rouletteWin(selection, spin) {
   return false;
 }
 
+export const SLOT_SYMBOLS = [
+  { emoji: '🍒', weight: 30, triple: 3 },
+  { emoji: '🍋', weight: 20, triple: 5 },
+  { emoji: '🍇', weight: 15, triple: 8 },
+  { emoji: '🔔', weight: 10, triple: 15 },
+  { emoji: '⭐', weight: 5, triple: 30 },
+  { emoji: '💎', weight: 2, triple: 75 },
+  { emoji: '7️⃣', weight: 1, triple: null },
+];
+
+export function getSlotSymbolByEmoji(emoji) {
+  return SLOT_SYMBOLS.find((symbol) => symbol.emoji === emoji) ?? null;
+}
+
 export function pickSlotSymbol() {
-  const symbols = [
-    { emoji: '🍒', weight: 30, triple: 3 },
-    { emoji: '🍋', weight: 20, triple: 5 },
-    { emoji: '🍇', weight: 15, triple: 8 },
-    { emoji: '🔔', weight: 10, triple: 15 },
-    { emoji: '⭐', weight: 5, triple: 30 },
-    { emoji: '💎', weight: 2, triple: 75 },
-    { emoji: '7️⃣', weight: 1, triple: null },
-  ];
-  const total = symbols.reduce((sum, s) => sum + s.weight, 0);
+  const total = SLOT_SYMBOLS.reduce((sum, s) => sum + s.weight, 0);
   let cursor = Math.random() * total;
-  for (const symbol of symbols) {
+  for (const symbol of SLOT_SYMBOLS) {
     cursor -= symbol.weight;
     if (cursor <= 0) return symbol;
   }
-  return symbols[0];
+  return SLOT_SYMBOLS[0];
 }
 
 export function makeCrashPoint(edgeFraction) {

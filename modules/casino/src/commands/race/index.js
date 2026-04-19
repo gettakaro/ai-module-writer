@@ -24,7 +24,12 @@ async function main() {
         next.drawAt = new Date(Date.now() + (10 * 60 * 1000)).toISOString();
         next.status = 'open';
       }
-      next.participants.push({ playerId: player.id, name: player.name, amount: placed.amount });
+      next.participants.push({
+        ticketId: `${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        playerId: player.id,
+        name: player.name,
+        amount: placed.amount,
+      });
       await setRacePool(gameServerId, mod.moduleId, next);
       return next;
     } catch (err) {
