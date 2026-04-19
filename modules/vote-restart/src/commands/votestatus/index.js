@@ -3,6 +3,7 @@ import {
   getVoteState,
   getOnlineNonImmunePlayers,
   computeThreshold,
+  getEffectiveRestartDelaySeconds,
 } from './vote-helpers.js';
 
 async function main() {
@@ -20,7 +21,7 @@ async function main() {
 
   if (voteState.status === 'passed') {
     const elapsedSincePassed = (Date.now() - new Date(voteState.passedAt).getTime()) / 1000;
-    const remainingDelay = Math.ceil(config.restartDelay - elapsedSincePassed);
+    const remainingDelay = Math.ceil(getEffectiveRestartDelaySeconds(config) - elapsedSincePassed);
 
     if (remainingDelay <= 0) {
       console.log('vote-status: passed, restart already initiated');

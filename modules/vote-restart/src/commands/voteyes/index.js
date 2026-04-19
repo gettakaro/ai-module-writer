@@ -4,6 +4,7 @@ import {
   setVoteState,
   getOnlineNonImmunePlayers,
   computeThreshold,
+  getEffectiveRestartDelaySeconds,
 } from './vote-helpers.js';
 
 async function main() {
@@ -59,8 +60,9 @@ async function main() {
 
     console.log(`vote-restart: Vote passed! effectiveVotes=${effectiveVotes}, threshold=${threshold}, status changed to passed`);
 
+    const restartDelaySeconds = getEffectiveRestartDelaySeconds(config);
     await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-      message: `[Vote Restart] Vote passed! (${effectiveVotes}/${threshold}) Server will restart in ${config.restartDelay}s.`,
+      message: `[Vote Restart] Vote passed! (${effectiveVotes}/${threshold}) Server will restart in ${restartDelaySeconds}s.`,
       opts: {},
     });
   } else {

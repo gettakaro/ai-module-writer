@@ -41,9 +41,6 @@ async function main() {
 
   if (!referee) throw new TakaroUserError(`Referee "${refereeName}" was not found on this server.`);
   if (!referrer) throw new TakaroUserError(`Referrer "${referrerName}" was not found on this server.`);
-  if (referee.id === referrer.id) {
-    throw new TakaroUserError('Referee and referrer must be different players.');
-  }
 
   const config = getNormalizedConfig(mod);
 
@@ -59,12 +56,6 @@ async function main() {
 
       const referrerStatsRaw = await getReferralStats(gameServerId, moduleId, referrer.id);
       const referrerStats = resetDailyCounterIfNeeded(referrerStatsRaw);
-      if (referrerStats.referralsToday >= config.maxReferralsPerDay) {
-        throw new TakaroUserError(`Player "${referrer.name}" has already reached the daily referral limit.`);
-      }
-      if (referrerStats.referralsTotal >= config.maxReferralsLifetime) {
-        throw new TakaroUserError(`Player "${referrer.name}" has already reached the lifetime referral limit.`);
-      }
 
       const baseLink = {
         referrerId: referrer.id,

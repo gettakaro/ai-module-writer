@@ -380,6 +380,52 @@ export async function listStatsEntries(gameServerId, moduleId) {
   return entries;
 }
 
+export async function findLatestReferralForReferrer(gameServerId, moduleId, referrerId, statuses = []) {
+  if (!referrerId) return null;
+
+  const statusFilter = Array.isArray(statuses) && statuses.length
+    ? new Set(statuses)
+    : null;
+  const matches = [];
+  let page = 0;
+  const limit = 100;
+
+  while (page < 50) {
+    const result = await takaro.variable.variableControllerSearch({
+      filters: {
+        gameServerId: [gameServerId],
+        moduleId: [moduleId],
+      },
+      page,
+      limit,
+    });
+
+    for (const variable of result.data.data) {
+      if (!String(variable.key || '').startsWith(REFERRAL_LINK_PREFIX)) continue;
+      const link = safeJsonParse(variable.value, null, `referral link candidate for ${variable.playerId ?? 'unknown'}`);
+      if (!link || link.referrerId !== referrerId) continue;
+      if (statusFilter && !statusFilter.has(link.status)) continue;
+      matches.push({
+        ...link,
+        refereePlayerId: variable.playerId,
+      });
+    }
+
+    if (result.data.data.length < limit || ((page + 1) * limit) >= (result.data.meta?.total ?? 0)) {
+      break;
+    }
+    page += 1;
+  }
+
+  matches.sort((left, right) => {
+    const leftTime = new Date(left.rejectedAt ?? left.paidAt ?? left.linkedAt ?? 0).getTime();
+    const rightTime = new Date(right.rejectedAt ?? right.paidAt ?? right.linkedAt ?? 0).getTime();
+    return rightTime - leftTime;
+  });
+
+  return matches[0] ?? null;
+}
+
 export async function findPlayerByName(gameServerId, name) {
   const targetName = String(name || '').trim();
   if (!targetName) return null;
@@ -632,18 +678,28 @@ export async function awardWelcomeBonus(gameServerId, refereeId, config) {
   return amount;
 }
 
-export async function rollbackWelcomeBonus(gameServerId, refereeId, amount) {
+export async function previewWelcomeBonusRollback(gameServerId, refereeId, amount) {
   const normalized = Math.max(0, Math.floor(Number(amount) || 0));
-  if (!normalized) return 0;
+  if (!normalized) {
+    return { canRollback: true, amount: 0, currentCurrency: 0 };
+  }
 
   const pog = await getPog(gameServerId, refereeId);
   const currentCurrency = Math.max(0, Math.floor(Number(pog?.currency) || 0));
-  if (currentCurrency < normalized) return 0;
-
-  return Math.abs(await changeCurrency(gameServerId, refereeId, -normalized));
+  return {
+    canRollback: currentCurrency >= normalized,
+    amount: normalized,
+    currentCurrency,
+  };
 }
 
-export async function rollbackReferrerReward(gameServerId, referrerId, link) {
+export async function rollbackWelcomeBonus(gameServerId, refereeId, amount) {
+  const preview = await previewWelcomeBonusRollback(gameServerId, refereeId, amount);
+  if (!preview.canRollback || !preview.amount) return 0;
+  return Math.abs(await changeCurrency(gameServerId, refereeId, -preview.amount));
+}
+
+export async function previewReferrerRewardRollback(gameServerId, referrerId, link) {
   if (!referrerId || !link || link.status !== 'paid') {
     return { rolledBack: false, skipped: true, reason: 'not-paid' };
   }
@@ -670,10 +726,6 @@ export async function rollbackReferrerReward(gameServerId, referrerId, link) {
       };
     }
 
-    if (amount > 0) {
-      await changeCurrency(gameServerId, referrerId, -amount);
-    }
-
     return { rolledBack: amount > 0, rewardType: 'currency', amount, currentCurrency, fullRollback: true };
   }
 
@@ -686,6 +738,19 @@ export async function rollbackReferrerReward(gameServerId, referrerId, link) {
     quality: reward.quality,
     reason: 'item-rewards-cannot-be-clawed-back-automatically',
   };
+}
+
+export async function rollbackReferrerReward(gameServerId, referrerId, link) {
+  const preview = await previewReferrerRewardRollback(gameServerId, referrerId, link);
+  if (preview.reason === 'insufficient-currency-for-clawback' || preview.reason === 'item-rewards-cannot-be-clawed-back-automatically') {
+    return preview;
+  }
+
+  if (preview.rewardType === 'currency' && preview.amount > 0) {
+    await changeCurrency(gameServerId, referrerId, -preview.amount);
+  }
+
+  return preview;
 }
 
 export async function adjustReferrerStatsForLink(gameServerId, moduleId, referrerId, link, direction = -1) {

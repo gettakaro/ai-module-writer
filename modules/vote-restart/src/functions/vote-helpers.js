@@ -134,3 +134,7 @@ export async function getOnlineNonImmunePlayers(gameServerId) {
 export function computeThreshold(onlineCount, percent) {
   return Math.max(1, Math.ceil(onlineCount * percent / 100));
 }
+
+export function getEffectiveRestartDelaySeconds(config) {
+  return Math.max(1, Math.ceil(Number(config?.restartDelay ?? 0) || 0));
+}

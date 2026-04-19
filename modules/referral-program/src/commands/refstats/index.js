@@ -11,6 +11,7 @@ import {
   getPlaytimeMinutes,
   describeReferralStatusForPlayer,
   describeReferralProblemForPlayer,
+  findLatestReferralForReferrer,
   requireCommandPermission,
 } from './referral-helpers.js';
 
@@ -23,11 +24,12 @@ async function main() {
 
   requireCommandPermission(pog, 'REFERRAL_USE', 'You do not have permission to use referral commands.');
 
-  const [codeInfo, link, stats, currentPog] = await Promise.all([
+  const [codeInfo, link, stats, currentPog, latestRejectedOutgoingReferral] = await Promise.all([
     getReferralCode(gameServerId, mod.moduleId, pog.playerId),
     getReferralLink(gameServerId, mod.moduleId, pog.playerId),
     getReferralStats(gameServerId, mod.moduleId, pog.playerId),
     getPog(gameServerId, pog.playerId),
+    findLatestReferralForReferrer(gameServerId, mod.moduleId, pog.playerId, ['rejected']),
   ]);
 
   const ensuredCode = codeInfo ?? await ensureReferralCode(gameServerId, mod.moduleId, pog.playerId);
@@ -43,18 +45,19 @@ async function main() {
     `Your referrer: ${referrerName ? referrerName : 'none'}`,
   ];
 
-  if (link) {
-    lines.push(`Your referral status: ${describeReferralStatusForPlayer(link)}`);
-    if (link.status === 'pending') {
+  const statusLink = link ?? latestRejectedOutgoingReferral;
+  if (statusLink) {
+    lines.push(`Your referral status: ${describeReferralStatusForPlayer(statusLink)}`);
+    if (statusLink.status === 'pending' && link) {
       const currentPlaytimeMinutes = getPlaytimeMinutes(currentPog);
-      const earnedSinceLink = Math.max(0, currentPlaytimeMinutes - (Number(link.playtimeAtLink ?? 0) || 0));
+      const earnedSinceLink = Math.max(0, currentPlaytimeMinutes - (Number(statusLink.playtimeAtLink ?? 0) || 0));
       const remainingMinutes = Math.max(0, config.playtimeThresholdMinutes - earnedSinceLink);
       lines.push(
         `Qualifying progress: ${formatMinutes(earnedSinceLink)}/${formatMinutes(config.playtimeThresholdMinutes)} minutes (${formatMinutes(remainingMinutes)} remaining)`,
       );
     }
-    if (link.status === 'rejected') {
-      lines.push(`Payout issue: ${describeReferralProblemForPlayer(link.rejectionReason)}`);
+    if (statusLink.status === 'rejected') {
+      lines.push(`Payout issue: ${describeReferralProblemForPlayer(statusLink.rejectionReason)}`);
     }
   }
 

@@ -697,7 +697,7 @@ describe('referral-program module — admin command validation and repair flows'
     await harness.cleanup(roleIds);
   });
 
-  it('covers missing arguments, lookup failures, self-link rejection, cap enforcement, duplicate-link rejection, and missing-link unlink rejection', async () => {
+  it('covers missing arguments, lookup failures, admin override behavior, duplicate-link rejection, and missing-link unlink rejection', async () => {
     const usage = await harness.triggerCommand(harness.ctx.players[0].playerId, 'reflink "" ""');
     assert.equal(parseSuccess(usage), false);
     assert.ok(parseLogs(usage).some((msg) => msg.includes('Usage: /reflink <referee> <referrer>') || msg.includes('Usage: reflink <referee> <referrer>')));
@@ -711,8 +711,16 @@ describe('referral-program module — admin command validation and repair flows'
     assert.ok(parseLogs(missingReferrer).some((msg) => msg.includes('Referrer')));
 
     const selfLink = await harness.triggerCommand(harness.ctx.players[0].playerId, `reflink ${bobName} ${bobName}`);
-    assert.equal(parseSuccess(selfLink), false);
-    assert.ok(parseLogs(selfLink).some((msg) => msg.includes('must be different players')));
+    assert.equal(parseSuccess(selfLink), true, 'Expected admin /reflink to allow self-link repair overrides');
+
+    const selfLinkRecord = await harness.getVariableValue<ReferralLink>(
+      `${REFERRAL_LINK_PREFIX}${harness.ctx.players[1].playerId}`,
+      harness.ctx.players[1].playerId,
+    );
+    assert.equal(selfLinkRecord?.status, 'paid');
+
+    const cleanupSelfLink = await harness.triggerCommand(harness.ctx.players[0].playerId, `refunlink ${bobName}`);
+    assert.equal(parseSuccess(cleanupSelfLink), true, 'Expected self-link override to remain reversible');
 
     const missingUnlink = await harness.triggerCommand(harness.ctx.players[0].playerId, 'refunlink ""');
     assert.equal(parseSuccess(missingUnlink), false);
@@ -731,8 +739,10 @@ describe('referral-program module — admin command validation and repair flows'
       harness.ctx.players[2].playerId,
     );
     const cappedReflink = await harness.triggerCommand(harness.ctx.players[0].playerId, `reflink ${bobName} ${malloryName}`);
-    assert.equal(parseSuccess(cappedReflink), false);
-    assert.ok(parseLogs(cappedReflink).some((msg) => msg.includes('daily referral limit')));
+    assert.equal(parseSuccess(cappedReflink), true, 'Expected admin /reflink to bypass referral caps');
+
+    const cleanupCappedLink = await harness.triggerCommand(harness.ctx.players[0].playerId, `refunlink ${bobName}`);
+    assert.equal(parseSuccess(cleanupCappedLink), true, 'Expected capped override link cleanup to succeed');
 
     await harness.setVariableValue(
       `${REFERRAL_STATS_PREFIX}${harness.ctx.players[2].playerId}`,
@@ -865,6 +875,39 @@ describe('referral-program module — admin command validation and repair flows'
     );
     const cleanup = await harness.triggerCommand(harness.ctx.players[0].playerId, `refunlink ${malloryName}`);
     assert.equal(parseSuccess(cleanup), true, 'Expected cleanup unlink once clawback is possible again');
+  });
+
+  it('refuses to unlink a paid referral when the referee has already spent the welcome bonus', async () => {
+    const paidLink = await harness.triggerCommand(harness.ctx.players[0].playerId, `reflink ${malloryName} ${bobName}`);
+    assert.equal(parseSuccess(paidLink), true, 'Expected setup /reflink to succeed');
+
+    await harness.client.playerOnGameserver.playerOnGameServerControllerSetCurrency(
+      harness.ctx.gameServer.id,
+      harness.ctx.players[2].playerId,
+      { currency: 0 },
+    );
+
+    const unlinkAttempt = await harness.triggerCommand(harness.ctx.players[0].playerId, `refunlink ${malloryName}`);
+    assert.equal(parseSuccess(unlinkAttempt), false, 'Expected /refunlink to fail when the referee spent the welcome bonus');
+    assert.ok(parseLogs(unlinkAttempt).some((msg) => msg.includes('full welcome bonus available for clawback')));
+
+    const referrerCurrencyAfterFailure = await harness.getCurrency(harness.ctx.players[1].playerId);
+    assert.equal(referrerCurrencyAfterFailure, 500, 'Expected failed unlink to leave the referrer reward untouched');
+
+    const linkAfterFailure = await harness.getVariableValue<ReferralLink>(
+      `${REFERRAL_LINK_PREFIX}${harness.ctx.players[2].playerId}`,
+      harness.ctx.players[2].playerId,
+    );
+    assert.equal(linkAfterFailure?.status, 'paid');
+
+    await harness.client.playerOnGameserver.playerOnGameServerControllerAddCurrency(
+      harness.ctx.gameServer.id,
+      harness.ctx.players[2].playerId,
+      { currency: 100 },
+    );
+
+    const cleanup = await harness.triggerCommand(harness.ctx.players[0].playerId, `refunlink ${malloryName}`);
+    assert.equal(parseSuccess(cleanup), true, 'Expected cleanup unlink once the welcome bonus can be clawed back again');
   });
 
   it('keeps admin repair flows consistent when payouts are in progress or explicitly deferred', async () => {
@@ -1347,7 +1390,70 @@ describe('referral-program module — item payout retries and rejection', () => 
   });
 });
 
-describe('referral-program module — real Paper + bot verification', () => {
+describe('referral-program module — item payout empty pool misconfiguration', () => {
+  const harness = createHarness();
+  const roleIds: Array<string | undefined> = [];
+  let sweepCronjobId: string;
+  let aliceCode: string;
+
+  before(async () => {
+    const setup = await harness.setup(
+      {
+        prizeIsCurrency: false,
+        referrerCurrencyReward: 500,
+        refereeCurrencyReward: 100,
+        items: [],
+        playtimeThresholdMinutes: 60,
+        referralWindowHours: 24,
+        maxReferralsPerDay: 5,
+        maxReferralsLifetime: 50,
+      },
+      async ({ client, ctx, gameServerId }) => {
+        roleIds.push(await assignPermissions(client, ctx.players[0].playerId, gameServerId, ['REFERRAL_USE']));
+        roleIds.push(await assignPermissions(client, ctx.players[1].playerId, gameServerId, ['REFERRAL_USE']));
+      },
+    );
+
+    sweepCronjobId = setup.sweepCronjobId;
+    const codeEvent = await harness.triggerCommand(harness.ctx.players[0].playerId, 'refcode');
+    assert.equal(parseSuccess(codeEvent), true);
+    const codeVar = await harness.getVariableValue<{ code: string }>(
+      `${REFERRAL_CODE_PREFIX}${harness.ctx.players[0].playerId}`,
+      harness.ctx.players[0].playerId,
+    );
+    aliceCode = codeVar!.code;
+  });
+
+  after(async () => {
+    await harness.cleanup(roleIds);
+  });
+
+  it('rejects payout after repeated retries when item mode has an empty reward pool', async () => {
+    const claim = await harness.triggerCommand(harness.ctx.players[1].playerId, `referral ${aliceCode}`);
+    assert.equal(parseSuccess(claim), true, 'Expected referral claim before empty-pool payout retries');
+    await harness.forceReferralProgress(harness.ctx.players[1].playerId, 80);
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const sweepEvent = await harness.triggerCron(sweepCronjobId);
+      assert.equal(parseSuccess(sweepEvent), true, `Expected sweep attempt ${attempt} to finish`);
+    }
+
+    const link = await harness.getVariableValue<ReferralLink>(
+      `${REFERRAL_LINK_PREFIX}${harness.ctx.players[1].playerId}`,
+      harness.ctx.players[1].playerId,
+    );
+    assert.equal(link?.status, 'rejected');
+
+    const refstats = await harness.triggerCommand(harness.ctx.players[0].playerId, 'refstats');
+    assert.equal(parseSuccess(refstats), true);
+    assert.ok(parseLogs(refstats).some((msg) => msg.includes('needs admin help')));
+    assert.ok(parseLogs(refstats).some((msg) => msg.includes('referral items are not configured')));
+  });
+});
+
+const RUN_REAL_PAPER_VERIFICATION = process.env.RUN_REAL_PAPER_VERIFICATION === '1';
+
+(RUN_REAL_PAPER_VERIFICATION ? describe : describe.skip)('referral-program module — real Paper + bot verification', () => {
   let client: Client;
   let moduleId: string | undefined;
   let versionId: string | undefined;

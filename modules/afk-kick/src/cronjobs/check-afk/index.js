@@ -69,6 +69,13 @@ async function main() {
       }
 
       const stored = tracking[playerId];
+      const isImmune = checkPermission(pog, 'IMMUNE_TO_AFK_KICK');
+
+      if (isImmune) {
+        tracking[playerId] = { x, y, z, idleCount: 0, warned: false };
+        console.log(`AFK check: player ${playerId} is immune to AFK kick, skipping`);
+        continue;
+      }
 
       if (!stored) {
         tracking[playerId] = { x, y, z, idleCount: 0, warned: false };
@@ -89,22 +96,12 @@ async function main() {
       stored.idleCount += 1;
 
       if (stored.idleCount >= checksBeforeKick) {
-        if (checkPermission(pog, 'IMMUNE_TO_AFK_KICK')) {
-          console.log(`AFK check: player ${playerId} is immune to AFK kick, skipping`);
-          stored.idleCount = 0;
-          continue;
-        }
         await takaro.gameserver.gameServerControllerKickPlayer(gameServerId, playerId, {
           reason: kickMessage,
         });
         delete tracking[playerId];
         console.log(`AFK check: kicked player ${playerId} for being AFK`);
       } else if (stored.idleCount >= checksBeforeWarning && !stored.warned) {
-        if (checkPermission(pog, 'IMMUNE_TO_AFK_KICK')) {
-          console.log(`AFK check: player ${playerId} is immune to AFK kick, skipping warning`);
-          stored.idleCount = 0;
-          continue;
-        }
         if (!pog.gameId) {
           console.warn(`AFK check: player ${playerId} has no gameId, skipping PM but marking as warned`);
           stored.warned = true;
