@@ -145,11 +145,13 @@ async function main() {
         });
       } catch (receiptErr) {
         throw new Error(
-          `server-messages: state persistence failed after broadcast and delivery receipt fallback also failed. State error: ${persistErr}. Receipt error: ${receiptErr}`,
+          `server-messages: the broadcast was sent, but saving progress failed and the recovery marker could not be recorded. Do not blindly retry this cronjob. Check module variables or Takaro storage health before retrying. State error: ${persistErr}. Recovery marker error: ${receiptErr}`,
         );
       }
 
-      throw new Error(`server-messages: state persistence failed after broadcast; stored a recovery receipt to avoid duplicate rebroadcasts. Cause: ${persistErr}`);
+      throw new Error(
+        `server-messages: the broadcast was sent, but the module could not save its next rotation state. A recovery marker was stored, so the next run should resume without duplicating chat. If this keeps happening, check module variable writes and Takaro storage health. Cause: ${persistErr}`,
+      );
     }
     console.log(
       `server-messages: broadcasted order=${order} index=${messageIndex} playerCount=${onlinePlayerCount} message=${renderedMessage}`,

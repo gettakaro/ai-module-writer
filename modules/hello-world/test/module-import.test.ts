@@ -703,9 +703,7 @@ describe('module-import CLI', () => {
       {
         key: 'server_messages_state',
         value: '{"sequentialIndex":1}',
-        expiresAt: undefined,
         gameServerId: 'gs-1',
-        playerId: undefined,
         moduleId: 'new-module',
       },
     ]);
@@ -717,6 +715,184 @@ describe('module-import CLI', () => {
       requests.some((request) => request.path === '/role/role-1' && request.method === 'PUT'),
       'Expected token-only replacement flow to rebind role permissions',
     );
+  });
+
+  it('replays paginated replacement snapshots through the token-only import path', async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ path: string; method: string; body?: any }> = [];
+    let moduleSearchCalls = 0;
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+      const requestPath = new URL(url).pathname;
+      const method = init?.method ?? 'POST';
+      const body = typeof init?.body === 'string' && init.body.length > 0 ? JSON.parse(init.body) : undefined;
+      requests.push({ path: requestPath, method, body });
+
+      const json = (payload: unknown) => new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      if (requestPath === '/module/search') {
+        moduleSearchCalls += 1;
+        if (moduleSearchCalls === 1) {
+          return json({ data: [{ id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } }] });
+        }
+        return json({ data: [{ id: 'new-module', name: MODULE_NAME, latestVersion: { id: 'new-version' } }] });
+      }
+
+      if (requestPath === '/module/installation/search') {
+        if (body?.page === 0) {
+          return json({
+            data: Array.from({ length: 100 }, (_, index) => ({
+              gameserverId: `gs-${index + 1}`,
+              userConfig: { slot: index + 1 },
+              systemConfig: { enabled: true },
+            })),
+            meta: { total: 101 },
+          });
+        }
+        if (body?.page === 1) {
+          return json({
+            data: [{ gameserverId: 'gs-101', userConfig: { slot: 101 }, systemConfig: { enabled: true } }],
+            meta: { total: 101 },
+          });
+        }
+      }
+
+      if (requestPath === '/module/old-module/export') {
+        return json({ data: { name: MODULE_NAME, versions: [] } });
+      }
+
+      if (requestPath === '/module/old-module' && method === 'DELETE') {
+        return json({ data: {} });
+      }
+
+      if (requestPath === '/module/import') {
+        return json({ data: {} });
+      }
+
+      if (requestPath === '/variables/search') {
+        if (body?.filters?.moduleId?.[0] === 'old-module' && !body?.filters?.key) {
+          if (body?.page === 0) {
+            return json({
+              data: Array.from({ length: 100 }, (_, index) => ({
+                key: `persistent_${index + 1}`,
+                value: JSON.stringify({ index: index + 1 }),
+                gameServerId: 'gs-1',
+              })),
+              meta: { total: 101 },
+            });
+          }
+          if (body?.page === 1) {
+            return json({
+              data: [{ key: 'persistent_101', value: '{"index":101}', gameServerId: 'gs-1' }],
+              meta: { total: 101 },
+            });
+          }
+        }
+
+        return json({ data: [], meta: { total: 0 } });
+      }
+
+      if (requestPath === '/variables' && method === 'POST') {
+        return json({ data: body });
+      }
+
+      if (requestPath === '/permissions' && method === 'GET') {
+        return json({
+          data: [
+            { id: 'old-perm-1', permission: 'HELLO_USE', module: { id: 'old-module', name: MODULE_NAME } },
+            { id: 'old-perm-2', permission: 'HELLO_ADMIN', module: { id: 'old-module', name: MODULE_NAME } },
+            { id: 'new-perm-1', permission: 'HELLO_USE', module: { id: 'new-module', name: MODULE_NAME } },
+            { id: 'new-perm-2', permission: 'HELLO_ADMIN', module: { id: 'new-module', name: MODULE_NAME } },
+          ],
+        });
+      }
+
+      if (requestPath === '/role/search') {
+        if (body?.page === 0) {
+          return json({
+            data: Array.from({ length: 100 }, (_, index) => ({
+              id: `role-${index + 1}`,
+              permissions: [{ permissionId: 'old-perm-1', count: index + 1 }],
+            })),
+            meta: { total: 101 },
+          });
+        }
+        if (body?.page === 1) {
+          return json({
+            data: [{ id: 'role-101', permissions: [{ permissionId: 'old-perm-2', count: 101 }] }],
+            meta: { total: 101 },
+          });
+        }
+      }
+
+      if (requestPath.startsWith('/role/') && method === 'PUT') {
+        return json({ data: {} });
+      }
+
+      if (requestPath === '/module/installation/' && method === 'POST') {
+        return json({ data: {} });
+      }
+
+      throw new Error(`Unexpected fetch request: ${method} ${requestPath}`);
+    }) as typeof fetch;
+
+    try {
+      await importModuleExportWithToken(
+        { url: 'https://takaro.invalid', domainId: 'domain-1', token: 'token-only' },
+        { name: MODULE_NAME, versions: [] } as any,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    const installationPosts = requests.filter((request) => request.path === '/module/installation/' && request.method === 'POST');
+    const variablePosts = requests.filter((request) => request.path === '/variables' && request.method === 'POST');
+    const roleUpdates = requests.filter((request) => request.path.startsWith('/role/') && request.method === 'PUT');
+
+    assert.equal(installationPosts.length, 101, 'Expected token-only import to replay all paginated installations');
+    assert.equal(variablePosts.length, 101, 'Expected token-only import to replay all paginated persistent variables');
+    assert.equal(roleUpdates.length, 101, 'Expected token-only import to replay all paginated role bindings');
+    assert.ok(
+      requests.some((request) => request.path === '/module/installation/search' && request.body?.page === 1),
+      'Expected token-only import to request the second installations page',
+    );
+    assert.ok(
+      requests.some((request) => request.path === '/variables/search' && request.body?.page === 1),
+      'Expected token-only import to request the second variables page',
+    );
+    assert.ok(
+      requests.some((request) => request.path === '/role/search' && request.body?.page === 1),
+      'Expected token-only import to request the second roles page',
+    );
+  });
+
+  it('surfaces HTTP status and raw response text for non-JSON token-only failures', async () => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => new Response('<html>unauthorized</html>', {
+      status: 401,
+      headers: { 'Content-Type': 'text/html' },
+    })) as typeof fetch;
+
+    try {
+      await assert.rejects(
+        importModuleExportWithToken(
+          { url: 'https://takaro.invalid', domainId: 'domain-1', token: 'token-only' },
+          { name: MODULE_NAME, versions: [] } as any,
+        ),
+        /401|unauthorized/i,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it('surfaces structured rollback errors with readable messages', async () => {

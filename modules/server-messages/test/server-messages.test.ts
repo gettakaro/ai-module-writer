@@ -2,6 +2,7 @@ import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'path';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import { fileURLToPath } from 'url';
 import {
   Client,
@@ -28,13 +29,17 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const MODULE_DIR = path.resolve(__dirname, '..');
+const SOURCE_MODULE_DIR = path.resolve(__dirname, '..');
+const TEST_MODULE_NAME = 'test-server-messages';
 const STATE_KEY = 'server_messages_state';
 const LOCK_KEY = 'server_messages_lock';
+const FORCE_STATE_WRITE_FAILURE_KEY = 'server_messages_test_force_state_write_failure';
+const FORCE_RECEIPT_WRITE_FAILURE_KEY = 'server_messages_test_force_receipt_write_failure';
 
 describe('server-messages: broadcast cronjob', () => {
   let client: Client;
   let ctx: MockServerContext;
+  let moduleDir: string;
   let moduleId: string;
   let versionId: string;
   let cronjobId: string;
@@ -46,7 +51,15 @@ describe('server-messages: broadcast cronjob', () => {
     await cleanupTestGameServers(client);
     ctx = await startMockServer(client);
 
-    const mod = await pushModule(client, MODULE_DIR);
+    moduleDir = await fs.mkdtemp(path.join(os.tmpdir(), 'takaro-server-messages-'));
+    await fs.cp(SOURCE_MODULE_DIR, moduleDir, { recursive: true });
+
+    const moduleJsonPath = path.join(moduleDir, 'module.json');
+    const moduleJson = JSON.parse(await fs.readFile(moduleJsonPath, 'utf8')) as { name: string };
+    moduleJson.name = TEST_MODULE_NAME;
+    await fs.writeFile(moduleJsonPath, JSON.stringify(moduleJson, null, 2));
+
+    const mod = await pushModule(client, moduleDir);
     moduleId = mod.id;
     versionId = mod.latestVersion.id;
 
@@ -63,10 +76,15 @@ describe('server-messages: broadcast cronjob', () => {
         console.error('Cleanup: failed to uninstall module:', err);
       }
     }
-    try {
-      await deleteModule(client, moduleId);
-    } catch (err) {
-      console.error('Cleanup: failed to delete module:', err);
+    if (moduleId) {
+      try {
+        await deleteModule(client, moduleId);
+      } catch (err) {
+        console.error('Cleanup: failed to delete module:', err);
+      }
+    }
+    if (moduleDir) {
+      await fs.rm(moduleDir, { recursive: true, force: true });
     }
     await stopMockServer(ctx.server, client, ctx.gameServer.id);
   });
@@ -125,11 +143,34 @@ describe('server-messages: broadcast cronjob', () => {
     throw new Error(`Timed out waiting for variable ${key}`);
   }
 
-  async function deleteStateVariable(): Promise<void> {
-    const existing = await getStateVariable();
+  async function deleteVariableByKey(key: string): Promise<void> {
+    const existing = await getVariable(key);
     if (existing) {
       await client.variable.variableControllerDelete(existing.id);
     }
+  }
+
+  async function upsertModuleVariable(input: {
+    key: string;
+    value: string;
+    expiresAt?: string;
+  }): Promise<void> {
+    const existing = await getVariable(input.key);
+    if (existing) {
+      await client.variable.variableControllerUpdate(existing.id, {
+        value: input.value,
+        expiresAt: input.expiresAt,
+      });
+      return;
+    }
+
+    await client.variable.variableControllerCreate({
+      key: input.key,
+      value: input.value,
+      expiresAt: input.expiresAt,
+      gameServerId: ctx.gameServer.id,
+      moduleId,
+    });
   }
 
   async function reinstall(config: Record<string, unknown>, options?: { clearState?: boolean }) {
@@ -152,7 +193,11 @@ describe('server-messages: broadcast cronjob', () => {
     installed = true;
 
     if (options?.clearState !== false) {
-      await deleteStateVariable();
+      await Promise.all([
+        deleteVariableByKey(STATE_KEY),
+        deleteVariableByKey(LOCK_KEY),
+        deleteVariableByKey(SERVER_MESSAGES_DELIVERY_RECEIPT_KEY),
+      ]);
     }
     await wait(500);
   }
@@ -401,21 +446,17 @@ describe('server-messages: broadcast cronjob', () => {
     );
   });
 
-  it('renders supported placeholders and preserves unknown placeholders with a warning', async () => {
+  it('renders supported placeholders in broadcast output', async () => {
     await reinstall({
       order: 'sequential',
-      messages: [{ text: 'Players={playerCount} Server={serverName} Unknown={unknownToken}' }],
+      messages: [{ text: 'Players={playerCount} Server={serverName}' }],
     });
 
     const result = await triggerCronjobAndCollectMessages();
     assert.equal(result.success, true, `Expected placeholder run to succeed, logs: ${JSON.stringify(result.logs)}`);
     assert.deepEqual(result.chatMessages, [
-      `Players=3 Server=${ctx.gameServer.name} Unknown={unknownToken}`,
+      `Players=3 Server=${ctx.gameServer.name}`,
     ]);
-    assert.ok(
-      result.logs.some((log) => log.includes('left unknown placeholders unchanged') && log.includes('unknownToken')),
-      `Expected unknown-placeholder warning log, got: ${JSON.stringify(result.logs)}`,
-    );
   });
 
   it('uses a readable fallback when the runtime server name is unavailable', async () => {
@@ -452,15 +493,14 @@ describe('server-messages: broadcast cronjob', () => {
     }
   });
 
-  it('does not turn an unknown-placeholder-only message into a blank broadcast', async () => {
-    await reinstall({
-      order: 'sequential',
-      messages: [{ text: '  {missingToken}  ' }],
-    });
-
-    const result = await triggerCronjobAndCollectMessages();
-    assert.equal(result.success, true, `Expected unknown-placeholder-only run to succeed, logs: ${JSON.stringify(result.logs)}`);
-    assert.deepEqual(result.chatMessages, ['{missingToken}']);
+  it('rejects unknown placeholders at install time so typoed configs fail early', async () => {
+    await assert.rejects(
+      reinstall({
+        order: 'sequential',
+        messages: [{ text: 'Server={serverNmae}' }],
+      }),
+      /playerCount|serverName|validation|config|userConfig/i,
+    );
   });
 
   it('resets rotation cleanly after reinstalling with a changed message list', async () => {
@@ -547,11 +587,9 @@ describe('server-messages: broadcast cronjob', () => {
       messages: [{ text: 'First' }, { text: 'Second' }],
     });
 
-    await client.variable.variableControllerCreate({
+    await upsertModuleVariable({
       key: STATE_KEY,
       value: 'not-json',
-      gameServerId: ctx.gameServer.id,
-      moduleId,
     });
 
     const result = await triggerCronjobAndCollectMessages();
@@ -602,12 +640,10 @@ describe('server-messages: broadcast cronjob', () => {
       messages: [{ text: 'Alpha' }, { text: 'Beta' }],
     });
 
-    await client.variable.variableControllerCreate({
+    await upsertModuleVariable({
       key: LOCK_KEY,
       value: JSON.stringify({ acquiredAt: new Date(Date.now() - 60000).toISOString() }),
       expiresAt: new Date(Date.now() - 1000).toISOString(),
-      gameServerId: ctx.gameServer.id,
-      moduleId,
     });
 
     const result = await triggerCronjobAndCollectMessages();
@@ -624,7 +660,7 @@ describe('server-messages: broadcast cronjob', () => {
       messages: [{ text: 'Alpha' }, { text: 'Beta' }],
     });
 
-    await client.variable.variableControllerCreate({
+    await upsertModuleVariable({
       key: LOCK_KEY,
       value: JSON.stringify({
         token: 'held-by-other-run',
@@ -632,8 +668,6 @@ describe('server-messages: broadcast cronjob', () => {
         heartbeatAt: new Date().toISOString(),
       }),
       expiresAt: new Date(Date.now() + 2000).toISOString(),
-      gameServerId: ctx.gameServer.id,
-      moduleId,
     });
 
     const startedAt = Date.now();
@@ -837,11 +871,9 @@ describe('server-messages: broadcast cronjob', () => {
       messages: [{ text: 'Malformed receipt fallback' }],
     });
 
-    await client.variable.variableControllerCreate({
+    await upsertModuleVariable({
       key: SERVER_MESSAGES_DELIVERY_RECEIPT_KEY,
       value: '{not-json',
-      gameServerId: ctx.gameServer.id,
-      moduleId,
     });
 
     const result = await triggerCronjobAndCollectMessages();
@@ -860,7 +892,7 @@ describe('server-messages: broadcast cronjob', () => {
     });
 
     const oldFingerprint = buildConfigFingerprint('sequential', normalizeMessages(oldMessages));
-    await client.variable.variableControllerCreate({
+    await upsertModuleVariable({
       key: SERVER_MESSAGES_DELIVERY_RECEIPT_KEY,
       value: JSON.stringify({
         fingerprint: oldFingerprint,
@@ -874,8 +906,6 @@ describe('server-messages: broadcast cronjob', () => {
         renderedMessage: 'Old receipt message',
         sentAt: new Date().toISOString(),
       }),
-      gameServerId: ctx.gameServer.id,
-      moduleId,
     });
 
     await reinstall(
@@ -907,7 +937,7 @@ describe('server-messages: broadcast cronjob', () => {
     });
 
     const fingerprint = buildConfigFingerprint(order, normalizeMessages(messages));
-    await client.variable.variableControllerCreate({
+    await upsertModuleVariable({
       key: SERVER_MESSAGES_DELIVERY_RECEIPT_KEY,
       value: JSON.stringify({
         fingerprint,
@@ -921,8 +951,6 @@ describe('server-messages: broadcast cronjob', () => {
         renderedMessage: 'Receipt First',
         sentAt: new Date().toISOString(),
       }),
-      gameServerId: ctx.gameServer.id,
-      moduleId,
     });
 
     const result = await triggerCronjobAndCollectMessages();
@@ -939,6 +967,81 @@ describe('server-messages: broadcast cronjob', () => {
 
     const receiptVariable = await getVariable(SERVER_MESSAGES_DELIVERY_RECEIPT_KEY);
     assert.equal(receiptVariable, null, 'Expected delivery receipt to be cleared after successful recovery');
+  });
+
+  it('writes a delivery receipt when state persistence fails after a successful send, then resumes without duplicate chat', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: 'Persist First' }, { text: 'Persist Second' }],
+    });
+
+    const setupRun = await triggerCronjobAndCollectMessages();
+    assert.equal(setupRun.success, true, `Expected setup run to succeed, logs: ${JSON.stringify(setupRun.logs)}`);
+    assert.deepEqual(setupRun.chatMessages, ['Persist First']);
+
+    await upsertModuleVariable({
+      key: FORCE_STATE_WRITE_FAILURE_KEY,
+      value: JSON.stringify({ reason: 'exercise receipt fallback' }),
+    });
+
+    const failedAfterSend = await triggerCronjobAndCollectMessages();
+    assert.equal(failedAfterSend.success, false, `Expected persistence-failure run to report failure, logs: ${JSON.stringify(failedAfterSend.logs)}`);
+    assert.deepEqual(failedAfterSend.chatMessages, ['Persist Second']);
+    assert.ok(
+      failedAfterSend.logs.some((log) => log.includes('A recovery marker was stored')),
+      `Expected operator guidance about stored recovery marker, got: ${JSON.stringify(failedAfterSend.logs)}`,
+    );
+
+    const receiptVariable = await getVariable(SERVER_MESSAGES_DELIVERY_RECEIPT_KEY);
+    assert.ok(receiptVariable, 'Expected persistence-failure run to store a delivery receipt');
+    const receipt = JSON.parse(receiptVariable.value) as { messageIndex?: number; renderedMessage?: string; nextState?: { sequentialIndex?: number } };
+    assert.equal(receipt.messageIndex, 1, `Expected receipt to point at the already-sent second message, got ${receiptVariable.value}`);
+    assert.equal(receipt.renderedMessage, 'Persist Second', `Expected receipt to preserve the sent message, got ${receiptVariable.value}`);
+    assert.equal(receipt.nextState?.sequentialIndex, 0, `Expected receipt to store the next wrapped state, got ${receiptVariable.value}`);
+
+    const recoveryRun = await triggerCronjobAndCollectMessages();
+    assert.equal(recoveryRun.success, true, `Expected recovery run to succeed, logs: ${JSON.stringify(recoveryRun.logs)}`);
+    assert.deepEqual(recoveryRun.chatMessages, [], `Expected recovery run to avoid duplicate rebroadcasts, got ${JSON.stringify(recoveryRun.chatMessages)}`);
+
+    const stateVariable = await getStateVariable();
+    assert.ok(stateVariable, 'Expected recovery run to restore persisted state');
+    assert.equal(JSON.parse(stateVariable.value).sequentialIndex, 0, `Expected recovery run to persist the receipt next-state, got ${stateVariable.value}`);
+    assert.equal(await getVariable(SERVER_MESSAGES_DELIVERY_RECEIPT_KEY), null, 'Expected receipt to be cleared after recovery');
+
+    const nextBroadcast = await triggerCronjobAndCollectMessages();
+    assert.equal(nextBroadcast.success, true, `Expected post-recovery broadcast to succeed, logs: ${JSON.stringify(nextBroadcast.logs)}`);
+    assert.deepEqual(nextBroadcast.chatMessages, ['Persist First']);
+  });
+
+  it('surfaces operator-focused guidance when both state persistence and receipt persistence fail after send', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: 'Guide First' }, { text: 'Guide Second' }],
+    });
+
+    const setupRun = await triggerCronjobAndCollectMessages();
+    assert.equal(setupRun.success, true, `Expected setup run to succeed, logs: ${JSON.stringify(setupRun.logs)}`);
+
+    await upsertModuleVariable({
+      key: FORCE_STATE_WRITE_FAILURE_KEY,
+      value: JSON.stringify({ reason: 'exercise nested fallback failure' }),
+    });
+    await upsertModuleVariable({
+      key: FORCE_RECEIPT_WRITE_FAILURE_KEY,
+      value: JSON.stringify({ reason: 'exercise nested fallback failure' }),
+    });
+
+    const failedAfterSend = await triggerCronjobAndCollectMessages();
+    assert.equal(failedAfterSend.success, false, `Expected nested persistence-failure run to report failure, logs: ${JSON.stringify(failedAfterSend.logs)}`);
+    assert.deepEqual(failedAfterSend.chatMessages, ['Guide Second']);
+    assert.ok(
+      failedAfterSend.logs.some((log) => log.includes('Do not blindly retry this cronjob')),
+      `Expected operator guidance not to retry blindly, got: ${JSON.stringify(failedAfterSend.logs)}`,
+    );
+    assert.ok(
+      failedAfterSend.logs.some((log) => log.includes('Check module variables or Takaro storage health before retrying')),
+      `Expected operator guidance about what to inspect next, got: ${JSON.stringify(failedAfterSend.logs)}`,
+    );
   });
 
   it('removes the execution lock after a failed broadcast send attempt', async () => {
@@ -965,7 +1068,7 @@ describe('server-messages: broadcast cronjob', () => {
   });
 
   it('documents placeholder support, validation behavior, and bounded message lists in module.json', async () => {
-    const moduleJson = JSON.parse(await fs.readFile(path.join(MODULE_DIR, 'module.json'), 'utf8')) as {
+    const moduleJson = JSON.parse(await fs.readFile(path.join(SOURCE_MODULE_DIR, 'module.json'), 'utf8')) as {
       config: {
         required?: string[];
         properties: {
@@ -974,7 +1077,7 @@ describe('server-messages: broadcast cronjob', () => {
             maxItems?: number;
             items: {
               properties: {
-                text: { description?: string; pattern?: string };
+                text: { description?: string; pattern?: string; allOf?: Array<{ pattern?: string }> };
                 weight: { type?: string; minimum?: number; maximum?: number; description?: string };
               };
             };
@@ -984,11 +1087,16 @@ describe('server-messages: broadcast cronjob', () => {
     };
 
     assert.match(moduleJson.config.properties.messages.description ?? '', /\{playerCount\}.*\{serverName\}/);
-    assert.match(moduleJson.config.properties.messages.description ?? '', /Unknown placeholders are left unchanged/);
+    assert.match(moduleJson.config.properties.messages.description ?? '', /Unknown placeholders are rejected at install time/);
     assert.match(moduleJson.config.properties.messages.description ?? '', /at least one non-whitespace character/);
     assert.deepEqual(moduleJson.config.required ?? [], []);
     assert.equal(moduleJson.config.properties.messages.maxItems, 100);
-    assert.equal(moduleJson.config.properties.messages.items.properties.text.pattern, '\\S');
+    const textSchema = moduleJson.config.properties.messages.items.properties.text;
+    assert.deepEqual(
+      textSchema.allOf?.map((entry) => entry.pattern),
+      ['\\S', '^(?:[^{}]|\\{playerCount\\}|\\{serverName\\})+$'],
+    );
+    assert.match(moduleJson.config.properties.messages.items.properties.text.description ?? '', /Unknown placeholders are rejected at install time/);
     assert.match(moduleJson.config.properties.messages.items.properties.text.description ?? '', /Whitespace-only messages are rejected at install time/);
     assert.equal(moduleJson.config.properties.messages.items.properties.weight.type, 'integer');
     assert.equal(moduleJson.config.properties.messages.items.properties.weight.minimum, 1);

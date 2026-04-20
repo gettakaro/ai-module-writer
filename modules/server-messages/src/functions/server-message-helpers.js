@@ -1,44 +1,186 @@
 import { takaro } from '@takaro/helpers';
-import {
-  buildConfigFingerprint,
-  buildWeightedBag,
-  coerceState,
-  createInitialState,
-  getServerNameFallback,
-  MAX_MESSAGE_COUNT,
-  MAX_MESSAGE_WEIGHT,
-  normalizeMessages,
-  normalizeOrder,
-  normalizeWeight,
-  renderMessage,
-  SERVER_MESSAGES_DELIVERY_RECEIPT_KEY,
-  SERVER_MESSAGES_LOCK_KEY,
-  SERVER_MESSAGES_STATE_KEY,
-  shuffleBag,
-} from './server-message-helpers.shared.js';
 
-export {
-  buildConfigFingerprint,
-  buildWeightedBag,
-  coerceState,
-  createInitialState,
-  MAX_MESSAGE_COUNT,
-  MAX_MESSAGE_WEIGHT,
-  normalizeMessages,
-  normalizeOrder,
-  normalizeWeight,
-  renderMessage,
-  SERVER_MESSAGES_DELIVERY_RECEIPT_KEY,
-  SERVER_MESSAGES_LOCK_KEY,
-  SERVER_MESSAGES_STATE_KEY,
-  shuffleBag,
-};
-
+export const SERVER_MESSAGES_STATE_KEY = 'server_messages_state';
+export const SERVER_MESSAGES_LOCK_KEY = 'server_messages_lock';
+export const SERVER_MESSAGES_DELIVERY_RECEIPT_KEY = 'server_messages_delivery_receipt';
+export const MAX_MESSAGE_WEIGHT = 100;
+export const MAX_MESSAGE_COUNT = 100;
+const SUPPORTED_PLACEHOLDERS = ['playerCount', 'serverName'];
+const SERVER_NAME_FALLBACK = 'Unknown server';
+const TEST_FORCE_STATE_WRITE_FAILURE_KEY = 'server_messages_test_force_state_write_failure';
+const TEST_FORCE_RECEIPT_WRITE_FAILURE_KEY = 'server_messages_test_force_receipt_write_failure';
 const LOCK_TTL_MS = 30000;
 const LOCK_TIMEOUT_MS = LOCK_TTL_MS + 5000;
 const LOCK_RETRY_DELAY_MS = 250;
 const PLAYER_COUNT_PAGE_SIZE = 100;
 const MAX_PLAYER_COUNT_PAGES = 100;
+
+function getUnsupportedPlaceholders(template) {
+  if (typeof template !== 'string' || template.length === 0) return [];
+
+  const unsupported = new Set();
+  template.replace(/\{([^{}]+)\}/g, (_match, token) => {
+    if (!SUPPORTED_PLACEHOLDERS.includes(token)) {
+      unsupported.add(token);
+    }
+    return _match;
+  });
+
+  return [...unsupported];
+}
+
+function validateMessageTemplate(template) {
+  const unsupported = getUnsupportedPlaceholders(template);
+  if (unsupported.length === 0) return;
+
+  throw new Error(
+    `server-message-helpers: unsupported placeholders [${unsupported.join(', ')}]; supported placeholders: ${SUPPORTED_PLACEHOLDERS.join(', ')}`,
+  );
+}
+
+export function normalizeMessages(rawMessages) {
+  if (!Array.isArray(rawMessages)) return [];
+
+  return rawMessages
+    .slice(0, MAX_MESSAGE_COUNT)
+    .filter((message) => message && typeof message.text === 'string' && message.text.trim().length > 0)
+    .map((message) => {
+      validateMessageTemplate(message.text);
+      return {
+        text: message.text,
+        weight: normalizeWeight(message.weight),
+      };
+    });
+}
+
+export function normalizeWeight(weight) {
+  if (weight === undefined || weight === null) {
+    return 1;
+  }
+
+  const parsed = Number(weight);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
+    throw new Error(`server-message-helpers: weight '${weight}' must be an integer between 1 and ${MAX_MESSAGE_WEIGHT}`);
+  }
+
+  if (parsed < 1 || parsed > MAX_MESSAGE_WEIGHT) {
+    throw new Error(`server-message-helpers: weight '${weight}' must be between 1 and ${MAX_MESSAGE_WEIGHT}`);
+  }
+
+  return parsed;
+}
+
+export function normalizeOrder(order) {
+  return order === 'random' ? 'random' : 'sequential';
+}
+
+export function buildConfigFingerprint(order, messages) {
+  const normalized = JSON.stringify({
+    order: normalizeOrder(order),
+    messages: normalizeMessages(messages),
+  });
+
+  let hash = 2166136261;
+  for (let i = 0; i < normalized.length; i++) {
+    hash ^= normalized.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return `fnv1a:${(hash >>> 0).toString(16)}`;
+}
+
+export function createInitialState(fingerprint = '') {
+  return {
+    fingerprint,
+    sequentialIndex: 0,
+    bag: [],
+    cursor: 0,
+  };
+}
+
+export function coerceState(rawState) {
+  if (!rawState || typeof rawState !== 'object' || Array.isArray(rawState)) {
+    return createInitialState();
+  }
+
+  const sequentialIndex = Number.isInteger(rawState.sequentialIndex) && rawState.sequentialIndex >= 0
+    ? rawState.sequentialIndex
+    : 0;
+  const bag = Array.isArray(rawState.bag)
+    ? rawState.bag.filter((value) => Number.isInteger(value) && value >= 0)
+    : [];
+  const cursor = Number.isInteger(rawState.cursor) && rawState.cursor >= 0 ? rawState.cursor : 0;
+  const fingerprint = typeof rawState.fingerprint === 'string' ? rawState.fingerprint : '';
+
+  return {
+    fingerprint,
+    sequentialIndex,
+    bag,
+    cursor,
+  };
+}
+
+export function buildWeightedBag(messages) {
+  const bag = [];
+
+  for (let index = 0; index < messages.length; index++) {
+    const weight = normalizeWeight(messages[index]?.weight);
+    for (let count = 0; count < weight; count++) {
+      bag.push(index);
+    }
+  }
+
+  return bag;
+}
+
+export function shuffleBag(entries) {
+  const shuffled = [...entries];
+
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+
+  return shuffled;
+}
+
+export function getServerNameFallback() {
+  return SERVER_NAME_FALLBACK;
+}
+
+export function renderMessage(template, context) {
+  const unknownTokens = new Set();
+  const unavailableTokens = new Set();
+
+  const rendered = template.replace(/\{([^{}]+)\}/g, (match, token) => {
+    if (Object.prototype.hasOwnProperty.call(context, token)) {
+      const value = context[token];
+      if (value === '' || value === null || value === undefined) {
+        unavailableTokens.add(token);
+        return match;
+      }
+
+      return String(value);
+    }
+
+    unknownTokens.add(token);
+    return match;
+  });
+
+  if (unknownTokens.size > 0) {
+    console.warn(
+      `server-message-helpers: left unknown placeholders unchanged [${[...unknownTokens].join(', ')}]; supported placeholders: ${SUPPORTED_PLACEHOLDERS.join(', ')}`,
+    );
+  }
+
+  if (unavailableTokens.size > 0) {
+    console.warn(
+      `server-message-helpers: left unavailable placeholders unchanged [${[...unavailableTokens].join(', ')}] because runtime values were blank or missing`,
+    );
+  }
+
+  return rendered;
+}
 
 export async function getState(gameServerId, moduleId) {
   const existing = await findVariable(gameServerId, moduleId, SERVER_MESSAGES_STATE_KEY);
@@ -53,6 +195,7 @@ export async function getState(gameServerId, moduleId) {
 }
 
 export async function setState(gameServerId, moduleId, state) {
+  await maybeThrowForcedWriteFailure(gameServerId, moduleId, TEST_FORCE_STATE_WRITE_FAILURE_KEY, 'state persistence');
   await writeVariable(gameServerId, moduleId, SERVER_MESSAGES_STATE_KEY, state);
 }
 
@@ -73,6 +216,7 @@ export async function getDeliveryReceipt(gameServerId, moduleId) {
 }
 
 export async function setDeliveryReceipt(gameServerId, moduleId, receipt) {
+  await maybeThrowForcedWriteFailure(gameServerId, moduleId, TEST_FORCE_RECEIPT_WRITE_FAILURE_KEY, 'delivery receipt persistence');
   await writeVariable(gameServerId, moduleId, SERVER_MESSAGES_DELIVERY_RECEIPT_KEY, receipt);
 }
 
@@ -94,21 +238,47 @@ export async function findVariable(gameServerId, moduleId, key) {
   return res.data.data[0] ?? null;
 }
 
+async function maybeThrowForcedWriteFailure(gameServerId, moduleId, key, label) {
+  const injectedFailure = await findVariable(gameServerId, moduleId, key);
+  if (!injectedFailure) return;
+
+  await tryDeleteVariable(injectedFailure.id);
+  throw new Error(`server-message-helpers: forced ${label} failure for testing`);
+}
+
 export async function writeVariable(gameServerId, moduleId, key, value) {
-  const existing = await findVariable(gameServerId, moduleId, key);
   const serialized = JSON.stringify(value);
 
-  if (existing) {
-    await takaro.variable.variableControllerUpdate(existing.id, { value: serialized });
-    return;
-  }
+  while (true) {
+    const existing = await findVariable(gameServerId, moduleId, key);
 
-  await takaro.variable.variableControllerCreate({
-    key,
-    value: serialized,
-    gameServerId,
-    moduleId,
-  });
+    if (existing) {
+      try {
+        await takaro.variable.variableControllerUpdate(existing.id, { value: serialized });
+        return;
+      } catch (err) {
+        if (err?.response?.status === 404) {
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    try {
+      await takaro.variable.variableControllerCreate({
+        key,
+        value: serialized,
+        gameServerId,
+        moduleId,
+      });
+      return;
+    } catch (err) {
+      if (isConflictError(err)) {
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 function isConflictError(err) {
@@ -161,16 +331,21 @@ function createLockToken() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
-async function waitForNextLockAttempt(gameServerId, moduleId) {
-  await takaro.variable.variableControllerSearch({
-    filters: {
-      key: [SERVER_MESSAGES_LOCK_KEY],
-      gameServerId: [gameServerId],
-      moduleId: [moduleId],
-    },
-    limit: 1,
-    page: 0,
-  });
+async function waitForNextLockAttempt(delayMs) {
+  if (!Number.isFinite(delayMs) || delayMs <= 0) {
+    return;
+  }
+
+  if (typeof SharedArrayBuffer === 'function' && typeof Atomics?.wait === 'function') {
+    const signal = new Int32Array(new SharedArrayBuffer(4));
+    Atomics.wait(signal, 0, 0, delayMs);
+    return;
+  }
+
+  const deadline = Date.now() + delayMs;
+  while (Date.now() < deadline) {
+    // Busy wait only as a last-resort sandbox fallback when timers are unavailable.
+  }
 }
 
 function buildLockPayload(token, now = new Date()) {
@@ -311,16 +486,19 @@ export async function acquireExecutionLock(gameServerId, moduleId, options = {})
 
         const expiryMs = parseLockExpiryMs(existingLock, ttlMs);
         const remainingMs = expiryMs === null ? retryDelayMs : Math.max(0, expiryMs - nowMs);
+        const nextPollMs = remainingMs === 0 ? retryDelayMs : Math.min(remainingMs, retryDelayMs);
+        const waitMs = Math.min(nextPollMs, Math.max(0, deadline - nowMs));
         waitedForHealthyLockExpiry = true;
         if (remainingMs <= retryDelayMs) {
           observedExpiredLockWhileWaiting = true;
         }
-        await waitForNextLockAttempt(gameServerId, moduleId);
+        await waitForNextLockAttempt(waitMs);
         continue;
       }
 
       observedExpiredLockWhileWaiting = true;
-      await waitForNextLockAttempt(gameServerId, moduleId);
+      const nowBeforeRetry = Date.now();
+      await waitForNextLockAttempt(Math.min(retryDelayMs, Math.max(0, deadline - nowBeforeRetry)));
     }
   }
 

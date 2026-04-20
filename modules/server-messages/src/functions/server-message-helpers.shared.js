@@ -6,16 +6,42 @@ export const MAX_MESSAGE_COUNT = 100;
 const SUPPORTED_PLACEHOLDERS = ['playerCount', 'serverName'];
 const SERVER_NAME_FALLBACK = 'Unknown server';
 
+function getUnsupportedPlaceholders(template) {
+  if (typeof template !== 'string' || template.length === 0) return [];
+
+  const unsupported = new Set();
+  template.replace(/\{([^{}]+)\}/g, (_match, token) => {
+    if (!SUPPORTED_PLACEHOLDERS.includes(token)) {
+      unsupported.add(token);
+    }
+    return _match;
+  });
+
+  return [...unsupported];
+}
+
+function validateMessageTemplate(template) {
+  const unsupported = getUnsupportedPlaceholders(template);
+  if (unsupported.length === 0) return;
+
+  throw new Error(
+    `server-message-helpers: unsupported placeholders [${unsupported.join(', ')}]; supported placeholders: ${SUPPORTED_PLACEHOLDERS.join(', ')}`,
+  );
+}
+
 export function normalizeMessages(rawMessages) {
   if (!Array.isArray(rawMessages)) return [];
 
   return rawMessages
     .slice(0, MAX_MESSAGE_COUNT)
     .filter((message) => message && typeof message.text === 'string' && message.text.trim().length > 0)
-    .map((message) => ({
-      text: message.text,
-      weight: normalizeWeight(message.weight),
-    }));
+    .map((message) => {
+      validateMessageTemplate(message.text);
+      return {
+        text: message.text,
+        weight: normalizeWeight(message.weight),
+      };
+    });
 }
 
 export function normalizeWeight(weight) {

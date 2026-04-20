@@ -650,9 +650,27 @@ async function takaroTokenRequest<T>(
   });
 
   const text = await response.text();
-  const parsed = text.length > 0 ? JSON.parse(text) : {};
+  let parsed: unknown = {};
+  if (text.length > 0) {
+    try {
+      parsed = JSON.parse(text);
+    } catch (err) {
+      if (!response.ok) {
+        throw new TakaroApiError(
+          `Request failed with status code ${response.status}: ${text.slice(0, 500)}`,
+          response.status,
+        );
+      }
+
+      throw new Error(
+        `Takaro token request to '${requestPath}' returned a non-JSON success response: ${(err as Error).message}`,
+      );
+    }
+  }
+
   if (!response.ok) {
-    const message = parsed?.meta?.error?.message ?? `Request failed with status code ${response.status}`;
+    const message = (parsed as { meta?: { error?: { message?: string } } } | undefined)?.meta?.error?.message
+      ?? (text.trim().length > 0 ? text.slice(0, 500) : `Request failed with status code ${response.status}`);
     throw new TakaroApiError(message, response.status);
   }
 
