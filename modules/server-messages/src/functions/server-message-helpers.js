@@ -6,7 +6,7 @@ export const SERVER_MESSAGES_DELIVERY_RECEIPT_KEY = 'server_messages_delivery_re
 export const MAX_MESSAGE_WEIGHT = 100;
 export const MAX_MESSAGE_COUNT = 100;
 const SUPPORTED_PLACEHOLDERS = ['playerCount', 'serverName'];
-const SERVER_NAME_FALLBACK = 'Unknown server';
+const SERVER_NAME_FALLBACK = '';
 const TEST_FORCE_STATE_WRITE_FAILURE_KEY = 'server_messages_test_force_state_write_failure';
 const TEST_FORCE_RECEIPT_WRITE_FAILURE_KEY = 'server_messages_test_force_receipt_write_failure';
 const LOCK_TTL_MS = 30000;
@@ -568,12 +568,12 @@ export async function getServerName(gameServerId) {
     }
 
     console.warn(
-      `server-message-helpers: server name for ${gameServerId} was blank; using fallback '${getServerNameFallback()}' instead of leaving {serverName} in chat`,
+      `server-message-helpers: server name for ${gameServerId} was blank; leaving {serverName} unchanged in chat output`,
     );
     return getServerNameFallback();
   } catch (err) {
     console.error(
-      `server-message-helpers: failed to load server name for ${gameServerId}; using fallback '${getServerNameFallback()}'. Error: ${err}`,
+      `server-message-helpers: failed to load server name for ${gameServerId}; leaving {serverName} unchanged. Error: ${err}`,
     );
     return getServerNameFallback();
   }

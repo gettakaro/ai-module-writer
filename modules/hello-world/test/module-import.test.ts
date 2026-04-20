@@ -438,7 +438,7 @@ describe('module-import CLI', () => {
     assert.equal(reinstalledGameServers.at(-1), 'gs-125');
   });
 
-  it('preserves durable module-scoped variables and role permission assignments across replacement imports', async () => {
+  it('preserves durable module-scoped variables, delivery receipts, and role permission assignments across replacement imports', async () => {
     const createdVariables: Array<{ moduleId?: string; key: string; value: string; gameServerId?: string }> = [];
     const updatedRoles: Array<{ roleId: string; permissions: Array<{ permissionId: string; count?: number }> }> = [];
     let searchCalls = 0;
@@ -566,6 +566,14 @@ describe('module-import CLI', () => {
         },
         {
           moduleId: 'new-module',
+          key: 'server_messages_delivery_receipt',
+          value: '{"messageIndex":0}',
+          gameServerId: 'gs-1',
+          playerId: undefined,
+          expiresAt: undefined,
+        },
+        {
+          moduleId: 'new-module',
           key: 'guild_lock',
           value: '{"count":4}',
           gameServerId: 'gs-1',
@@ -573,7 +581,7 @@ describe('module-import CLI', () => {
           expiresAt: undefined,
         },
       ],
-      'Expected only durable module-scoped variables to migrate to the replacement module id',
+      'Expected durable module-scoped variables, including delivery receipts, to migrate to the replacement module id',
     );
     assert.deepEqual(
       updatedRoles,
@@ -588,6 +596,81 @@ describe('module-import CLI', () => {
       ],
       'Expected roles to be rebound from deleted permission ids to the replacement module permissions',
     );
+  });
+
+  it('rebinds roles using permission metadata from role search when global permission discovery is incomplete', async () => {
+    const updatedRoles: Array<{ roleId: string; permissions: Array<{ permissionId: string; count?: number }> }> = [];
+    let searchCalls = 0;
+
+    const fakeClient = {
+      module: {
+        moduleControllerSearch: async () => {
+          searchCalls += 1;
+          if (searchCalls === 1) {
+            return {
+              data: {
+                data: [{ id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } }],
+              },
+            };
+          }
+
+          return {
+            data: {
+              data: [{ id: 'new-module', name: MODULE_NAME, latestVersion: { id: 'new-version' } }],
+            },
+          };
+        },
+        moduleInstallationsControllerGetInstalledModules: async () => ({ data: { data: [], meta: { total: 0 } } }),
+        moduleControllerExport: async () => ({ data: { data: { name: MODULE_NAME, versions: [] } } }),
+        moduleControllerRemove: async () => ({ data: { data: {} } }),
+        moduleControllerImport: async () => ({ data: { data: {} } }),
+      },
+      variable: {
+        variableControllerSearch: async () => ({ data: { data: [], meta: { total: 0 } } }),
+      },
+      role: {
+        roleControllerGetPermissions: async () => ({
+          data: {
+            data: [
+              { id: 'new-perm', permission: 'HELLO_USE', module: { id: 'new-module', name: MODULE_NAME } },
+            ],
+          },
+        }),
+        roleControllerSearch: async () => ({
+          data: {
+            data: [
+              {
+                id: 'role-1',
+                permissions: [
+                  {
+                    permissionId: 'old-perm',
+                    count: 4,
+                    permission: {
+                      permission: 'HELLO_USE',
+                      module: { id: 'old-module', name: MODULE_NAME },
+                    },
+                  },
+                ],
+              },
+            ],
+            meta: { total: 1 },
+          },
+        }),
+        roleControllerUpdate: async (roleId: string, payload: { permissions?: Array<{ permissionId: string; count?: number }> }) => {
+          updatedRoles.push({ roleId, permissions: payload.permissions ?? [] });
+          return { data: { data: {} } };
+        },
+      },
+    } as unknown as Client;
+
+    await importModuleExport(fakeClient, { name: MODULE_NAME, versions: [] } as any);
+
+    assert.deepEqual(updatedRoles, [
+      {
+        roleId: 'role-1',
+        permissions: [{ permissionId: 'new-perm', count: 4 }],
+      },
+    ]);
   });
 
   it('drops bindings for deleted module permissions instead of aborting the whole replacement import', async () => {
@@ -762,7 +845,7 @@ describe('module-import CLI', () => {
     }
   });
 
-  it('replays replacement snapshots through the token-only import path and skips transient variables', async () => {
+  it('replays replacement snapshots through the token-only import path while preserving durable delivery receipts', async () => {
     const originalFetch = globalThis.fetch;
     const requests: Array<{ path: string; method: string; body?: any }> = [];
     let searchCalls = 0;
@@ -873,6 +956,12 @@ describe('module-import CLI', () => {
       {
         key: 'server_messages_state',
         value: '{"sequentialIndex":1}',
+        gameServerId: 'gs-1',
+        moduleId: 'new-module',
+      },
+      {
+        key: 'server_messages_delivery_receipt',
+        value: '{"messageIndex":0}',
         gameServerId: 'gs-1',
         moduleId: 'new-module',
       },

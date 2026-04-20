@@ -70,7 +70,6 @@ interface VariableSnapshot {
 
 const TRANSIENT_MODULE_VARIABLE_KEYS = new Set([
   'server_messages_lock',
-  'server_messages_delivery_receipt',
   'server_messages_test_force_state_write_failure',
   'server_messages_test_force_receipt_write_failure',
 ]);
@@ -96,6 +95,28 @@ interface ImportModuleExportOptions {
   request?: <T>(operation: () => Promise<T>) => Promise<T>;
 }
 
+interface RoleSearchPermissionSnapshot {
+  permissionId: string;
+  count?: number;
+  permission?: {
+    permission?: string;
+    module?: {
+      id?: string;
+      name?: string;
+    };
+  };
+}
+
+interface RoleSearchResultSnapshot {
+  id: string;
+  permissions: RoleSearchPermissionSnapshot[];
+}
+
+interface RolesUsingModulePermissionsSnapshot {
+  roles: RoleSnapshot[];
+  permissionIdToCode: Map<string, string>;
+}
+
 interface ImportOps {
   findExactModuleByName(name: string): Promise<ModuleOutputDTO | null>;
   getInstallations(moduleId: string): Promise<InstallationSnapshot[]>;
@@ -106,7 +127,7 @@ interface ImportOps {
   getVariables(moduleId: string): Promise<VariableSnapshot[]>;
   upsertVariable(moduleId: string, variable: VariableSnapshot): Promise<void>;
   getModulePermissionIdToCode(moduleId: string): Promise<Map<string, string>>;
-  getRolesUsingPermissionIds(permissionIds: string[]): Promise<RoleSnapshot[]>;
+  getRolesUsingModulePermissions(moduleId: string, permissionIdToCode: Map<string, string>): Promise<RolesUsingModulePermissionsSnapshot>;
   getModulePermissionCodeToId(moduleId: string): Promise<Map<string, string>>;
   updateRolePermissions(roleId: string, permissions: RolePermissionSnapshot[]): Promise<void>;
 }
@@ -405,15 +426,56 @@ async function getModulePermissionIdToCode(
   );
 }
 
-async function getRolesUsingPermissionIds(
-  client: Client,
-  permissionIds: string[],
-  request: <T>(operation: () => Promise<T>) => Promise<T> = async <T>(operation: () => Promise<T>) => operation(),
-): Promise<RoleSnapshot[]> {
-  if (permissionIds.length === 0) return [];
+function extractRoleSnapshotForModule(
+  role: RoleSearchResultSnapshot,
+  moduleId: string,
+  knownPermissionIdToCode: Map<string, string>,
+): { roleSnapshot: RoleSnapshot | null; discoveredPermissionIdToCode: Map<string, string> } {
+  const discoveredPermissionIdToCode = new Map<string, string>();
 
-  const wanted = new Set(permissionIds);
+  const usesModulePermission = role.permissions.some((permission) => {
+    if (knownPermissionIdToCode.has(permission.permissionId)) {
+      return true;
+    }
+
+    const modulePermission = permission.permission;
+    const code = typeof modulePermission?.permission === 'string' ? modulePermission.permission : undefined;
+    const ownerModuleId = modulePermission?.module?.id;
+    if (ownerModuleId === moduleId && code) {
+      discoveredPermissionIdToCode.set(permission.permissionId, code);
+      return true;
+    }
+
+    return false;
+  });
+
+  if (!usesModulePermission) {
+    return {
+      roleSnapshot: null,
+      discoveredPermissionIdToCode,
+    };
+  }
+
+  return {
+    roleSnapshot: {
+      id: role.id,
+      permissions: role.permissions.map((permission) => ({
+        permissionId: permission.permissionId,
+        count: permission.count,
+      })),
+    },
+    discoveredPermissionIdToCode,
+  };
+}
+
+async function getRolesUsingModulePermissions(
+  client: Client,
+  moduleId: string,
+  permissionIdToCode: Map<string, string>,
+  request: <T>(operation: () => Promise<T>) => Promise<T> = async <T>(operation: () => Promise<T>) => operation(),
+): Promise<RolesUsingModulePermissionsSnapshot> {
   const snapshots: RoleSnapshot[] = [];
+  const discoveredPermissionIdToCode = new Map(permissionIdToCode);
 
   for (let page = 0; ; page++) {
     const result = await request(() => client.role.roleControllerSearch({
@@ -422,17 +484,15 @@ async function getRolesUsingPermissionIds(
       page,
     }));
 
-    const affected = result.data.data
-      .filter((role) => role.permissions.some((permission) => wanted.has(permission.permissionId)))
-      .map((role) => ({
-        id: role.id,
-        permissions: role.permissions.map((permission) => ({
-          permissionId: permission.permissionId,
-          count: permission.count,
-        })),
-      }));
-
-    snapshots.push(...affected);
+    for (const role of result.data.data as RoleSearchResultSnapshot[]) {
+      const extracted = extractRoleSnapshotForModule(role, moduleId, discoveredPermissionIdToCode);
+      for (const [permissionId, code] of extracted.discoveredPermissionIdToCode) {
+        discoveredPermissionIdToCode.set(permissionId, code);
+      }
+      if (extracted.roleSnapshot) {
+        snapshots.push(extracted.roleSnapshot);
+      }
+    }
 
     const fetched = result.data.data.length;
     const total = result.data.meta?.total;
@@ -440,7 +500,10 @@ async function getRolesUsingPermissionIds(
     if (typeof total === 'number' && (page + 1) * PAGE_SIZE >= total) break;
   }
 
-  return snapshots;
+  return {
+    roles: snapshots,
+    permissionIdToCode: discoveredPermissionIdToCode,
+  };
 }
 
 async function getModulePermissionCodeToId(
@@ -491,7 +554,7 @@ function createClientImportOps(
     getVariables: async (moduleId) => getVariablesForModule(client, moduleId, request),
     upsertVariable: async (moduleId, variable) => upsertVariableOnModule(client, moduleId, variable, request),
     getModulePermissionIdToCode: async (moduleId) => getModulePermissionIdToCode(client, moduleId, request),
-    getRolesUsingPermissionIds: async (permissionIds) => getRolesUsingPermissionIds(client, permissionIds, request),
+    getRolesUsingModulePermissions: async (moduleId, permissionIdToCode) => getRolesUsingModulePermissions(client, moduleId, permissionIdToCode, request),
     getModulePermissionCodeToId: async (moduleId) => getModulePermissionCodeToId(client, moduleId, request),
     updateRolePermissions: async (roleId, permissions) => updateRolePermissions(client, roleId, permissions, request),
   };
@@ -499,19 +562,18 @@ function createClientImportOps(
 
 async function snapshotReplacementState(ops: ImportOps, existingModule: ModuleOutputDTO): Promise<ReplacementSnapshot> {
   const permissionIdToCode = await ops.getModulePermissionIdToCode(existingModule.id);
-  const permissionIds = [...permissionIdToCode.keys()];
 
-  const [installations, variables, rolesUsingModulePermissions] = await Promise.all([
+  const [installations, variables, roleSnapshot] = await Promise.all([
     ops.getInstallations(existingModule.id),
     ops.getVariables(existingModule.id),
-    ops.getRolesUsingPermissionIds(permissionIds),
+    ops.getRolesUsingModulePermissions(existingModule.id, permissionIdToCode),
   ]);
 
   return {
     installations,
     variables: variables.filter(shouldRestoreModuleVariable),
-    rolesUsingModulePermissions,
-    permissionIdToCode,
+    rolesUsingModulePermissions: roleSnapshot.roles,
+    permissionIdToCode: roleSnapshot.permissionIdToCode,
   };
 }
 
@@ -738,7 +800,7 @@ interface TokenPermissionResult {
 
 interface TokenRoleResult {
   id: string;
-  permissions: Array<{ permissionId: string; count?: number }>;
+  permissions: RoleSearchPermissionSnapshot[];
 }
 
 async function getVariablesForModuleWithToken(
@@ -814,31 +876,28 @@ async function getAllPermissionsWithToken(
   return result.data;
 }
 
-async function getRolesUsingPermissionIdsWithToken(
+async function getRolesUsingModulePermissionsWithToken(
   auth: Required<Pick<TakaroAuthConfig, 'url' | 'domainId' | 'token'>>,
-  permissionIds: string[],
-): Promise<RoleSnapshot[]> {
-  if (permissionIds.length === 0) return [];
-
-  const wanted = new Set(permissionIds);
+  moduleId: string,
+  permissionIdToCode: Map<string, string>,
+): Promise<RolesUsingModulePermissionsSnapshot> {
   const snapshots: RoleSnapshot[] = [];
+  const discoveredPermissionIdToCode = new Map(permissionIdToCode);
 
   for (let page = 0; ; page++) {
     const result = await takaroTokenRequest<SearchResponse<TokenRoleResult>>(auth, '/role/search', {
       body: { extend: ['permissions'], limit: PAGE_SIZE, page },
     });
 
-    snapshots.push(
-      ...result.data
-        .filter((role) => role.permissions.some((permission) => wanted.has(permission.permissionId)))
-        .map((role) => ({
-          id: role.id,
-          permissions: role.permissions.map((permission) => ({
-            permissionId: permission.permissionId,
-            count: permission.count,
-          })),
-        })),
-    );
+    for (const role of result.data) {
+      const extracted = extractRoleSnapshotForModule(role, moduleId, discoveredPermissionIdToCode);
+      for (const [permissionId, code] of extracted.discoveredPermissionIdToCode) {
+        discoveredPermissionIdToCode.set(permissionId, code);
+      }
+      if (extracted.roleSnapshot) {
+        snapshots.push(extracted.roleSnapshot);
+      }
+    }
 
     const fetched = result.data.length;
     const total = result.meta?.total;
@@ -846,7 +905,10 @@ async function getRolesUsingPermissionIdsWithToken(
     if (typeof total === 'number' && (page + 1) * PAGE_SIZE >= total) break;
   }
 
-  return snapshots;
+  return {
+    roles: snapshots,
+    permissionIdToCode: discoveredPermissionIdToCode,
+  };
 }
 
 async function reinstallSnapshotsOnModuleWithToken(
@@ -895,7 +957,8 @@ function createTokenImportOps(
           .map((permission) => [permission.id, permission.permission]),
       );
     },
-    getRolesUsingPermissionIds: async (permissionIds) => getRolesUsingPermissionIdsWithToken(auth, permissionIds),
+    getRolesUsingModulePermissions: async (moduleId, permissionIdToCode) =>
+      getRolesUsingModulePermissionsWithToken(auth, moduleId, permissionIdToCode),
     getModulePermissionCodeToId: async (moduleId) => {
       const permissions = await getAllPermissionsWithToken(auth);
       return new Map(

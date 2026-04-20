@@ -459,7 +459,7 @@ describe('server-messages: broadcast cronjob', () => {
     ]);
   });
 
-  it('uses a readable fallback when the runtime server name is unavailable', async () => {
+  it('leaves {serverName} unchanged when the runtime server name is unavailable', async () => {
     await reinstall({
       order: 'sequential',
       messages: [{ text: 'Server={serverName}' }],
@@ -477,10 +477,14 @@ describe('server-messages: broadcast cronjob', () => {
     try {
       const result = await triggerCronjobAndCollectMessages();
       assert.equal(result.success, true, `Expected unavailable-placeholder run to succeed, logs: ${JSON.stringify(result.logs)}`);
-      assert.deepEqual(result.chatMessages, ['Server=Unknown server']);
+      assert.deepEqual(result.chatMessages, ['Server={serverName}']);
       assert.ok(
-        result.logs.some((log) => log.includes("using fallback 'Unknown server'") && log.includes('{serverName}')),
-        `Expected fallback warning log, got: ${JSON.stringify(result.logs)}`,
+        result.logs.some((log) => log.includes('leaving {serverName} unchanged')),
+        `Expected placeholder-preservation warning log, got: ${JSON.stringify(result.logs)}`,
+      );
+      assert.ok(
+        result.logs.some((log) => log.includes('left unavailable placeholders unchanged [serverName]')),
+        `Expected unavailable-placeholder render warning, got: ${JSON.stringify(result.logs)}`,
       );
     } finally {
       await client.gameserver.gameServerControllerUpdate(ctx.gameServer.id, {
