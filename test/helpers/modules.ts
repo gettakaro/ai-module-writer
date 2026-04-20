@@ -28,7 +28,19 @@ interface ModuleInstallationBackup {
 interface ModuleVariableBackup {
   key: string;
   value: string;
-  gameServerId: string;
+  gameServerId?: string;
+}
+
+interface RolePermissionBackup {
+  permission: string;
+  count?: number;
+}
+
+interface RoleBindingBackup {
+  roleId: string;
+  name: string;
+  linkedDiscordRoleId?: string;
+  permissions: RolePermissionBackup[];
 }
 
 async function collectModuleInstallations(client: Client, moduleId: string): Promise<ModuleInstallationBackup[]> {
@@ -50,13 +62,81 @@ async function collectModuleVariables(client: Client, moduleId: string): Promise
     limit: 1000,
   });
 
-  return result.data.data
-    .filter((variable) => typeof variable.gameServerId === 'string' && variable.gameServerId !== '')
-    .map((variable) => ({
+  return result.data.data.map((variable) => ({
+    key: variable.key,
+    value: variable.value,
+    gameServerId: typeof variable.gameServerId === 'string' && variable.gameServerId !== ''
+      ? variable.gameServerId as string
+      : undefined,
+  }));
+}
+
+async function collectModuleRoleBindings(client: Client, moduleId: string): Promise<RoleBindingBackup[]> {
+  const permissionsResult = await client.role.roleControllerGetPermissions();
+  const modulePermissionIds = new Set(
+    permissionsResult.data.data
+      .filter((permission) => permission.module?.id === moduleId)
+      .map((permission) => permission.id),
+  );
+
+  if (modulePermissionIds.size === 0) {
+    return [];
+  }
+
+  const rolesResult = await client.role.roleControllerSearch({ limit: 1000 });
+  return rolesResult.data.data
+    .filter((role) => role.permissions.some((permissionOnRole) => modulePermissionIds.has(permissionOnRole.permissionId)))
+    .map((role) => ({
+      roleId: role.id,
+      name: role.name,
+      linkedDiscordRoleId: role.linkedDiscordRoleId,
+      permissions: role.permissions.map((permissionOnRole) => ({
+        permission: permissionOnRole.permission.permission,
+        count: permissionOnRole.count,
+      })),
+    }));
+}
+
+async function restoreVariables(client: Client, moduleId: string, variables: ModuleVariableBackup[]): Promise<void> {
+  for (const variable of variables) {
+    await client.variable.variableControllerCreate({
       key: variable.key,
       value: variable.value,
-      gameServerId: variable.gameServerId as string,
-    }));
+      gameServerId: variable.gameServerId,
+      moduleId,
+    });
+  }
+}
+
+async function rebindRoles(client: Client, roles: RoleBindingBackup[]): Promise<void> {
+  if (roles.length === 0) {
+    return;
+  }
+
+  const permissionsResult = await client.role.roleControllerGetPermissions();
+  const permissionsByCode = new Map(
+    permissionsResult.data.data.map((permission) => [permission.permission, permission.id]),
+  );
+
+  for (const role of roles) {
+    const reboundPermissions = role.permissions.map((permission) => {
+      const permissionId = permissionsByCode.get(permission.permission);
+      if (!permissionId) {
+        throw new Error(`Permission '${permission.permission}' not found while rebinding role '${role.name}'`);
+      }
+
+      return {
+        permissionId,
+        count: permission.count,
+      };
+    });
+
+    await client.role.roleControllerUpdate(role.roleId, {
+      name: role.name,
+      linkedDiscordRoleId: role.linkedDiscordRoleId,
+      permissions: reboundPermissions,
+    });
+  }
 }
 
 async function findModuleByName(client: Client, name: string): Promise<ModuleOutputDTO> {
@@ -70,31 +150,29 @@ async function findModuleByName(client: Client, name: string): Promise<ModuleOut
   return found;
 }
 
+async function restoreInstallations(client: Client, module: ModuleOutputDTO, installations: ModuleInstallationBackup[]): Promise<void> {
+  for (const installation of installations) {
+    await installModule(client, module.latestVersion.id, installation.gameServerId, {
+      userConfig: installation.userConfig,
+      systemConfig: installation.systemConfig,
+    });
+  }
+}
+
 async function restoreModuleState(
   client: Client,
   moduleName: string,
   moduleExport: Record<string, unknown>,
   installations: ModuleInstallationBackup[],
   variables: ModuleVariableBackup[],
+  roles: RoleBindingBackup[],
 ): Promise<ModuleOutputDTO> {
   await client.module.moduleControllerImport(moduleExport);
   const restoredModule = await findModuleByName(client, moduleName);
 
-  for (const installation of installations) {
-    await installModule(client, restoredModule.latestVersion.id, installation.gameServerId, {
-      userConfig: installation.userConfig,
-      systemConfig: installation.systemConfig,
-    });
-  }
-
-  for (const variable of variables) {
-    await client.variable.variableControllerCreate({
-      key: variable.key,
-      value: variable.value,
-      gameServerId: variable.gameServerId,
-      moduleId: restoredModule.id,
-    });
-  }
+  await restoreInstallations(client, restoredModule, installations);
+  await restoreVariables(client, restoredModule.id, variables);
+  await rebindRoles(client, roles);
 
   return restoredModule;
 }
@@ -147,30 +225,22 @@ export async function pushModule(
     const existingVariables = existingModule
       ? await collectModuleVariables(client, existingModule.id)
       : [];
+    const existingRoles = existingModule
+      ? await collectModuleRoleBindings(client, existingModule.id)
+      : [];
 
     if (existingModule) {
       await client.module.moduleControllerRemove(existingModule.id);
     }
 
+    let importedModule: ModuleOutputDTO | undefined;
     try {
       await client.module.moduleControllerImport(moduleJson);
-      const importedModule = await findModuleByName(client, name);
+      importedModule = await findModuleByName(client, name);
 
-      for (const installation of existingInstallations) {
-        await installModule(client, importedModule.latestVersion.id, installation.gameServerId, {
-          userConfig: installation.userConfig,
-          systemConfig: installation.systemConfig,
-        });
-      }
-
-      for (const variable of existingVariables) {
-        await client.variable.variableControllerCreate({
-          key: variable.key,
-          value: variable.value,
-          gameServerId: variable.gameServerId,
-          moduleId: importedModule.id,
-        });
-      }
+      await restoreInstallations(client, importedModule, existingInstallations);
+      await restoreVariables(client, importedModule.id, existingVariables);
+      await rebindRoles(client, existingRoles);
 
       return importedModule;
     } catch (err) {
@@ -178,8 +248,18 @@ export async function pushModule(
         throw err;
       }
 
+      if (importedModule) {
+        try {
+          await client.module.moduleControllerRemove(importedModule.id);
+        } catch (cleanupErr) {
+          throw new Error(
+            `Import of '${name}' failed after creating replacement module '${importedModule.id}', and cleanup of that replacement failed before rollback. Import error: ${err}. Cleanup error: ${cleanupErr}`,
+          );
+        }
+      }
+
       try {
-        await restoreModuleState(client, name, existingBackup, existingInstallations, existingVariables);
+        await restoreModuleState(client, name, existingBackup, existingInstallations, existingVariables, existingRoles);
       } catch (restoreErr) {
         throw new Error(
           `Import of '${name}' failed and restoring the previous module also failed. Import error: ${err}. Restore error: ${restoreErr}`,
@@ -227,7 +307,16 @@ export async function uninstallModule(
  * Delete a module entirely from Takaro.
  */
 export async function deleteModule(client: Client, moduleId: string): Promise<void> {
-  await client.module.moduleControllerRemove(moduleId);
+  try {
+    await client.module.moduleControllerRemove(moduleId);
+  } catch (err) {
+    const status = (err as { response?: { status?: number } })?.response?.status;
+    if (status === 404) {
+      console.error(`deleteModule: module '${moduleId}' already disappeared during cleanup, skipping`);
+      return;
+    }
+    throw err;
+  }
 }
 
 /**

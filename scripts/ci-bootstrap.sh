@@ -66,7 +66,7 @@ docker compose -f "${COMPOSE_FILE}" up -d postgresql postgresql_kratos redis mai
 echo "Waiting for postgres to be ready..."
 max_pg_attempts=30
 pg_attempt=0
-until docker compose -f "${COMPOSE_FILE}" exec postgresql pg_isready -U takaro-ci -d takaro-ci-db >/dev/null 2>&1; do
+until docker compose -f "${COMPOSE_FILE}" exec postgresql pg_isready -U postgres -d takaro-ci-db >/dev/null 2>&1; do
   pg_attempt=$((pg_attempt + 1))
   if [[ ${pg_attempt} -ge ${max_pg_attempts} ]]; then
     echo "ERROR: PostgreSQL did not become ready after ${max_pg_attempts} attempts." >&2

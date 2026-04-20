@@ -91,7 +91,32 @@ describe('utils: admin commands', () => {
 
   async function trigger(playerId: string, msg: string) {
     const before = new Date();
-    await client.command.commandControllerTrigger(ctx.gameServer.id, { msg, playerId });
+
+    try {
+      await client.command.commandControllerTrigger(ctx.gameServer.id, { msg, playerId });
+    } catch (err) {
+      const responseData = (err as { response?: { data?: unknown } })?.response?.data;
+      const rawMessages = Array.isArray(responseData)
+        ? responseData
+        : [responseData];
+      const logs = rawMessages
+        .flatMap((entry) => {
+          if (!entry) return [];
+          if (typeof entry === 'string') return [entry];
+          if (typeof entry === 'object' && entry !== null) {
+            const message = (entry as { message?: unknown }).message;
+            if (typeof message === 'string') return [message];
+          }
+          return [String(entry)];
+        })
+        .filter(Boolean);
+
+      return {
+        success: false,
+        logs: logs.length > 0 ? logs : [String((err as Error).message ?? err)],
+      };
+    }
+
     const event = await waitForEvent(client, {
       eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
       gameserverId: ctx.gameServer.id,
@@ -641,5 +666,127 @@ describe('test helper: pushModule rollback', () => {
     const logs = (meta?.result?.logs ?? []).map((entry) => entry.msg);
     assert.equal(meta?.result?.success, true, `Expected restored installation to execute commands, logs: ${JSON.stringify(logs)}`);
     assert.ok(logs.some((msg) => msg.includes('https://discord.gg/rollback-check')), JSON.stringify(logs));
+  });
+});
+
+describe('test helper: pushModule successful replacement migration', () => {
+  let client: Client;
+  let ctx: MockServerContext;
+  let moduleId: string | undefined;
+  let tempModuleDir: string | undefined;
+  let adminRoleId: string | undefined;
+
+  before(async () => {
+    client = await createClient();
+    await cleanupTestModules(client);
+    await cleanupTestGameServers(client);
+    ctx = await startMockServer(client);
+  });
+
+  after(async () => {
+    await cleanupRole(client, adminRoleId);
+    if (moduleId) {
+      try {
+        await uninstallModule(client, moduleId, ctx.gameServer.id);
+      } catch {
+        // Best-effort cleanup only.
+      }
+      await deleteModule(client, moduleId);
+    }
+    if (tempModuleDir) {
+      await rm(tempModuleDir, { recursive: true, force: true });
+    }
+    await stopMockServer(ctx.server, client, ctx.gameServer.id);
+  });
+
+  it('preserves installations, module variables, and permission-bearing roles on successful replacement', async () => {
+    const original = await pushModule(client, MODULE_DIR);
+    moduleId = original.id;
+
+    await installModule(client, original.latestVersion.id, ctx.gameServer.id, {
+      userConfig: {
+        discordLink: 'https://discord.gg/migration-check',
+      },
+    });
+
+    adminRoleId = await assignPermissions(client, ctx.players[0].playerId, ctx.gameServer.id, ['UTILS_KICK']);
+
+    await client.variable.variableControllerCreate({
+      key: '__migration_server_marker',
+      value: JSON.stringify({ scope: 'server' }),
+      gameServerId: ctx.gameServer.id,
+      moduleId: original.id,
+    });
+    await client.variable.variableControllerCreate({
+      key: '__migration_global_marker',
+      value: JSON.stringify({ scope: 'global' }),
+      moduleId: original.id,
+    });
+
+    tempModuleDir = await mkdtemp(path.join(os.tmpdir(), 'test-utils-migration-'));
+    await cp(MODULE_DIR, tempModuleDir, { recursive: true });
+
+    const moduleJsonPath = path.join(tempModuleDir, 'module.json');
+    const moduleJson = JSON.parse(await readFile(moduleJsonPath, 'utf8')) as Record<string, any>;
+    moduleJson.description = 'Replacement migration smoke test';
+    await writeFile(moduleJsonPath, `${JSON.stringify(moduleJson, null, 2)}\n`);
+
+    const replaced = await pushModule(client, tempModuleDir);
+    moduleId = replaced.id;
+
+    const installations = await client.module.moduleInstallationsControllerGetInstalledModules({
+      filters: {
+        moduleId: [replaced.id],
+        gameserverId: [ctx.gameServer.id],
+      },
+      limit: 10,
+    });
+    assert.equal(installations.data.data.length, 1, `Expected preserved installation after replacement, got: ${JSON.stringify(installations.data.data)}`);
+    assert.equal(
+      (installations.data.data[0].userConfig as Record<string, unknown>)?.discordLink,
+      'https://discord.gg/migration-check',
+      `Expected preserved installation config after replacement, got: ${JSON.stringify(installations.data.data[0])}`,
+    );
+
+    const serverScopedVariables = await client.variable.variableControllerSearch({
+      filters: {
+        moduleId: [replaced.id],
+        gameServerId: [ctx.gameServer.id],
+        key: ['__migration_server_marker'],
+      },
+      limit: 10,
+    });
+    assert.equal(serverScopedVariables.data.data.length, 1, `Expected preserved server-scoped variable, got: ${JSON.stringify(serverScopedVariables.data.data)}`);
+
+    const globalVariables = await client.variable.variableControllerSearch({
+      filters: {
+        moduleId: [replaced.id],
+        key: ['__migration_global_marker'],
+      },
+      limit: 10,
+    });
+    assert.equal(globalVariables.data.data.length, 1, `Expected preserved global variable, got: ${JSON.stringify(globalVariables.data.data)}`);
+    assert.ok(
+      globalVariables.data.data[0].gameServerId == null,
+      `Expected global variable to remain unbound, got: ${JSON.stringify(globalVariables.data.data[0])}`,
+    );
+
+    const prefix = await getCommandPrefix(client, ctx.gameServer.id);
+    const targetName = (await client.player.playerControllerGetOne(ctx.players[1].playerId)).data.data.name;
+    const before = new Date();
+    await client.command.commandControllerTrigger(ctx.gameServer.id, {
+      msg: `${prefix}kick ${targetName} migration check`,
+      playerId: ctx.players[0].playerId,
+    });
+    const event = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const logs = (meta?.result?.logs ?? []).map((entry) => entry.msg);
+    assert.equal(meta?.result?.success, true, `Expected preserved role permissions to keep /kick working after replacement, logs: ${JSON.stringify(logs)}`);
+    assert.ok(logs.some((msg) => msg.includes('Kicked')), JSON.stringify(logs));
   });
 });

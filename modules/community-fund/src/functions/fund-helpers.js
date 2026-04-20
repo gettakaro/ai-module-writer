@@ -2,6 +2,7 @@ import { takaro } from '@takaro/helpers';
 
 export const FUND_DEBUG_FORCE_STATE_WRITE_FAILURE_KEY = '__debug_force_state_write_failure_after_deduct';
 export const FUND_DEBUG_FORCE_REFUND_FAILURE_KEY = '__debug_force_refund_failure_after_state_write_failure';
+export const FUND_DEBUG_FORCE_STATE_RESTORE_FAILURE_KEY = '__debug_force_state_restore_failure_after_refund';
 export const FUND_DEBUG_REPLACE_LOCK_OWNER_KEY = '__debug_replace_lock_owner_before_release';
 
 export const FUND_TOTAL_KEY = 'fund_total';
@@ -72,7 +73,7 @@ export async function acquireFundStateLock(
   { maxWaitMs = 5000, pollMs = 200, staleAfterMs = 120000 } = {},
 ) {
   const deadline = Date.now() + Math.max(0, maxWaitMs);
-  const sleepMs = Math.max(1, pollMs);
+  const retryBudgetMs = Math.max(1, pollMs);
 
   while (Date.now() <= deadline) {
     const now = Date.now();
@@ -115,7 +116,12 @@ export async function acquireFundStateLock(
       break;
     }
 
-    await new Promise((resolve) => setTimeout(resolve, Math.min(sleepMs, remainingMs)));
+    // Takaro's function sandbox does not expose setTimeout(). The API round-trips in
+    // this loop already provide back-pressure, so keep retrying until the deadline
+    // instead of crashing the retry path with ReferenceError.
+    if (remainingMs > retryBudgetMs) {
+      await getFundVariable(gameServerId, moduleId, FUND_STATE_LOCK_KEY);
+    }
   }
 
   throw new Error('Timed out acquiring the community fund state lock');

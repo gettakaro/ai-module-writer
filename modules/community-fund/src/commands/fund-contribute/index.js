@@ -16,6 +16,7 @@ import {
   consumeFundDebugFlag,
   FUND_DEBUG_FORCE_STATE_WRITE_FAILURE_KEY,
   FUND_DEBUG_FORCE_REFUND_FAILURE_KEY,
+  FUND_DEBUG_FORCE_STATE_RESTORE_FAILURE_KEY,
   FUND_DEBUG_REPLACE_LOCK_OWNER_KEY,
   releaseFundStateLock,
 } from './fund-helpers.js';
@@ -82,7 +83,6 @@ async function main() {
       await takaro.playerOnGameserver.playerOnGameServerControllerDeductCurrency(gameServerId, pog.playerId, {
         currency: amount,
       });
-      await assertFundStateLock(gameServerId, moduleId, lockOwner);
     } catch (deductErr) {
       console.error(`Fund: currency deduction failed for player ${player.name} (amount=${amount}). Contribution aborted. Error: ${deductErr}`);
       throw new TakaroUserError('Your contribution could not be processed because your currency could not be deducted. Please try again.');
@@ -135,6 +135,10 @@ async function main() {
         let stateRestored = true;
         try {
           await assertFundStateLock(gameServerId, moduleId, lockOwner);
+          if (await consumeFundDebugFlag(gameServerId, moduleId, FUND_DEBUG_FORCE_STATE_RESTORE_FAILURE_KEY)) {
+            throw new Error('Debug-forced shared-state restore failure after refund');
+          }
+
           if (previousTotalVariable) {
             await setFundVariable(gameServerId, moduleId, FUND_TOTAL_KEY, JSON.parse(previousTotalVariable.value));
           } else {
@@ -197,11 +201,10 @@ async function main() {
   if (thresholdReached) {
     const completionMsg = config.completionMessage.replace('{threshold}', String(threshold));
     const carryover = newTotal - threshold;
-    const nextRound = newCycle + 1;
     const carryoverMessage = carryover > 0
-      ? ` ${carryover} currency carried over into Round #${nextRound}.`
-      : ` Round #${nextRound} is now active.`;
-    const completionBroadcast = `${completionMsg} Completed round #${newCycle}; starting Round #${nextRound}.${carryover > 0 ? ` ${carryover} currency carried over.` : ''}`;
+      ? ` ${carryover} currency carried over into the next fund cycle.`
+      : ' The fund has been reset and is ready for the next cycle.';
+    const completionBroadcast = `${completionMsg}${carryoverMessage}`;
     await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
       message: completionBroadcast,
       opts: {},
@@ -219,7 +222,7 @@ async function main() {
       }
     }
 
-    const playerMessage = `You contributed ${amount} to the community fund. The community fund goal has been met! Completed round #${newCycle}; now starting Round #${nextRound}.${carryoverMessage}`;
+    const playerMessage = `You contributed ${amount} to the community fund. The community fund goal has been met!${carryoverMessage}`;
 
     console.log(playerMessage);
     await pog.pm(playerMessage);

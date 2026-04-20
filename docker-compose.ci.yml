@@ -4,12 +4,12 @@ services:
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: takaro-ci
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-takaro-ci}
       POSTGRES_DB: takaro-ci-db
       POSTGRES_HOST_AUTH_METHOD: trust
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U takaro-ci -d takaro-ci-db"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d takaro-ci-db"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -19,12 +19,12 @@ services:
     ports:
       - "5433:5432"
     environment:
-      POSTGRES_USER: takaro-ci
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-takaro-ci}
       POSTGRES_DB: takaro-ci-db
       POSTGRES_HOST_AUTH_METHOD: trust
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U takaro-ci -d takaro-ci-db"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d takaro-ci-db"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -45,7 +45,7 @@ services:
       postgresql_kratos:
         condition: service_healthy
     environment:
-      DSN: postgres://takaro-ci:${POSTGRES_PASSWORD}@postgresql_kratos:5432/takaro-ci-db?sslmode=disable
+      DSN: postgres://postgres:${POSTGRES_PASSWORD}@postgresql_kratos:5432/takaro-ci-db?sslmode=disable
     volumes:
       - ./containers/ory/kratos:/etc/config/kratos
     command: migrate sql -e --yes -c /etc/config/kratos/kratos.yml
@@ -59,7 +59,7 @@ services:
       kratos-migrate:
         condition: service_completed_successfully
     environment:
-      DSN: postgres://takaro-ci:${POSTGRES_PASSWORD}@postgresql_kratos:5432/takaro-ci-db?sslmode=disable
+      DSN: postgres://postgres:${POSTGRES_PASSWORD}@postgresql_kratos:5432/takaro-ci-db?sslmode=disable
     volumes:
       - ./containers/ory/kratos:/etc/config/kratos
     command: serve -c /etc/config/kratos/kratos.yml --dev --watch-courier
@@ -86,7 +86,7 @@ services:
       REDIS_HOST: redis
       JWT_SECRET: ${JWT_SECRET}
       FUNCTIONS_EXECUTION_MODE: local
-      POSTGRES_USER: takaro-ci
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: takaro-ci-db
       POSTGRES_HOST: postgresql

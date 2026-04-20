@@ -1,5 +1,8 @@
 import { describe, it, before, after } from 'node:test';
-import { FUND_DEBUG_FORCE_REFUND_FAILURE_KEY } from '../src/functions/fund-debug-keys.js';
+import {
+  FUND_DEBUG_FORCE_REFUND_FAILURE_KEY,
+  FUND_DEBUG_FORCE_STATE_RESTORE_FAILURE_KEY,
+} from '../src/functions/fund-debug-keys.js';
 import assert from 'node:assert/strict';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -531,8 +534,8 @@ describe('community-fund: fund-contribute command', () => {
 
     const logMessages = (meta?.result?.logs ?? []).map((l) => l.msg);
     assert.ok(
-      logMessages.some((msg) => msg.includes('5 currency carried over into Round #2.')),
-      `Expected completion message to mention the carryover amount and next round, got: ${JSON.stringify(logMessages)}`,
+      logMessages.some((msg) => msg.includes('5 currency carried over into the next fund cycle.')),
+      `Expected completion message to mention the carryover amount, got: ${JSON.stringify(logMessages)}`,
     );
 
     const statusBefore = new Date();
@@ -1060,6 +1063,60 @@ describe('community-fund: refund handling after state-write failure', () => {
       },
     });
     assert.equal(totalVariable.data.data.length, 0, `Expected no persisted fund_total after rollback, got: ${JSON.stringify(totalVariable.data.data)}`);
+  });
+
+  it('warns the player when refund succeeds but shared-state restore still fails', async () => {
+    const player = ctx.players[0]!;
+    await client.variable.variableControllerCreate({
+      key: '__debug_force_state_write_failure_after_deduct',
+      value: JSON.stringify(true),
+      gameServerId: ctx.gameServer.id,
+      moduleId,
+    });
+    await client.variable.variableControllerCreate({
+      key: FUND_DEBUG_FORCE_STATE_RESTORE_FAILURE_KEY,
+      value: JSON.stringify(true),
+      gameServerId: ctx.gameServer.id,
+      moduleId,
+    });
+
+    const beforePog = await getPog(player.playerId);
+    assert.ok(beforePog, 'Expected player POG before restore-failure test');
+    const beforeCurrency = beforePog?.currency ?? 0;
+    const before = new Date();
+
+    await client.command.commandControllerTrigger(ctx.gameServer.id, {
+      msg: `${prefix}fund 20`,
+      playerId: player.playerId,
+    });
+
+    const event = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(meta?.result?.success, false, 'Expected contribution to fail after the forced restore failure');
+
+    const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
+    assert.ok(
+      logs.some((msg) => msg.includes('rolled back 20 currency')),
+      `Expected refund success to be logged, got: ${JSON.stringify(logs)}`,
+    );
+    assert.ok(
+      logs.some((msg) => msg.includes('CRITICAL shared-state restore failure')),
+      `Expected shared-state restore failure to be logged, got: ${JSON.stringify(logs)}`,
+    );
+    assert.ok(
+      logs.some((msg) => msg.includes('currency was refunded, but the community fund state could not be restored cleanly')),
+      `Expected player-facing restore-failure warning, got: ${JSON.stringify(logs)}`,
+    );
+
+    const afterPog = await getPog(player.playerId);
+    assert.ok(afterPog, 'Expected player POG after restore-failure test');
+    assert.equal(afterPog?.currency, beforeCurrency, `Expected refunded currency balance after restore failure, got: ${JSON.stringify(afterPog)}`);
   });
 
   it('warns the player when both state persistence and refunding fail after deduction', async () => {
