@@ -5,13 +5,21 @@ set -euo pipefail
 # runs migrations, waits for health, creates a test domain, and exports
 # environment variables for the test runner.
 #
-# Exports to $GITHUB_ENV (or to local shell if not in GitHub Actions):
+# Exports to $GITHUB_ENV when running in GitHub Actions.
+# When sourced locally (`source scripts/ci-bootstrap.sh`), it also exports into the
+# current shell so follow-up commands can reuse the generated credentials.
 #   TAKARO_HOST
 #   TAKARO_WS_URL
 #   TAKARO_USERNAME
 #   TAKARO_PASSWORD
 #   TAKARO_DOMAIN_ID
 #   TAKARO_REGISTRATION_TOKEN
+#
+# Note: if you execute the script normally without GITHUB_ENV, the exported values
+# only exist inside this script process. Source it locally when you need shell exports.
+
+_CI_BOOTSTRAP_SOURCED=0
+(return 0 2>/dev/null) && _CI_BOOTSTRAP_SOURCED=1 || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -149,6 +157,7 @@ SENSITIVE_KEYS=("TAKARO_PASSWORD" "ADMIN_CLIENT_SECRET" "TAKARO_REGISTRATION_TOK
 export_var() {
   local key="$1"
   local value="$2"
+
   if [[ -n "${GITHUB_ENV:-}" ]]; then
     # Mask sensitive values in GitHub Actions log output
     for sensitive_key in "${SENSITIVE_KEYS[@]}"; do
@@ -159,6 +168,10 @@ export_var() {
     done
     echo "${key}=${value}" >> "${GITHUB_ENV}"
   fi
+
+  if [[ ${_CI_BOOTSTRAP_SOURCED} -eq 1 ]]; then
+    export "${key}=${value}"
+  fi
 }
 
 export_var "TAKARO_HOST" "http://localhost:13000"
@@ -167,5 +180,9 @@ export_var "TAKARO_DOMAIN_ID" "${TAKARO_DOMAIN_ID}"
 export_var "TAKARO_USERNAME" "${TAKARO_USERNAME}"
 export_var "TAKARO_PASSWORD" "${TAKARO_PASSWORD}"
 export_var "TAKARO_REGISTRATION_TOKEN" "${TAKARO_REGISTRATION_TOKEN}"
+
+if [[ -z "${GITHUB_ENV:-}" && ${_CI_BOOTSTRAP_SOURCED} -eq 1 ]]; then
+  echo "Credentials exported into the current shell."
+fi
 
 echo "Bootstrap complete. Takaro stack is ready."

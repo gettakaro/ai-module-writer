@@ -158,7 +158,7 @@ describe('utils: admin commands default no-broadcast behavior', () => {
   });
 });
 
-describe('utils: default ban broadcast template with permanent bans', () => {
+describe('utils: default broadcast templates when enabled', () => {
   let client: Client;
   let ctx: MockServerContext;
   let moduleId: string;
@@ -176,13 +176,20 @@ describe('utils: default ban broadcast template with permanent bans', () => {
     moduleId = mod.id;
     versionId = mod.latestVersion.id;
 
+    await client.settings.settingsControllerSet('economyEnabled', {
+      gameServerId: ctx.gameServer.id,
+      value: 'true',
+    });
+
     await installModule(client, versionId, ctx.gameServer.id, {
       userConfig: {
+        broadcastCurrencyGrants: true,
+        broadcastKicks: true,
         broadcastBans: true,
       },
     });
     prefix = await getCommandPrefix(client, ctx.gameServer.id);
-    adminRoleId = await assignPermissions(client, ctx.players[0].playerId, ctx.gameServer.id, ['UTILS_BAN']);
+    adminRoleId = await assignPermissions(client, ctx.players[0].playerId, ctx.gameServer.id, ['UTILS_BAN', 'UTILS_KICK', 'UTILS_GIVE_CURRENCY']);
   });
 
   after(async () => {
@@ -215,6 +222,77 @@ describe('utils: default ban broadcast template with permanent bans', () => {
       logs: (meta?.result?.logs ?? []).map((l) => l.msg),
     };
   }
+
+  async function waitForOnline(playerId: string, expectedOnline: boolean) {
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      const result = await client.playerOnGameserver.playerOnGameServerControllerSearch({
+        filters: {
+          gameServerId: [ctx.gameServer.id],
+          playerId: [playerId],
+        },
+      });
+      const pog = result.data.data[0];
+      if (pog && pog.online === expectedOnline) return;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    throw new Error(`Timed out waiting for player ${playerId} online=${expectedOnline}`);
+  }
+
+  async function clearBans(playerId: string) {
+    const bans = await client.player.banControllerSearch({
+      filters: {
+        gameServerId: [ctx.gameServer.id],
+        playerId: [playerId],
+      },
+    });
+    for (const ban of bans.data.data) {
+      await client.player.banControllerDelete(ban.id);
+    }
+  }
+
+  it('renders the default givecurrency broadcast template', async () => {
+    const targetName = (await client.player.playerControllerGetOne(ctx.players[1].playerId)).data.data.name;
+    const res = await trigger(ctx.players[0].playerId, `${prefix}givecurrency ${targetName} 5`);
+
+    assert.equal(res.success, true, JSON.stringify(res.logs));
+    assert.ok(
+      res.logs.some((msg) => msg.includes(`${targetName} received 5 currency from`) && !msg.includes('{amount}') && !msg.includes('{admin}')),
+      JSON.stringify(res.logs),
+    );
+  });
+
+  it('renders the default kick broadcast template', async () => {
+    const targetName = (await client.player.playerControllerGetOne(ctx.players[1].playerId)).data.data.name;
+    await ctx.server.executeConsoleCommand('connectAll');
+    await waitForOnline(ctx.players[1].playerId, true);
+
+    const res = await trigger(ctx.players[0].playerId, `${prefix}kick ${targetName}`);
+
+    assert.equal(res.success, true, JSON.stringify(res.logs));
+    assert.ok(
+      res.logs.some((msg) => msg.includes(`${targetName} was kicked by`) && msg.includes('Reason: Kicked by an admin.') && !msg.includes('{reason}')),
+      JSON.stringify(res.logs),
+    );
+    await waitForOnline(ctx.players[1].playerId, false);
+  });
+
+  it('renders the default broadcast template for temporary bans', async () => {
+    const targetName = (await client.player.playerControllerGetOne(ctx.players[2].playerId)).data.data.name;
+    await clearBans(ctx.players[2].playerId);
+
+    const res = await trigger(ctx.players[0].playerId, `${prefix}ban ${targetName} 10m testing defaults`);
+
+    assert.equal(res.success, true, JSON.stringify(res.logs));
+    assert.ok(
+      res.logs.some((msg) => msg.includes(`${targetName} was banned by`) && msg.includes('for 10 minutes') && msg.includes('Reason: testing defaults')),
+      JSON.stringify(res.logs),
+    );
+
+    await clearBans(ctx.players[2].playerId);
+    await ctx.server.executeConsoleCommand('connectAll');
+    await waitForOnline(ctx.players[2].playerId, true);
+  });
 
   it('renders "permanently" with the default broadcast template for permanent bans', async () => {
     const targetName = (await client.player.playerControllerGetOne(ctx.players[1].playerId)).data.data.name;

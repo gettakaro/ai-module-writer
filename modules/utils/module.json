@@ -1,5 +1,5 @@
 {
-  "name": "test-utils",
+  "name": "utils",
   "description": "Cross-game utility commands for server info, rules, moderation, and simple economy administration.",
   "version": "latest",
   "supportedGames": [
@@ -60,7 +60,7 @@
       },
       "banBroadcastMessage": {
         "type": "string",
-        "default": "{player} was banned by {admin} {duration}. Reason: {reason}",
+        "default": "{player} was banned by {admin} for {duration}. Reason: {reason}",
         "maxLength": 300,
         "description": "Broadcast template for /ban. Supports {player}, {reason}, {admin}, and {duration}."
       }

@@ -166,11 +166,20 @@ export async function resolvePlayerTarget(value) {
   }
 
   try {
-    const byName = await takaro.player.playerControllerSearch({
-      search: { name: [token] },
-      limit: 10,
-    });
-    const exactNameMatch = byName.data.data.find((player) => trimOrEmpty(player.name).toLowerCase() === token.toLowerCase());
+    const candidates = await collectPaginatedResults(async ({ page, limit }) => {
+      const result = await takaro.player.playerControllerSearch({
+        search: { name: [token] },
+        page,
+        limit,
+      });
+
+      return {
+        data: result.data.data,
+        total: result.data.meta?.total,
+      };
+    }, { limit: 100, maxIterations: 20 });
+
+    const exactNameMatch = candidates.find((player) => trimOrEmpty(player.name).toLowerCase() === token.toLowerCase());
     if (!exactNameMatch) {
       return null;
     }

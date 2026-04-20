@@ -610,12 +610,12 @@ describe('test helper: pushModule rollback', () => {
     });
 
     const originalSearch = await client.module.moduleControllerSearch({
-      filters: { name: ['test-utils'] },
+      filters: { name: ['utils'] },
     });
-    const originalRecord = originalSearch.data.data.find((module) => module.name === 'test-utils') as (Record<string, any> | undefined);
-    assert.ok(originalRecord, `Expected original test-utils module, got: ${JSON.stringify(originalSearch.data.data)}`);
+    const originalRecord = originalSearch.data.data.find((module) => module.name === 'utils') as (Record<string, any> | undefined);
+    assert.ok(originalRecord, `Expected original utils module, got: ${JSON.stringify(originalSearch.data.data)}`);
 
-    tempModuleDir = await mkdtemp(path.join(os.tmpdir(), 'test-utils-rollback-'));
+    tempModuleDir = await mkdtemp(path.join(os.tmpdir(), 'utils-rollback-'));
     await cp(MODULE_DIR, tempModuleDir, { recursive: true });
 
     const originalImport = client.module.moduleControllerImport.bind(client.module);
@@ -638,11 +638,11 @@ describe('test helper: pushModule rollback', () => {
     }
 
     const searchResult = await client.module.moduleControllerSearch({
-      filters: { name: ['test-utils'] },
+      filters: { name: ['utils'] },
     });
-    const restored = searchResult.data.data.find((module) => module.name === 'test-utils') as (Record<string, any> | undefined);
+    const restored = searchResult.data.data.find((module) => module.name === 'utils') as (Record<string, any> | undefined);
 
-    assert.ok(restored, `Expected restored test-utils module, got: ${JSON.stringify(searchResult.data.data)}`);
+    assert.ok(restored, `Expected restored utils module, got: ${JSON.stringify(searchResult.data.data)}`);
     assert.equal(restored.description, originalRecord.description, 'Expected rollback to restore the original module metadata');
     restoredModuleId = restored.id;
     const restoredModuleIdValue = String(restored.id);
@@ -751,7 +751,7 @@ describe('test helper: pushModule successful replacement migration', () => {
       moduleId: original.id,
     });
 
-    tempModuleDir = await mkdtemp(path.join(os.tmpdir(), 'test-utils-migration-'));
+    tempModuleDir = await mkdtemp(path.join(os.tmpdir(), 'utils-migration-'));
     await cp(MODULE_DIR, tempModuleDir, { recursive: true });
 
     const moduleJsonPath = path.join(tempModuleDir, 'module.json');
@@ -827,5 +827,72 @@ describe('test helper: pushModule successful replacement migration', () => {
     const logs = (meta?.result?.logs ?? []).map((entry) => entry.msg);
     assert.equal(meta?.result?.success, true, `Expected preserved role permissions to keep /kick working after replacement, logs: ${JSON.stringify(logs)}`);
     assert.ok(logs.some((msg) => msg.includes('Kicked')), JSON.stringify(logs));
+  });
+
+  it('does not restore transient debug flags or lock variables during replacement', async () => {
+    const original = await pushModule(client, MODULE_DIR);
+    moduleId = original.id;
+
+    await client.variable.variableControllerCreate({
+      key: '__debug_force_givecurrency_api_failure',
+      value: JSON.stringify(true),
+      gameServerId: ctx.gameServer.id,
+      moduleId: original.id,
+    });
+    await client.variable.variableControllerCreate({
+      key: 'fund_state_lock',
+      value: JSON.stringify({ owner: 'stale-test-lock' }),
+      gameServerId: ctx.gameServer.id,
+      moduleId: original.id,
+    });
+
+    tempModuleDir = await mkdtemp(path.join(os.tmpdir(), 'utils-transient-migration-'));
+    await cp(MODULE_DIR, tempModuleDir, { recursive: true });
+
+    const replaced = await pushModule(client, tempModuleDir);
+    moduleId = replaced.id;
+
+    const transientVariables = await client.variable.variableControllerSearch({
+      filters: {
+        moduleId: [replaced.id],
+        gameServerId: [ctx.gameServer.id],
+        key: ['__debug_force_givecurrency_api_failure', 'fund_state_lock'],
+      },
+      limit: 10,
+    });
+
+    assert.equal(
+      transientVariables.data.data.length,
+      0,
+      `Expected transient debug/lock variables to be dropped during replacement, got: ${JSON.stringify(transientVariables.data.data)}`,
+    );
+  });
+
+  it('keeps role rebinding working when the replacement removes a previously assigned permission', async () => {
+    await cleanupRole(client, adminRoleId);
+    adminRoleId = undefined;
+
+    const original = await pushModule(client, MODULE_DIR);
+    moduleId = original.id;
+    adminRoleId = await assignPermissions(client, ctx.players[0].playerId, ctx.gameServer.id, ['UTILS_KICK', 'UTILS_BAN']);
+
+    tempModuleDir = await mkdtemp(path.join(os.tmpdir(), 'utils-permission-migration-'));
+    await cp(MODULE_DIR, tempModuleDir, { recursive: true });
+
+    const moduleJsonPath = path.join(tempModuleDir, 'module.json');
+    const moduleJson = JSON.parse(await readFile(moduleJsonPath, 'utf8')) as Record<string, any>;
+    moduleJson.permissions = moduleJson.permissions.filter((permission: { permission: string }) => permission.permission !== 'UTILS_KICK');
+    await writeFile(moduleJsonPath, `${JSON.stringify(moduleJson, null, 2)}\n`);
+
+    const replaced = await pushModule(client, tempModuleDir);
+    moduleId = replaced.id;
+
+    const roles = await client.role.roleControllerSearch({ limit: 250 });
+    const reboundRole = roles.data.data.find((role) => role.id === adminRoleId);
+    assert.ok(reboundRole, `Expected assigned role ${adminRoleId} to survive replacement, got: ${JSON.stringify(roles.data.data)}`);
+
+    const reboundPermissionCodes = reboundRole?.permissions.map((entry) => entry.permission.permission) ?? [];
+    assert.ok(reboundPermissionCodes.includes('UTILS_BAN'), JSON.stringify(reboundPermissionCodes));
+    assert.ok(!reboundPermissionCodes.includes('UTILS_KICK'), JSON.stringify(reboundPermissionCodes));
   });
 });

@@ -44,6 +44,10 @@ interface RoleBindingBackup {
   permissions: RolePermissionBackup[];
 }
 
+function shouldPreserveModuleVariable(key: string): boolean {
+  return !key.startsWith('__debug_') && !key.endsWith('_state_lock');
+}
+
 async function collectAllPages<T>(
   fetchPage: (page: number, limit: number) => Promise<{ data: T[]; total?: number }>,
   { limit = 100, maxPages = 100 }: { limit?: number; maxPages?: number } = {},
@@ -98,16 +102,18 @@ async function collectModuleVariables(client: Client, moduleId: string): Promise
     };
   }, { limit: 250 });
 
-  return variables.map((variable) => ({
-    key: variable.key,
-    value: variable.value,
-    gameServerId: typeof variable.gameServerId === 'string' && variable.gameServerId !== ''
-      ? variable.gameServerId as string
-      : undefined,
-    playerId: typeof variable.playerId === 'string' && variable.playerId !== ''
-      ? variable.playerId as string
-      : undefined,
-  }));
+  return variables
+    .filter((variable) => shouldPreserveModuleVariable(variable.key))
+    .map((variable) => ({
+      key: variable.key,
+      value: variable.value,
+      gameServerId: typeof variable.gameServerId === 'string' && variable.gameServerId !== ''
+        ? variable.gameServerId as string
+        : undefined,
+      playerId: typeof variable.playerId === 'string' && variable.playerId !== ''
+        ? variable.playerId as string
+        : undefined,
+    }));
 }
 
 async function collectModuleRoleBindings(client: Client, moduleId: string): Promise<RoleBindingBackup[]> {
@@ -166,16 +172,19 @@ async function rebindRoles(client: Client, roles: RoleBindingBackup[]): Promise<
   );
 
   for (const role of roles) {
-    const reboundPermissions = role.permissions.map((permission) => {
+    const reboundPermissions = role.permissions.flatMap((permission) => {
       const permissionId = permissionsByCode.get(permission.permission);
       if (!permissionId) {
-        throw new Error(`Permission '${permission.permission}' not found while rebinding role '${role.name}'`);
+        console.warn(
+          `rebindRoles: skipping missing permission '${permission.permission}' while rebinding role '${role.name}'`,
+        );
+        return [];
       }
 
-      return {
+      return [{
         permissionId,
         count: permission.count,
-      };
+      }];
     });
 
     await client.role.roleControllerUpdate(role.roleId, {

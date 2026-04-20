@@ -239,8 +239,7 @@ export async function incrementFundCycle(gameServerId, moduleId) {
 export async function recordCompletion(gameServerId, moduleId, cycle, triggerPlayer) {
   const completion = {
     cycle,
-    // ISO date only (YYYY-MM-DD) — avoids locale-dependent formatting and excessive precision
-    completedAt: new Date().toISOString().split('T')[0],
+    completedAt: new Date().toISOString(),
     triggerPlayer,
   };
   await setFundVariable(gameServerId, moduleId, FUND_LAST_COMPLETION_KEY, completion);
