@@ -20,14 +20,16 @@
             "text": {
               "type": "string",
               "pattern": "\\S",
-              "description": "The message text to broadcast. Supports {playerCount} and {serverName}. Unknown placeholders are left unchanged. Whitespace-only messages are rejected at install time."
+              "title": "Broadcast message text",
+              "description": "The message text to broadcast. Supports {playerCount} and {serverName}. Unknown placeholders are left unchanged. Message text cannot be blank or whitespace only. Example: Welcome! There are {playerCount} players online."
             },
             "weight": {
               "type": "integer",
               "minimum": 1,
               "maximum": 100,
               "default": 1,
-              "description": "Relative frequency in random weighted shuffle-bag mode. Must be an integer from 1 to 100. Invalid weights are rejected at install time."
+              "title": "Message weight",
+              "description": "Relative frequency in random weighted shuffle-bag mode. Weight must be a whole number from 1 to 100. Use 1 for normal frequency and larger values to make a message appear more often in random mode."
             }
           },
           "required": [

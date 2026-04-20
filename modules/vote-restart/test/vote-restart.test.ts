@@ -695,3 +695,112 @@ describe('vote-restart dynamic threshold recalculation', () => {
     }
   });
 });
+
+describe('vote-restart large player pagination', () => {
+  let client4: Client;
+  let ctx4: MockServerContext;
+  let moduleId4: string;
+  let versionId4: string;
+  let cronjobId4: string;
+
+  before(async () => {
+    client4 = await createClient();
+    ctx4 = await startMockServer(client4, { totalPlayers: 101 });
+
+    const mod = await pushModule(client4, MODULE_DIR);
+    moduleId4 = mod.id;
+    versionId4 = mod.latestVersion.id;
+
+    await installModule(client4, versionId4, ctx4.gameServer.id, {
+      userConfig: {
+        voteDuration: 120,
+        cooldownDuration: 60,
+        restartDelay: 0,
+        restartCommand: 'say restart-test',
+        passThreshold: 100,
+        minimumPlayers: 1,
+      },
+      systemConfig: {
+        cronJobs: {
+          'check-vote': {
+            temporalValue: '0 0 1 1 *',
+          },
+        },
+      },
+    });
+
+    const cronjob = mod.latestVersion.cronJobs[0];
+    if (!cronjob) throw new Error('Expected at least one cronjob in vote-restart module');
+    cronjobId4 = cronjob.id;
+  });
+
+  after(async () => {
+    try {
+      await uninstallModule(client4, moduleId4, ctx4.gameServer.id);
+    } catch (err) {
+      console.error('Cleanup: failed to uninstall large-pagination module:', err);
+    }
+    try {
+      await deleteModule(client4, moduleId4);
+    } catch (err) {
+      console.error('Cleanup: failed to delete large-pagination module:', err);
+    }
+    await stopMockServer(ctx4.server, client4, ctx4.gameServer.id);
+  });
+
+  const triggerCronjob4 = makeCronjobHelper(
+    () => client4,
+    () => ctx4.gameServer.id,
+    () => cronjobId4,
+    () => moduleId4,
+  );
+
+  it('counts players beyond the first page before deciding whether a vote has passed', async () => {
+    const voteState = {
+      startedAt: new Date().toISOString(),
+      initiatorName: 'PaginationTester',
+      voters: ctx4.players.slice(0, 100).map((player) => player.playerId),
+      status: 'active',
+    };
+
+    await client4.variable.variableControllerCreate({
+      key: 'vr_vote_state',
+      value: JSON.stringify(voteState),
+      gameServerId: ctx4.gameServer.id,
+      moduleId: moduleId4,
+    });
+
+    try {
+      const { success, logs } = await triggerCronjob4();
+      assert.equal(success, true, `Expected cronjob to succeed, logs: ${JSON.stringify(logs)}`);
+      assert.ok(
+        !logs.some((log) => log.includes('Vote passed')),
+        `Expected vote to stay active because all 101 online players should be counted, got logs: ${JSON.stringify(logs)}`,
+      );
+
+      const stateVar = await client4.variable.variableControllerSearch({
+        filters: {
+          key: ['vr_vote_state'],
+          gameServerId: [ctx4.gameServer.id],
+          moduleId: [moduleId4],
+        },
+      });
+      assert.equal(stateVar.data.data.length, 1, 'Expected vote state to remain active when only 100/101 players voted');
+      const parsedState = JSON.parse(stateVar.data.data[0].value) as { status?: string; voters?: string[] };
+      assert.equal(parsedState.status, 'active');
+      assert.equal(parsedState.voters?.length, 100);
+    } finally {
+      const varSearch = await client4.variable.variableControllerSearch({
+        filters: {
+          key: ['vr_vote_state'],
+          gameServerId: [ctx4.gameServer.id],
+          moduleId: [moduleId4],
+        },
+      });
+      for (const v of varSearch.data.data) {
+        await client4.variable.variableControllerDelete(v.id);
+      }
+    }
+  });
+});
+

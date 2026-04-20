@@ -27,6 +27,7 @@ async function main() {
     stop: async () => {},
   };
   let stopError = null;
+  let bodyError = null;
 
   try {
     heartbeat = startExecutionLockHeartbeat(lock);
@@ -156,6 +157,9 @@ async function main() {
     console.log(
       `server-messages: broadcasted order=${order} index=${messageIndex} playerCount=${onlinePlayerCount} message=${renderedMessage}`,
     );
+  } catch (err) {
+    bodyError = err;
+    throw err;
   } finally {
     try {
       await heartbeat.stop();
@@ -166,8 +170,8 @@ async function main() {
 
     await releaseExecutionLock(lock);
 
-    if (stopError) {
-      console.warn('server-messages: heartbeat stop failure was suppressed because the execution outcome was already determined');
+    if (stopError && !bodyError) {
+      throw stopError;
     }
   }
 }

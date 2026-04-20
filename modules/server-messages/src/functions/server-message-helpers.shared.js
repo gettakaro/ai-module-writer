@@ -4,7 +4,7 @@ export const SERVER_MESSAGES_DELIVERY_RECEIPT_KEY = 'server_messages_delivery_re
 export const MAX_MESSAGE_WEIGHT = 100;
 export const MAX_MESSAGE_COUNT = 100;
 const SUPPORTED_PLACEHOLDERS = ['playerCount', 'serverName'];
-const SERVER_NAME_FALLBACK = 'Server';
+const SERVER_NAME_FALLBACK = '{serverName}';
 
 export function normalizeMessages(rawMessages) {
   if (!Array.isArray(rawMessages)) return [];

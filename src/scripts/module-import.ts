@@ -68,7 +68,10 @@ interface VariableSnapshot {
   playerId?: string;
 }
 
-const TEST_CONTROL_VARIABLE_KEY_PATTERN = /(^|_)test_force(?:_|$)/i;
+const TRANSIENT_MODULE_VARIABLE_KEYS = new Set([
+  'server_messages_test_force_state_write_failure',
+  'server_messages_test_force_receipt_write_failure',
+]);
 const LOCK_LIKE_VARIABLE_KEY_PATTERN = /(^|_)lock(?:_|$)/i;
 
 interface RolePermissionSnapshot {
@@ -184,7 +187,7 @@ function looksLikeLockPayload(value: string): boolean {
 }
 
 function isTransientModuleVariable(variable: VariableSnapshot): boolean {
-  if (TEST_CONTROL_VARIABLE_KEY_PATTERN.test(variable.key)) {
+  if (TRANSIENT_MODULE_VARIABLE_KEYS.has(variable.key)) {
     return true;
   }
 
@@ -920,10 +923,44 @@ async function upsertVariableOnModuleWithToken(
 async function getAllPermissionsWithToken(
   auth: Required<Pick<TakaroAuthConfig, 'url' | 'domainId' | 'token'>>,
 ): Promise<TokenPermissionResult[]> {
-  const result = await takaroTokenRequest<SearchResponse<TokenPermissionResult>>(auth, '/permissions', {
-    method: 'GET',
-  });
-  return result.data;
+  const permissions: TokenPermissionResult[] = [];
+  const seenPermissionIds = new Set<string>();
+
+  for (let page = 0; ; page++) {
+    const result = await takaroTokenRequest<SearchResponse<TokenPermissionResult>>(
+      auth,
+      `/permissions?page=${page}&limit=${PAGE_SIZE}`,
+      { method: 'GET' },
+    );
+
+    const batch = Array.isArray(result.data) ? result.data : [];
+    let addedFromBatch = 0;
+    for (const permission of batch) {
+      if (seenPermissionIds.has(permission.id)) {
+        continue;
+      }
+
+      seenPermissionIds.add(permission.id);
+      permissions.push(permission);
+      addedFromBatch++;
+    }
+
+    const total = result.meta?.total;
+    if (typeof total === 'number' && permissions.length >= total) {
+      break;
+    }
+
+    if (batch.length < PAGE_SIZE) {
+      break;
+    }
+
+    if (addedFromBatch === 0) {
+      console.warn('module-import: stopping permission pagination early because the next /permissions page repeated only previously-seen ids');
+      break;
+    }
+  }
+
+  return permissions;
 }
 
 async function getRolesUsingModulePermissionsWithToken(

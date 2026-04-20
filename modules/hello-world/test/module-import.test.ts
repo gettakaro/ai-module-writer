@@ -1169,6 +1169,105 @@ describe('module-import CLI', () => {
     );
   });
 
+  it('paginates token-only permission discovery before rebinding replacement role assignments', async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ path: string; method: string; body?: any; page?: string | null }> = [];
+    const roleUpdates: Array<{ path: string; body?: any }> = [];
+    let moduleSearchCalls = 0;
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+      const parsedUrl = new URL(url);
+      const requestPath = parsedUrl.pathname;
+      const method = init?.method ?? 'POST';
+      const body = typeof init?.body === 'string' && init.body.length > 0 ? JSON.parse(init.body) : undefined;
+      requests.push({ path: requestPath, method, body, page: parsedUrl.searchParams.get('page') });
+      if (requestPath.startsWith('/role/') && method === 'PUT') {
+        roleUpdates.push({ path: requestPath, body });
+      }
+
+      const json = (payload: unknown) => new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      if (requestPath === '/module/search') {
+        moduleSearchCalls += 1;
+        if (moduleSearchCalls === 1) {
+          return json({ data: [{ id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } }] });
+        }
+        return json({ data: [{ id: 'new-module', name: MODULE_NAME, latestVersion: { id: 'new-version' } }] });
+      }
+
+      if (requestPath === '/module/old-module/export') return json({ data: { name: MODULE_NAME, versions: [] } });
+      if (requestPath === '/module/old-module' && method === 'DELETE') return json({ data: {} });
+      if (requestPath === '/module/import') return json({ data: {} });
+      if (requestPath === '/module/installation/search') return json({ data: [], meta: { total: 0 } });
+      if (requestPath === '/variables/search') return json({ data: [], meta: { total: 0 } });
+      if (requestPath === '/role/search') {
+        return json({
+          data: [{ id: 'role-1', permissions: [{ permissionId: 'old-perm-2', count: 7 }] }],
+          meta: { total: 1 },
+        });
+      }
+      if (requestPath === '/role/role-1' && method === 'GET') return json({ data: { id: 'role-1', permissions: [] } });
+      if (requestPath === '/role/role-1' && method === 'PUT') return json({ data: {} });
+      if (requestPath === '/module/installation/' && method === 'POST') return json({ data: {} });
+
+      if (requestPath === '/permissions' && method === 'GET') {
+        const page = Number(parsedUrl.searchParams.get('page') ?? '0');
+        if (page === 0) {
+          return json({
+            data: Array.from({ length: 100 }, (_, index) => ({
+              id: `noise-${index + 1}`,
+              permission: `NOISE_${index + 1}`,
+              module: { id: 'noise-module', name: 'noise' },
+            })),
+            meta: { total: 102 },
+          });
+        }
+
+        if (page === 1) {
+          return json({
+            data: [
+              { id: 'old-perm-2', permission: 'HELLO_USE', module: { id: 'old-module', name: MODULE_NAME } },
+              { id: 'new-perm-2', permission: 'HELLO_USE', module: { id: 'new-module', name: MODULE_NAME } },
+            ],
+            meta: { total: 102 },
+          });
+        }
+      }
+
+      throw new Error(`Unexpected fetch request: ${method} ${requestPath}`);
+    }) as typeof fetch;
+
+    try {
+      await importModuleExportWithToken(
+        { url: 'https://takaro.invalid', domainId: 'domain-1', token: 'token-only' },
+        { name: MODULE_NAME, versions: [] } as any,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    assert.ok(
+      requests.some((request) => request.path === '/permissions' && request.page === '1'),
+      'Expected token-only import to request the second permissions page',
+    );
+    assert.deepEqual(roleUpdates, [
+      {
+        path: '/role/role-1',
+        body: {
+          permissions: [{ permissionId: 'new-perm-2', count: 7 }],
+        },
+      },
+    ]);
+  });
+
   it('surfaces HTTP status and raw response text for non-JSON token-only failures', async () => {
     const originalFetch = globalThis.fetch;
 

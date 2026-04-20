@@ -1,4 +1,5 @@
 import { execFileSync, SpawnSyncReturns } from 'child_process';
+import { randomUUID } from 'crypto';
 import { inspect } from 'util';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -33,7 +34,7 @@ export async function pushModule(
   const absoluteModuleDir = path.resolve(moduleDir);
 
   // Convert the module dir to JSON using the compiled script
-  const tempFile = path.join(os.tmpdir(), `takaro-push-${Date.now()}.json`);
+  const tempFile = path.join(os.tmpdir(), `takaro-push-${process.pid}-${Date.now()}-${randomUUID()}.json`);
   try {
     try {
       execFileSync(process.execPath, [MODULE_TO_JSON_SCRIPT, absoluteModuleDir, tempFile], {
