@@ -24,6 +24,18 @@ export interface InstallModuleConfig {
  * If a module with the same name already exists, deletes it first (idempotent).
  * Returns the imported module (found by name from module.json).
  */
+async function waitForModuleNameToClear(client: Client, name: string, timeoutMs = 15000): Promise<void> {
+  const startedAt = Date.now();
+  while ((Date.now() - startedAt) < timeoutMs) {
+    const existing = await client.module.moduleControllerSearch({
+      filters: { name: [name] },
+    });
+    const existingModule = existing.data.data.find((m) => m.name === name);
+    if (!existingModule) return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
 export async function pushModule(
   client: Client,
   moduleDir: string,
@@ -60,18 +72,35 @@ export async function pushModule(
     const existingModule = existing.data.data.find((m) => m.name === name);
     if (existingModule) {
       await client.module.moduleControllerRemove(existingModule.id);
+      await waitForModuleNameToClear(client, name);
     }
 
     // Import via API (returns void — second search below retrieves the module data)
-    try {
-      await client.module.moduleControllerImport(moduleJson);
-    } catch (err) {
-      if (existingModule) {
-        throw new Error(
-          `Import of '${name}' failed. Previous module version was deleted before this import failure. Cause: ${err}`,
-        );
+    let lastImportErr: unknown;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await client.module.moduleControllerImport(moduleJson);
+        lastImportErr = undefined;
+        break;
+      } catch (err) {
+        lastImportErr = err;
+        const message = err instanceof Error ? err.message : String(err);
+        if (!/409|conflict|already exists/i.test(message) || attempt === 3) {
+          if (existingModule) {
+            throw new Error(
+              `Import of '${name}' failed. Previous module version was deleted before this import failure. Cause: ${err}`,
+            );
+          }
+          throw err;
+        }
+
+        await waitForModuleNameToClear(client, name);
+        await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
       }
-      throw err;
+    }
+
+    if (lastImportErr) {
+      throw lastImportErr instanceof Error ? lastImportErr : new Error(String(lastImportErr));
     }
 
     // Find the module by name after import (import API returns void, no module data in response)

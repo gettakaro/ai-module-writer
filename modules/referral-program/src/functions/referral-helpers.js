@@ -14,6 +14,7 @@ export const REFERRAL_PENDING_INDEX_KEY = 'referral_pending_index';
 export const REFERRAL_STATS_INDEX_KEY = 'referral_stats_index';
 export const REFERRAL_PAYOUT_LOCK_PREFIX = 'referral_payout_lock:';
 export const REFERRAL_MUTATION_LOCK_PREFIX = 'referral_lock:';
+export const REFERRAL_ADMIN_REPAIR_PREFIX = 'referral_admin_repair:';
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -39,6 +40,10 @@ export function getReferralPayoutLockKey(playerId) {
 
 export function getReferralMutationLockKey(scope) {
   return `${REFERRAL_MUTATION_LOCK_PREFIX}${scope}`;
+}
+
+export function getReferralAdminRepairKey(refereeId, referrerId) {
+  return `${REFERRAL_ADMIN_REPAIR_PREFIX}${refereeId}:${referrerId}`;
 }
 
 export function defaultReferralStats() {
@@ -328,6 +333,16 @@ export async function getReferralStats(gameServerId, moduleId, playerId) {
   if (!variable) return defaultReferralStats();
   const parsed = safeJsonParse(variable.value, defaultReferralStats(), `referral stats for ${playerId}`);
   return { ...defaultReferralStats(), ...parsed };
+}
+
+export async function getAdminRepairMarker(gameServerId, moduleId, refereeId, referrerId) {
+  const variable = await findVariable(gameServerId, moduleId, getReferralAdminRepairKey(refereeId, referrerId), refereeId);
+  if (!variable) return null;
+  return safeJsonParse(variable.value, null, `admin repair marker for ${refereeId}:${referrerId}`);
+}
+
+export async function setAdminRepairMarker(gameServerId, moduleId, refereeId, referrerId, marker) {
+  await writeVariable(gameServerId, moduleId, getReferralAdminRepairKey(refereeId, referrerId), marker, refereeId);
 }
 
 export async function setReferralStats(gameServerId, moduleId, playerId, stats) {
@@ -658,6 +673,8 @@ export async function planReferrerReward(gameServerId, referrerId, config, multi
   if (!chosen.item || !chosen.amount || !chosen.quality) {
     throw new TakaroUserError('A referral reward item is missing item, amount, or quality.');
   }
+
+  await validateConfiguredItemExists(gameServerId, chosen.item);
 
   return {
     rewardType: 'item',
@@ -993,7 +1010,18 @@ export async function applyPaidReferral({
               rewardDeliveryAttemptedAt: new Date().toISOString(),
             };
             await setReferralLink(gameServerId, moduleId, refereeId, checkpointLink);
-            await executePreparedReward(gameServerId, effectiveReferrerId, reward);
+            try {
+              await executePreparedReward(gameServerId, effectiveReferrerId, reward);
+            } catch (deliveryErr) {
+              console.error(`referral-program: reward delivery for referee=${refereeId} became ambiguous during resume and now requires manual verification: ${deliveryErr}`);
+              return {
+                paid: false,
+                reason: 'payout-verification-required',
+                reward,
+                error: getErrorMessage(deliveryErr),
+                link: checkpointLink,
+              };
+            }
             checkpointLink = {
               ...checkpointLink,
               rewardGranted: true,
@@ -1024,38 +1052,39 @@ export async function applyPaidReferral({
             ...serializePreparedRewardFields(reward, multiplierInfo, reason, currentLink.retries ?? 0),
           };
           await setReferralLink(gameServerId, moduleId, refereeId, checkpointLink);
+          checkpointLink = {
+            ...checkpointLink,
+            rewardDeliveryAttemptedAt: new Date().toISOString(),
+          };
+          await setReferralLink(gameServerId, moduleId, refereeId, checkpointLink);
           try {
-            checkpointLink = {
-              ...checkpointLink,
-              rewardDeliveryAttemptedAt: new Date().toISOString(),
-            };
-            await setReferralLink(gameServerId, moduleId, refereeId, checkpointLink);
             await executePreparedReward(gameServerId, effectiveReferrerId, reward);
-            checkpointLink = {
-              ...checkpointLink,
-              rewardGranted: true,
-              rewardGrantedAt: new Date().toISOString(),
+          } catch (deliveryErr) {
+            console.error(`referral-program: reward delivery for referee=${refereeId} became ambiguous and now requires manual verification: ${deliveryErr}`);
+            return {
+              paid: false,
+              reason: 'payout-verification-required',
+              reward,
+              error: getErrorMessage(deliveryErr),
+              link: checkpointLink,
             };
-            try {
-              await setReferralLink(gameServerId, moduleId, refereeId, checkpointLink);
-            } catch (checkpointErr) {
-              console.error(`referral-program: payout for referee=${refereeId} needs manual verification after reward delivery: ${checkpointErr}`);
-              return {
-                paid: false,
-                reason: 'payout-verification-required',
-                reward,
-                error: getErrorMessage(checkpointErr),
-                link: checkpointLink,
-              };
-            }
-          } catch (err) {
-            await setReferralLink(
-              gameServerId,
-              moduleId,
-              refereeId,
-              clearPreparedReward({ ...checkpointLink, status: 'pending', retries: currentLink.retries ?? 0 }),
-            );
-            throw err;
+          }
+          checkpointLink = {
+            ...checkpointLink,
+            rewardGranted: true,
+            rewardGrantedAt: new Date().toISOString(),
+          };
+          try {
+            await setReferralLink(gameServerId, moduleId, refereeId, checkpointLink);
+          } catch (checkpointErr) {
+            console.error(`referral-program: payout for referee=${refereeId} needs manual verification after reward delivery: ${checkpointErr}`);
+            return {
+              paid: false,
+              reason: 'payout-verification-required',
+              reward,
+              error: getErrorMessage(checkpointErr),
+              link: checkpointLink,
+            };
           }
         }
 
@@ -1066,6 +1095,15 @@ export async function applyPaidReferral({
           itemsEarned: referrerStats.itemsEarned + (reward.rewardType === 'item' ? (reward.amount ?? 0) : 0),
         };
         await setReferralStats(gameServerId, moduleId, effectiveReferrerId, updatedStats);
+
+        if (currentLink.adminLinked) {
+          await setAdminRepairMarker(gameServerId, moduleId, refereeId, effectiveReferrerId, {
+            referrerId: effectiveReferrerId,
+            paidAt: new Date().toISOString(),
+            rewardType: reward.rewardType,
+            rewardAmount: reward.amount ?? 0,
+          });
+        }
 
         const updatedLink = {
           ...checkpointLink,

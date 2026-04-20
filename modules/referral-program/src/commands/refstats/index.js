@@ -58,11 +58,17 @@ async function main() {
     if (link.status === 'rejected') {
       lines.push(`Payout issue: ${describeReferralProblemForPlayer(link.rejectionReason)}`);
     }
-  } else if (latestRejectedOutgoingReferral) {
+  }
+
+  if (latestRejectedOutgoingReferral) {
     const affectedPlayerName = latestRejectedOutgoingReferral.refereePlayerId
       ? await getPlayerName(latestRejectedOutgoingReferral.refereePlayerId)
       : 'Unknown player';
-    lines.push('Your referral status: needs admin help');
+    if (!link) {
+      lines.push('Your referral status: needs admin help');
+    } else {
+      lines.push('Outgoing referral needing admin help: yes');
+    }
     lines.push(`Latest referred player needing admin help: ${affectedPlayerName}`);
     lines.push(`Their referral status: ${describeReferralStatusForPlayer(latestRejectedOutgoingReferral)}`);
     lines.push(`Payout issue: ${describeReferralProblemForPlayer(latestRejectedOutgoingReferral.rejectionReason)}`);

@@ -151,48 +151,39 @@ describe('afk-kick: check-afk cronjob', () => {
     return JSON.parse(result.data.data[0]!.value) as Record<string, { idleCount?: number; warned?: boolean }>;
   }
 
-  it('first check stores positions without warnings', async () => {
-    const { success, logs } = await triggerCronjob();
+  it('stores, warns, and kicks only after the configured number of manual checks', async () => {
+    const staleVars = await client.variable.variableControllerSearch({
+      filters: {
+        key: ['afk_tracking'],
+        gameServerId: [ctx.gameServer.id],
+        moduleId: [moduleId],
+      },
+    });
+    for (const v of staleVars.data.data) {
+      await client.variable.variableControllerDelete(v.id);
+    }
 
-    assert.equal(success, true, `Expected cronjob to succeed, logs: ${JSON.stringify(logs)}`);
+    const first = await triggerCronjob();
+    assert.equal(first.success, true, `Expected first cronjob to succeed, logs: ${JSON.stringify(first.logs)}`);
+    assert.ok(!first.logs.some((msg) => msg.toLowerCase().includes('warned')));
+    assert.ok(!first.logs.some((msg) => msg.toLowerCase().includes('kicked')));
+
+    const second = await triggerCronjob();
+    assert.equal(second.success, true, `Expected second cronjob to succeed, logs: ${JSON.stringify(second.logs)}`);
     assert.ok(
-      !logs.some((msg) => msg.toLowerCase().includes('warned')),
-      `Expected no warnings on first check, got: ${JSON.stringify(logs)}`,
+      !second.logs.some((msg) => msg.toLowerCase().includes('warned')),
+      `Expected no warnings on second manual check (idleCount=1 < checksBeforeWarning=2), got: ${JSON.stringify(second.logs)}`,
     );
+    assert.ok(!second.logs.some((msg) => msg.toLowerCase().includes('kicked')));
+
+    const third = await triggerCronjob();
+    assert.equal(third.success, true, `Expected third cronjob to succeed, logs: ${JSON.stringify(third.logs)}`);
     assert.ok(
-      !logs.some((msg) => msg.toLowerCase().includes('kicked')),
-      `Expected no kicks on first check, got: ${JSON.stringify(logs)}`,
+      third.logs.some((msg) => msg.toLowerCase().includes('warned')),
+      `Expected a warning log on third manual check (idleCount=2 >= checksBeforeWarning=2), got: ${JSON.stringify(third.logs)}`,
     );
-  });
+    assert.ok(!third.logs.some((msg) => msg.toLowerCase().includes('kicked')));
 
-  it('second check increments idle count, no warning yet', async () => {
-    // checksBeforeWarning=2, so idleCount=1 after this trigger — below threshold
-    const { success, logs } = await triggerCronjob();
-
-    assert.equal(success, true, `Expected cronjob to succeed, logs: ${JSON.stringify(logs)}`);
-    assert.ok(
-      !logs.some((msg) => msg.toLowerCase().includes('warned')),
-      `Expected no warnings on second check (idleCount=1 < checksBeforeWarning=2), got: ${JSON.stringify(logs)}`,
-    );
-    assert.ok(
-      !logs.some((msg) => msg.toLowerCase().includes('kicked')),
-      `Expected no kicks on second check, got: ${JSON.stringify(logs)}`,
-    );
-  });
-
-  it('warns after checksBeforeWarning checks', async () => {
-    // checksBeforeWarning=2, idleCount will hit 2 on this trigger
-    const { success, logs } = await triggerCronjob();
-
-    assert.equal(success, true, `Expected cronjob to succeed, logs: ${JSON.stringify(logs)}`);
-    assert.ok(
-      logs.some((msg) => msg.toLowerCase().includes('warned')),
-      `Expected a warning log on third check (idleCount=2 >= checksBeforeWarning=2), got: ${JSON.stringify(logs)}`,
-    );
-  });
-
-  it('kicks after checksBeforeKick checks', async () => {
-    // checksBeforeKick=3, idleCount will hit 3 on this trigger
     const { success, logs } = await triggerCronjob();
 
     assert.equal(success, true, `Expected cronjob to succeed, logs: ${JSON.stringify(logs)}`);

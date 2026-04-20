@@ -17,6 +17,7 @@ import {
   getCommandPrefix,
   describePayoutDelayReason,
   withReferralLocks,
+  getAdminRepairMarker,
 } from './referral-helpers.js';
 
 async function main() {
@@ -52,6 +53,11 @@ async function main() {
       const existingLink = await getReferralLink(gameServerId, moduleId, referee.id);
       if (existingLink) {
         throw new TakaroUserError(`Player "${referee.name}" already has a referral link. Use refunlink first if you need to replace it.`);
+      }
+
+      const adminRepairMarker = await getAdminRepairMarker(gameServerId, moduleId, referee.id, referrer.id);
+      if (adminRepairMarker) {
+        throw new TakaroUserError(`That referee/referrer pair has already been paid through /reflink before. Use manual compensation instead of replaying admin repair rewards.`);
       }
 
       const referrerStatsRaw = await getReferralStats(gameServerId, moduleId, referrer.id);
