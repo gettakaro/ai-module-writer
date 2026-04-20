@@ -51,7 +51,7 @@ retry_after_auth() {
   fi
 
   echo "ERROR: Takaro authentication expired and automatic refresh failed." >&2
-  echo "Check your .env / exported Takaro credentials, or set TAKARO_TOKEN before retrying module-push.sh." >&2
+  echo "Replacement imports need working TAKARO_USERNAME and TAKARO_PASSWORD (from your shell or .env) so the module can be restored safely if auth expires mid-flight." >&2
   return 1
 }
 
@@ -71,10 +71,18 @@ if IMPORT_RESULT=$(node "$SCRIPT_DIR/../dist/scripts/module-import.js" "$TEMP_FI
 fi
 
 if grep -q "401" "$IMPORT_STDERR" || grep -qi "unauthorized" "$IMPORT_STDERR"; then
-  retry_after_auth
-  IMPORT_RESULT=$(node "$SCRIPT_DIR/../dist/scripts/module-import.js" "$TEMP_FILE" 2>"$IMPORT_STDERR")
-  echo "$IMPORT_RESULT"
-  exit 0
+  if ! retry_after_auth; then
+    cat "$IMPORT_STDERR" >&2
+    exit 1
+  fi
+
+  if IMPORT_RESULT=$(node "$SCRIPT_DIR/../dist/scripts/module-import.js" "$TEMP_FILE" 2>"$IMPORT_STDERR"); then
+    echo "$IMPORT_RESULT"
+    exit 0
+  fi
+
+  cat "$IMPORT_STDERR" >&2
+  exit 1
 fi
 
 cat "$IMPORT_STDERR" >&2

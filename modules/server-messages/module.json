@@ -7,7 +7,8 @@
   ],
   "xPiReplacementState": {
     "durableVariableKeys": [
-      "server_messages_state"
+      "server_messages_state",
+      "server_messages_delivery_receipt"
     ]
   },
   "config": {
@@ -34,7 +35,7 @@
               "maximum": 100,
               "default": 1,
               "title": "Message weight",
-              "description": "Relative frequency in random weighted shuffle-bag mode. Weight must be a whole number from 1 to 100. Use 1 for normal frequency and larger values to make a message appear more often in random mode."
+              "description": "Relative frequency in random weighted shuffle-bag mode. Invalid values are rejected at install time: weight must be a whole number from 1 to 100. Use 1 for normal frequency and larger values to make a message appear more often in random mode."
             }
           },
           "required": [

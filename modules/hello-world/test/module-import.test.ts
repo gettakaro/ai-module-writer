@@ -227,21 +227,20 @@ describe('module-import CLI', () => {
     }
   });
 
-  it('fails fast when local auth configuration is missing before any API call is attempted', async () => {
-    assert.throws(
-      () => getTakaroAuthConfig({} as NodeJS.ProcessEnv),
-      /TAKARO_HOST is required/,
-    );
-    assert.throws(
-      () => getTakaroAuthConfig({
-        TAKARO_HOST: 'https://takaro.invalid',
-        TAKARO_DOMAIN_ID: 'domain-1',
-        TAKARO_TOKEN: '',
-        TAKARO_USERNAME: '',
-        TAKARO_PASSWORD: '',
-      } as NodeJS.ProcessEnv),
-      /TAKARO_TOKEN or TAKARO_USERNAME\/TAKARO_PASSWORD is required/,
-    );
+  it('falls back to repo credentials when shell variables are blank', async () => {
+    const auth = getTakaroAuthConfig();
+    const fallback = getTakaroAuthConfig({
+      TAKARO_HOST: '',
+      TAKARO_DOMAIN_ID: '',
+      TAKARO_TOKEN: client.token ?? '',
+      TAKARO_USERNAME: '',
+      TAKARO_PASSWORD: '',
+    } as NodeJS.ProcessEnv);
+
+    assert.equal(fallback.url, auth.url);
+    assert.equal(fallback.domainId, auth.domainId);
+    assert.equal(fallback.username, auth.username);
+    assert.equal(fallback.password, auth.password);
   });
 
   it('push script imports a module end-to-end through the documented shell workflow', async () => {
@@ -562,7 +561,20 @@ describe('module-import CLI', () => {
       },
     } as unknown as Client;
 
-    await importModuleExport(fakeClient, { name: MODULE_NAME, versions: [] } as any);
+    await importModuleExport(fakeClient, {
+      name: MODULE_NAME,
+      versions: [
+        {
+          permissions: [
+            {
+              permission: 'HELLO_USE',
+              friendlyName: 'Use Hello World',
+              description: 'Allows a player or role to use the hello world module.',
+            },
+          ],
+        },
+      ],
+    } as any);
 
     assert.deepEqual(
       createdVariables,
@@ -572,40 +584,30 @@ describe('module-import CLI', () => {
           key: 'server_messages_state',
           value: '{"sequentialIndex":1}',
           gameServerId: 'gs-1',
-          playerId: undefined,
-          expiresAt: undefined,
         },
         {
           moduleId: 'new-module',
           key: 'server_messages_lock',
           value: '{"token":"transient"}',
           gameServerId: 'gs-1',
-          playerId: undefined,
-          expiresAt: undefined,
         },
         {
           moduleId: 'new-module',
           key: 'server_messages_delivery_receipt',
           value: '{"messageIndex":0}',
           gameServerId: 'gs-1',
-          playerId: undefined,
-          expiresAt: undefined,
         },
         {
           moduleId: 'new-module',
           key: 'server_messages_test_force_state_write_failure',
           value: '{"stale":true}',
           gameServerId: 'gs-1',
-          playerId: undefined,
-          expiresAt: undefined,
         },
         {
           moduleId: 'new-module',
           key: 'guild_lock',
           value: '{"count":4}',
           gameServerId: 'gs-1',
-          playerId: undefined,
-          expiresAt: undefined,
         },
       ],
       'Expected every non-expired module-scoped variable to migrate to the replacement module id',
@@ -763,7 +765,20 @@ describe('module-import CLI', () => {
       },
     } as unknown as Client;
 
-    await importModuleExport(fakeClient, { name: MODULE_NAME, versions: [] } as any);
+    await importModuleExport(fakeClient, {
+      name: MODULE_NAME,
+      versions: [
+        {
+          permissions: [
+            {
+              permission: 'HELLO_USE',
+              friendlyName: 'Use Hello World',
+              description: 'Allows a player or role to use the hello world module.',
+            },
+          ],
+        },
+      ],
+    } as any);
 
     assert.deepEqual(updatedRoles, [
       {
@@ -827,7 +842,20 @@ describe('module-import CLI', () => {
       },
     } as unknown as Client;
 
-    await importModuleExport(fakeClient, { name: MODULE_NAME, versions: [] } as any);
+    await importModuleExport(fakeClient, {
+      name: MODULE_NAME,
+      versions: [
+        {
+          permissions: [
+            {
+              permission: 'HELLO_USE',
+              friendlyName: 'Use Hello World',
+              description: 'Allows a player or role to use the hello world module.',
+            },
+          ],
+        },
+      ],
+    } as any);
 
     assert.deepEqual(updatedRoles, [
       {

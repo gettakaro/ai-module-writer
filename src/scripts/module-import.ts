@@ -22,8 +22,8 @@ const REPLACEMENT_PERMISSION_POLL_TIMEOUT_MS = 15000;
 const REPLACEMENT_MODULE_POLL_DELAY_MS = 500;
 const REPLACEMENT_MODULE_POLL_TIMEOUT_MS = 15000;
 
-export function loadRepoEnv(): void {
-  config({ path: path.join(REPO_ROOT, '.env') });
+export function loadRepoEnv(): Record<string, string> {
+  return config({ path: path.join(REPO_ROOT, '.env') }).parsed ?? {};
 }
 
 function readCachedToken(tokenPath = DEFAULT_TOKEN_CACHE_PATH): string | undefined {
@@ -188,14 +188,37 @@ function shouldRestoreModuleVariable(variable: VariableSnapshot, config?: Replac
   return durableVariableKeys.includes(variable.key);
 }
 
-export function getTakaroAuthConfig(env: NodeJS.ProcessEnv = process.env): TakaroAuthConfig {
-  loadRepoEnv();
+function normalizeEnvValue(value: string | undefined): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
 
-  const url = env['TAKARO_HOST'];
-  const domainId = env['TAKARO_DOMAIN_ID'];
-  const username = env['TAKARO_USERNAME'];
-  const password = env['TAKARO_PASSWORD'];
-  const token = env['TAKARO_TOKEN'] ?? readCachedToken();
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function resolveAuthValue(env: NodeJS.ProcessEnv, repoEnv: Record<string, string>, key: string): string | undefined {
+  return normalizeEnvValue(env[key]) ?? normalizeEnvValue(repoEnv[key]);
+}
+
+function normalizeVariableSnapshot(variable: VariableSnapshot): VariableSnapshot {
+  return {
+    key: variable.key,
+    value: variable.value,
+    ...(variable.expiresAt ? { expiresAt: variable.expiresAt } : {}),
+    ...(variable.gameServerId ? { gameServerId: variable.gameServerId } : {}),
+    ...(variable.playerId ? { playerId: variable.playerId } : {}),
+  };
+}
+
+export function getTakaroAuthConfig(env: NodeJS.ProcessEnv = process.env): TakaroAuthConfig {
+  const repoEnv = loadRepoEnv();
+
+  const url = resolveAuthValue(env, repoEnv, 'TAKARO_HOST');
+  const domainId = resolveAuthValue(env, repoEnv, 'TAKARO_DOMAIN_ID');
+  const username = resolveAuthValue(env, repoEnv, 'TAKARO_USERNAME');
+  const password = resolveAuthValue(env, repoEnv, 'TAKARO_PASSWORD');
+  const token = resolveAuthValue(env, repoEnv, 'TAKARO_TOKEN') ?? readCachedToken();
 
   if (!url) throw new Error('TAKARO_HOST is required');
   if (!domainId) throw new Error('TAKARO_DOMAIN_ID is required');
@@ -353,7 +376,7 @@ async function getVariablesForModule(
     }));
 
     snapshots.push(
-      ...result.data.data.map((variable) => ({
+      ...result.data.data.map((variable) => normalizeVariableSnapshot({
         key: variable.key,
         value: variable.value,
         expiresAt: variable.expiresAt,
@@ -410,11 +433,7 @@ async function upsertVariableOnModule(
   }
 
   await request(() => client.variable.variableControllerCreate({
-    key: variable.key,
-    value: variable.value,
-    expiresAt: variable.expiresAt,
-    gameServerId: variable.gameServerId,
-    playerId: variable.playerId,
+    ...normalizeVariableSnapshot(variable),
     moduleId,
   }));
 }
@@ -687,6 +706,34 @@ async function rebindRolesToReplacementPermissions(
   }
 }
 
+function getReplacementExportPermissionCodes(moduleExport: TakaroModuleExport): Set<string> {
+  return new Set(
+    (moduleExport.versions ?? [])
+      .flatMap((version) => version.permissions ?? [])
+      .map((permission) => permission.permission)
+      .filter((permission): permission is string => typeof permission === 'string' && permission.length > 0),
+  );
+}
+
+function assertReplacementExportCanPreserveRoleBindings(
+  moduleExport: TakaroModuleExport,
+  snapshot: ReplacementSnapshot,
+): void {
+  if (snapshot.rolesUsingModulePermissions.length === 0 || snapshot.permissionIdToCode.size === 0) {
+    return;
+  }
+
+  const replacementPermissionCodes = getReplacementExportPermissionCodes(moduleExport);
+  const requiredCodes = [...new Set(snapshot.permissionIdToCode.values())];
+  const missingCodes = requiredCodes.filter((code) => !replacementPermissionCodes.has(code));
+
+  if (missingCodes.length > 0) {
+    throw new Error(
+      `Replacement module '${moduleExport.name}' is missing permissions required to preserve existing role bindings [${missingCodes.join(', ')}]. Aborting replacement import before deleting the previous module so access is preserved.`,
+    );
+  }
+}
+
 async function applyReplacementSnapshot(
   ops: ImportOps,
   replacementModule: ModuleOutputDTO,
@@ -702,20 +749,12 @@ async function waitForImportedModule(
   moduleName: string,
   existingModuleId?: string,
 ): Promise<ModuleOutputDTO> {
-  if (!existingModuleId) {
-    const found = await ops.findExactModuleByName(moduleName);
-    if (!found) {
-      throw new Error(`Module '${moduleName}' not found after import`);
-    }
-    return found;
-  }
-
   const deadline = Date.now() + REPLACEMENT_MODULE_POLL_TIMEOUT_MS;
   let lastSeen: ModuleOutputDTO | null = null;
 
   while (Date.now() <= deadline) {
     lastSeen = await ops.findExactModuleByName(moduleName);
-    if (lastSeen && lastSeen.id !== existingModuleId) {
+    if (lastSeen && (!existingModuleId || lastSeen.id !== existingModuleId)) {
       return lastSeen;
     }
 
@@ -749,6 +788,7 @@ async function importModuleExportWithOps(ops: ImportOps, moduleExport: TakaroMod
   if (existingModule) {
     console.error(`Module '${moduleExport.name}' already exists (id: ${existingModule.id}), exporting backup before replacement...`);
     replacementSnapshot = await snapshotReplacementState(ops, existingModule, plan.variableConfig);
+    assertReplacementExportCanPreserveRoleBindings(moduleExport, replacementSnapshot);
     backupModuleExport = await ops.exportModule(existingModule.id);
     await ops.removeModule(existingModule.id);
     console.error(`Removed existing module ${existingModule.id}`);
@@ -772,10 +812,7 @@ async function importModuleExportWithOps(ops: ImportOps, moduleExport: TakaroMod
         await ops.removeModule(importedReplacement.id);
       }
       await ops.importModule(backupModuleExport);
-      const restored = await ops.findExactModuleByName(moduleExport.name);
-      if (!restored) {
-        throw new Error(`Module '${moduleExport.name}' not found after restore`);
-      }
+      const restored = await waitForImportedModule(ops, moduleExport.name, importedReplacement?.id);
       await applyReplacementSnapshot(ops, restored, replacementSnapshot);
       console.error(`Restored previous module '${moduleExport.name}' from backup after import failure`);
     } catch (restoreErr) {
@@ -915,7 +952,7 @@ async function getVariablesForModuleWithToken(
     });
 
     snapshots.push(
-      ...result.data.map((variable) => ({
+      ...result.data.map((variable) => normalizeVariableSnapshot({
         key: variable.key,
         value: variable.value,
         expiresAt: variable.expiresAt,
@@ -957,11 +994,7 @@ async function upsertVariableOnModuleWithToken(
   await takaroTokenRequest(auth, '/variables', {
     method: 'POST',
     body: {
-      key: variable.key,
-      value: variable.value,
-      expiresAt: variable.expiresAt,
-      gameServerId: variable.gameServerId,
-      playerId: variable.playerId,
+      ...normalizeVariableSnapshot(variable),
       moduleId,
     },
   });
