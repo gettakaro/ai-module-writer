@@ -245,6 +245,7 @@ export async function acquireVariableLock({ gameServerId, moduleId, key, ttlMs, 
           console.log(`minigames: reaped stale lock key=${key} owner=${parsed.owner || 'unknown'}`);
         } else {
           console.log(`minigames: lock busy key=${key} owner=${owner || 'unknown'}`);
+          if (attempt < retries) continue;
           return null;
         }
       } catch (parseErr) {
@@ -262,22 +263,32 @@ export async function acquireVariableLock({ gameServerId, moduleId, key, ttlMs, 
     }
 
     const matches = await findVariables(gameServerId, moduleId, key, null);
-    const mine = matches.find((entry) => {
+    const parsedMatches = matches.map((entry) => {
       try {
-        return JSON.parse(entry.value || '{}').token === token;
+        const value = JSON.parse(entry.value || '{}');
+        return { entry, token: String(value.token || ''), createdAt: String(value.createdAt || '') };
       } catch {
-        return false;
+        return null;
       }
-    });
-    const current = matches[0];
-    if (mine && current?.id === mine.id) {
-      await Promise.allSettled(matches.filter((entry) => entry.id !== mine.id).map((entry) => takaro.variable.variableControllerDelete(entry.id)));
+    }).filter(Boolean);
+    const mine = parsedMatches.find((entry) => entry.token === token);
+    if (!mine) {
+      continue;
+    }
+
+    const winner = [...parsedMatches].sort((left, right) => {
+      if (left.token !== right.token) return left.token.localeCompare(right.token);
+      if (left.createdAt !== right.createdAt) return left.createdAt.localeCompare(right.createdAt);
+      return String(left.entry.id).localeCompare(String(right.entry.id));
+    })[0];
+
+    if (winner?.token === token) {
+      await Promise.allSettled(parsedMatches.filter((entry) => entry.token !== token).map((entry) => takaro.variable.variableControllerDelete(entry.entry.id)));
       return token;
     }
 
-    if (mine) {
-      await takaro.variable.variableControllerDelete(mine.id);
-    }
+    await takaro.variable.variableControllerDelete(mine.entry.id);
+    return null;
   }
 
   console.log(`minigames: lock acquisition exhausted key=${key} owner=${owner || 'unknown'}`);
@@ -385,7 +396,12 @@ export function requireGameEnabled(config, game, label) {
 }
 
 export async function requireDailyPuzzleAttempt({ gameServerId, moduleId, playerId, config }) {
-  await checkCap(gameServerId, moduleId, playerId, config);
+  const cap = Number(config?.dailyPointsCapPerPlayer) || 0;
+  const window = await getDailyWindow(gameServerId, moduleId, playerId);
+  return {
+    remainingToday: cap > 0 ? Math.max(0, cap - window.earned) : Infinity,
+    window,
+  };
 }
 
 export async function getBanRecord(gameServerId, moduleId, playerId) {
@@ -618,23 +634,28 @@ export async function awardPoints({ gameServerId, moduleId, pog, playerId, playe
     let currencyPaid = 0;
     const rate = Number(config.pointsToCurrencyRate) || 0;
     if (actualPoints > 0 && rate > 0) {
-      currencyPaid = Math.round(actualPoints * rate);
-      if (currencyPaid > 0) {
+      const intendedCurrency = Math.round(actualPoints * rate);
+      if (intendedCurrency > 0) {
         try {
           await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, playerId, {
-            currency: currencyPaid,
+            currency: intendedCurrency,
           });
+          currencyPaid = intendedCurrency;
         } catch (err) {
-          console.error(`minigames: currency payout add failed for player=${playerName} amount=${currencyPaid}. Retrying with setCurrency. Error: ${err}`);
+          console.error(`minigames: currency payout add failed for player=${playerName} amount=${intendedCurrency}. Retrying with setCurrency. Error: ${err}`);
+          let currentPog = null;
+          for (let attempt = 0; attempt < 3 && !currentPog; attempt += 1) {
+            currentPog = await getPlayerOnGameServer(gameServerId, playerId);
+          }
+
           try {
-            const currentPog = await getPlayerOnGameServer(gameServerId, playerId);
             if (!currentPog) throw new Error(`playerOnGameserver missing for ${playerId}`);
             await takaro.playerOnGameserver.playerOnGameServerControllerSetCurrency(gameServerId, playerId, {
-              currency: (Number(currentPog.currency) || 0) + currencyPaid,
+              currency: (Number(currentPog.currency) || 0) + intendedCurrency,
             });
+            currencyPaid = intendedCurrency;
           } catch (fallbackErr) {
-            console.error(`minigames: currency payout failed for player=${playerName} amount=${currencyPaid}. Continuing without currency. Error: ${fallbackErr}`);
-            currencyPaid = 0;
+            console.error(`minigames: currency payout failed for player=${playerName} amount=${intendedCurrency}. Continuing without currency. Error: ${fallbackErr}`);
           }
         }
       }
@@ -1580,19 +1601,19 @@ export async function settleLiveRound({ gameServerId, moduleId, player, pog, con
   await requirePlayable({ gameServerId, moduleId, pog, playerId: player.id });
   if (!round || new Date(round.expiresAt).getTime() <= Date.now()) {
     console.log(`minigames: ${source} ignored because round is expired or missing`);
-    return false;
+    return { settled: false, reason: 'expired' };
   }
   const normalizedResponse = normalizeText(response);
   const normalizedAnswer = normalizeText(round.answer);
   if (normalizedResponse !== normalizedAnswer) {
     console.log(`minigames: ${source} incorrect game=${round.game} player=${player.name} response=${response}`);
-    return false;
+    return { settled: false, reason: 'incorrect' };
   }
 
   const liveRoundLockToken = await acquireLiveRoundLock(gameServerId, moduleId);
   if (!liveRoundLockToken) {
     console.log(`minigames: ${source} could not acquire live round lock game=${round.game} player=${player.name}`);
-    return false;
+    return { settled: false, reason: 'busy' };
   }
 
   let awardLockToken = null;
@@ -1600,17 +1621,17 @@ export async function settleLiveRound({ gameServerId, moduleId, player, pog, con
     const currentRound = await getStoredActiveRound(gameServerId, moduleId);
     if (!currentRound || !sameRound(currentRound, round)) {
       console.log(`minigames: ${source} answer matched but round was already settled or replaced game=${round.game} player=${player.name}`);
-      return false;
+      return { settled: false, reason: 'replaced' };
     }
     if (new Date(currentRound.expiresAt).getTime() <= Date.now()) {
       console.log(`minigames: ${source} answer matched but round expired before settlement game=${round.game} player=${player.name}`);
-      return false;
+      return { settled: false, reason: 'expired' };
     }
 
     awardLockToken = await acquireAwardLock(gameServerId, moduleId, player.id);
     if (!awardLockToken) {
       console.log(`minigames: ${source} could not acquire award lock game=${round.game} player=${player.name}`);
-      return false;
+      return { settled: false, reason: 'award-lock-busy' };
     }
 
     const reward = await awardPoints({
@@ -1626,6 +1647,8 @@ export async function settleLiveRound({ gameServerId, moduleId, player, pog, con
       awardLockToken,
     });
 
+    await clearActiveRound(gameServerId, moduleId);
+
     try {
       await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
         message: `${gameEmoji(currentRound.game)} ${player.name} won ${getGameDisplayName(currentRound.game)}! +${reward.actualPoints} points${formatMultiplier(reward.multiplier)}. Answer: ${currentRound.answer}`,
@@ -1635,9 +1658,8 @@ export async function settleLiveRound({ gameServerId, moduleId, player, pog, con
       console.error(`minigames: failed to announce settled round game=${currentRound.game} player=${player.name}. Error: ${err}`);
     }
 
-    await clearActiveRound(gameServerId, moduleId);
     console.log(`minigames: live round settled game=${currentRound.game} player=${player.name} source=${source} points=${reward.actualPoints}`);
-    return true;
+    return { settled: true, reason: 'settled', reward };
   } finally {
     if (awardLockToken) {
       await releaseAwardLock(gameServerId, moduleId, player.id, awardLockToken);
@@ -1668,8 +1690,11 @@ export async function handleAnswerCommand({ gameServerId, moduleId, player, pog,
   const round = await getActiveRound(gameServerId, moduleId);
   if (!round) throw new TakaroUserError('There is no active live round right now.');
   if (round.game === 'reactionrace') throw new TakaroUserError('This round is chat-only — type the token directly in chat.');
-  const success = await settleLiveRound({ gameServerId, moduleId, player, pog, config, round, response, source: 'command' });
-  if (!success) {
+  const result = await settleLiveRound({ gameServerId, moduleId, player, pog, config, round, response, source: 'command' });
+  if (result.reason === 'award-lock-busy') {
+    throw new TakaroUserError('Your answer matched, but your reward is already being processed. Try again in a moment.');
+  }
+  if (!result.settled) {
     await pog.pm(`❌ Not correct for ${getGameDisplayName(round.game)}. Keep trying.`);
   }
 }
@@ -1688,7 +1713,8 @@ export async function processReactionMessage({ gameServerId, moduleId, player, p
   if (!player) return false;
   const effectivePog = pog || await getPlayerOnGameServer(gameServerId, player.id);
   if (!effectivePog) return false;
-  return settleLiveRound({ gameServerId, moduleId, player, pog: effectivePog, config, round, response: message, source: 'chat' });
+  const result = await settleLiveRound({ gameServerId, moduleId, player, pog: effectivePog, config, round, response: message, source: 'chat' });
+  return result.settled;
 }
 
 export async function getAllStats(gameServerId, moduleId) {
@@ -1825,7 +1851,9 @@ export async function findPlayerByName(name, gameServerId) {
     }
 
     let page = 0;
-    while (page < 10) {
+    let safety = 0;
+    while (safety < 1000) {
+      safety += 1;
       const pageSearch = await takaro.player.playerControllerSearch({ page, limit: 100 });
       const exact = pageSearch.data.data.find((entry) => String(entry.name || '').trim().toLowerCase() === wanted.toLowerCase());
       if (exact) {
@@ -2085,5 +2113,5 @@ export async function buildReport(gameServerId, moduleId, days) {
     return `${getGameDisplayName(game)}: ${summary.points} pts / ${summary.plays} plays / ${summary.wins} wins`;
   });
 
-  return [`miniGames report (${safeDays}d window)`, `Rounds: ${aggregate.gamesPlayed}`, `Points awarded: ${aggregate.totalPoints}`, 'Top 5:', ...(topLines.length > 0 ? topLines : ['No data yet.']), 'Per-game:', ...perGame].join('\n');
+  return [`miniGames report (${safeDays}d window)`, `Player plays: ${aggregate.gamesPlayed}`, `Points awarded: ${aggregate.totalPoints}`, 'Top 5:', ...(topLines.length > 0 ? topLines : ['No data yet.']), 'Per-game:', ...perGame].join('\n');
 }

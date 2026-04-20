@@ -606,7 +606,7 @@ describe('minigames: daily point cap enforcement', () => {
     });
   }
 
-  it('clips awards to the remaining cap and then rejects further puzzle attempts that day', async () => {
+  it('clips awards to the remaining cap and still allows further puzzle attempts that day', async () => {
     const solveEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}wordle crane`);
     const solveMeta = solveEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
     const solveLogs = (solveMeta?.result?.logs ?? []).map((l) => l.msg);
@@ -617,8 +617,14 @@ describe('minigames: daily point cap enforcement', () => {
     assert.equal(stats.totalPoints, 50, 'wordle reward should be clipped to the configured daily cap');
     assert.equal(window.earned, 50, 'daily window should stop at the cap');
 
-    const deniedEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}hangman t`);
-    const deniedMeta = deniedEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
-    assert.equal(deniedMeta?.result?.success, false, 'further puzzle attempts should be rejected after cap exhaustion');
+    const followupEvent = await triggerCommand(ctx.players[0].playerId, `${prefix}hangman t`);
+    const followupMeta = followupEvent.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const followupLogs = (followupMeta?.result?.logs ?? []).map((l) => l.msg);
+    assert.equal(followupMeta?.result?.success, true, `further puzzle attempts should still run after cap exhaustion, logs=${JSON.stringify(followupLogs)}`);
+
+    const updatedStats = await readVariable(client, ctx.gameServer.id, moduleId, KEY_STATS, ctx.players[0].playerId);
+    const updatedWindow = await readVariable(client, ctx.gameServer.id, moduleId, KEY_WINDOW, ctx.players[0].playerId);
+    assert.equal(updatedStats.totalPoints, 50, 'follow-up attempts should not award points beyond the cap');
+    assert.equal(updatedWindow.earned, 50, 'daily window should remain capped after follow-up attempts');
   });
 });

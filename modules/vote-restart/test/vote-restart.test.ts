@@ -682,6 +682,33 @@ describe('vote-restart recovery and hardening', () => {
     assert.equal(await readVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_pending'), null, 'restart-pending should be cleared after recovery');
   });
 
+  it('cleans up an already-executed restart marker on later cron passes', async () => {
+    await upsertVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_vote_state', {
+      startedAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      initiatorName: 'AlreadyExecuted',
+      voters: [ctx4.players[0].playerId],
+      status: 'passed',
+      passedAt: new Date(Date.now() - 4 * 60 * 1000).toISOString(),
+    });
+    await upsertVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_pending', {
+      status: 'executed',
+      passedAt: new Date(Date.now() - 4 * 60 * 1000).toISOString(),
+      executedAt: new Date(Date.now() - 3 * 60 * 1000).toISOString(),
+      initiatorName: 'AlreadyExecuted',
+      restartDelay: 0,
+      restartCommand: 'say restart-test',
+    });
+
+    const { success, logs } = await triggerCronjob4();
+    assert.equal(success, true, `Expected executed-marker cronjob success, logs: ${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((l) => l.includes('restart already issued previously, retrying cleanup only')),
+      `Expected executed-marker cleanup log, got: ${JSON.stringify(logs)}`,
+    );
+    assert.equal(await readVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_vote_state'), null, 'vote state should be cleared when cleanup resumes after an already-executed restart');
+    assert.equal(await readVariable(client4, ctx4.gameServer.id, moduleId4, 'vr_restart_pending'), null, 'restart-pending should be cleared when cleanup resumes after an already-executed restart');
+  });
+
   it('ignores malformed persisted vote state without crashing user-facing commands', async () => {
     const existingVoteState = await client4.variable.variableControllerSearch({
       filters: {

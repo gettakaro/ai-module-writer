@@ -1,5 +1,5 @@
 import { data, checkPermission, TakaroUserError } from '@takaro/helpers';
-import { closeExpiredRound } from './minigames-helpers.js';
+import { closeExpiredRound, getGameDisplayName } from './minigames-helpers.js';
 
 async function main() {
   const { gameServerId, pog, module: mod } = data;
@@ -9,7 +9,7 @@ async function main() {
     await pog.pm('No active round to skip.');
     return;
   }
-  await pog.pm(`⏭️ Skipped ${round.game}.`);
+  await pog.pm(`⏭️ Skipped ${getGameDisplayName(round.game)}.`);
 }
 
 await main();

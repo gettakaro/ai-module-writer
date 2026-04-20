@@ -8,13 +8,14 @@ async function main() {
   const forcedGame = normalizeOptionalStringArg(args.game).toLowerCase() || undefined;
   const validGames = ['trivia', 'scramble', 'mathrace', 'reactionrace'];
   if (forcedGame && !validGames.includes(forcedGame)) {
-    const message = `Unknown live game "${forcedGame}". Try: ${validGames.map((game) => getGameDisplayName(game)).join(', ')}.`;
+    const message = `Unknown live game "${forcedGame}". Try: ${validGames.join(', ')}.`;
     console.log(`minigames: ${message}`);
     await pog.pm(message);
     return;
   }
   if (forcedGame && !config.games[forcedGame]) {
-    const message = `${getGameDisplayName(forcedGame)} is disabled on this server. Enabled live games: ${validGames.filter((game) => config.games[game]).map((game) => getGameDisplayName(game)).join(', ') || 'none'}.`;
+    const enabledGames = validGames.filter((game) => config.games[game]);
+    const message = `${forcedGame} is disabled on this server. Enabled live games: ${enabledGames.join(', ') || 'none'}.`;
     console.log(`minigames: ${message}`);
     await pog.pm(message);
     return;
