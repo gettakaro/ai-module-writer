@@ -5,13 +5,18 @@
   "supportedGames": [
     "all"
   ],
+  "xPiReplacementState": {
+    "durableVariableKeys": [
+      "server_messages_state"
+    ]
+  },
   "config": {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "type": "object",
     "properties": {
       "messages": {
         "type": "array",
-        "description": "Messages to broadcast. Supports {playerCount} and {serverName}. Unsupported placeholder typos are rejected at install time. Weight only affects random order. Limit 100 messages. Message text must include at least one non-whitespace character.",
+        "description": "Messages to broadcast. Supports {playerCount} and {serverName}. Unknown placeholders are left unchanged at send time. Weight only affects random order. Limit 100 messages. Message text must include at least one non-whitespace character.",
         "default": [],
         "maxItems": 100,
         "items": {
@@ -19,16 +24,9 @@
           "properties": {
             "text": {
               "type": "string",
-              "allOf": [
-                {
-                  "pattern": "\\S"
-                },
-                {
-                  "pattern": "^(?!.*\\{(?!playerCount\\}|serverName\\})[^{}]*\\}).*$"
-                }
-              ],
+              "pattern": "\\S",
               "title": "Broadcast message text",
-              "description": "The message text to broadcast. Supports {playerCount} and {serverName}. Whitespace-only messages are rejected at install time. Unsupported placeholder typos are rejected at install time. Example: Welcome! There are {playerCount} players online."
+              "description": "The message text to broadcast. Supports {playerCount} and {serverName}. Unknown placeholders are left unchanged at send time. Whitespace-only messages are rejected at install time. Example: Welcome! There are {playerCount} players online."
             },
             "weight": {
               "type": "integer",

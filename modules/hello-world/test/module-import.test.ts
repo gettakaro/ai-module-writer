@@ -626,6 +626,70 @@ describe('module-import CLI', () => {
     );
   });
 
+  it('restores only declared durable variables when the module export opts into replacement-state filtering', async () => {
+    const createdVariables: Array<{ moduleId?: string; key: string; value: string; gameServerId?: string }> = [];
+    let searchCalls = 0;
+
+    const fakeClient = {
+      module: {
+        moduleControllerSearch: async () => {
+          searchCalls += 1;
+          if (searchCalls === 1) {
+            return { data: { data: [{ id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } }] } };
+          }
+          return { data: { data: [{ id: 'new-module', name: MODULE_NAME, latestVersion: { id: 'new-version' } }] } };
+        },
+        moduleInstallationsControllerGetInstalledModules: async () => ({ data: { data: [], meta: { total: 0 } } }),
+        moduleControllerExport: async () => ({ data: { data: { name: MODULE_NAME, versions: [] } } }),
+        moduleControllerRemove: async () => {},
+        moduleControllerImport: async () => {},
+      },
+      variable: {
+        variableControllerSearch: async ({ filters }: { filters?: Record<string, string[]> }) => {
+          if (filters?.moduleId?.[0] === 'old-module' && !filters.key) {
+            return {
+              data: {
+                data: [
+                  { key: 'server_messages_state', value: '{"sequentialIndex":1}', gameServerId: 'gs-1' },
+                  { key: 'server_messages_lock', value: '{"token":"stale"}', gameServerId: 'gs-1' },
+                  { key: 'server_messages_test_force_state_write_failure', value: '{"stale":true}', gameServerId: 'gs-1' },
+                ],
+                meta: { total: 3 },
+              },
+            };
+          }
+
+          return { data: { data: [], meta: { total: 0 } } };
+        },
+        variableControllerCreate: async (payload: { moduleId?: string; key: string; value: string; gameServerId?: string }) => {
+          createdVariables.push(payload);
+          return { data: { data: payload } };
+        },
+        variableControllerUpdate: async () => ({ data: { data: {} } }),
+      },
+      role: {
+        roleControllerGetPermissions: async () => ({ data: { data: [] } }),
+        roleControllerSearch: async () => ({ data: { data: [], meta: { total: 0 } } }),
+        roleControllerUpdate: async () => ({ data: { data: {} } }),
+      },
+    } as unknown as Client;
+
+    await importModuleExport(fakeClient, {
+      name: MODULE_NAME,
+      versions: [],
+      xPiReplacementState: { durableVariableKeys: ['server_messages_state'] },
+    } as any);
+
+    assert.deepEqual(createdVariables, [
+      {
+        moduleId: 'new-module',
+        key: 'server_messages_state',
+        value: '{"sequentialIndex":1}',
+        gameServerId: 'gs-1',
+      },
+    ]);
+  });
+
   it('rebinds roles using permission metadata from role search when global permission discovery is incomplete', async () => {
     const updatedRoles: Array<{ roleId: string; permissions: Array<{ permissionId: string; count?: number }> }> = [];
     let searchCalls = 0;
@@ -705,6 +769,70 @@ describe('module-import CLI', () => {
       {
         roleId: 'role-1',
         permissions: [{ permissionId: 'new-perm', count: 4 }],
+      },
+    ]);
+  });
+
+  it('waits for the replacement module record before rebinding role permissions', async () => {
+    const updatedRoles: Array<{ roleId: string; permissions: Array<{ permissionId: string; count?: number }> }> = [];
+    let searchCalls = 0;
+
+    const fakeClient = {
+      module: {
+        moduleControllerSearch: async () => {
+          searchCalls += 1;
+          if (searchCalls === 1) {
+            return { data: { data: [{ id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } }] } };
+          }
+          if (searchCalls === 2) {
+            return {
+              data: {
+                data: [
+                  { id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } },
+                  { id: 'new-module', name: MODULE_NAME, latestVersion: { id: 'new-version' } },
+                ],
+              },
+            };
+          }
+          return { data: { data: [{ id: 'new-module', name: MODULE_NAME, latestVersion: { id: 'new-version' } }] } };
+        },
+        moduleInstallationsControllerGetInstalledModules: async () => ({ data: { data: [], meta: { total: 0 } } }),
+        moduleControllerExport: async () => ({ data: { data: { name: MODULE_NAME, versions: [] } } }),
+        moduleControllerRemove: async () => ({ data: { data: {} } }),
+        moduleControllerImport: async () => ({ data: { data: {} } }),
+      },
+      variable: {
+        variableControllerSearch: async () => ({ data: { data: [], meta: { total: 0 } } }),
+      },
+      role: {
+        roleControllerGetPermissions: async () => ({
+          data: {
+            data: [
+              { id: 'old-perm', permission: 'HELLO_USE', module: { id: 'old-module', name: MODULE_NAME } },
+              { id: 'new-perm', permission: 'HELLO_USE', module: { id: 'new-module', name: MODULE_NAME } },
+            ],
+          },
+        }),
+        roleControllerSearch: async () => ({
+          data: {
+            data: [{ id: 'role-1', permissions: [{ permissionId: 'old-perm', count: 1 }] }],
+            meta: { total: 1 },
+          },
+        }),
+        roleControllerGetOne: async () => ({ data: { data: { id: 'role-1', permissions: [] } } }),
+        roleControllerUpdate: async (roleId: string, payload: { permissions?: Array<{ permissionId: string; count?: number }> }) => {
+          updatedRoles.push({ roleId, permissions: payload.permissions ?? [] });
+          return { data: { data: {} } };
+        },
+      },
+    } as unknown as Client;
+
+    await importModuleExport(fakeClient, { name: MODULE_NAME, versions: [] } as any);
+
+    assert.deepEqual(updatedRoles, [
+      {
+        roleId: 'role-1',
+        permissions: [{ permissionId: 'new-perm', count: 1 }],
       },
     ]);
   });
@@ -885,10 +1013,9 @@ describe('module-import CLI', () => {
     }
   });
 
-  it('replays replacement snapshots through the token-only import path while preserving non-expired variables', async () => {
+  it('refuses token-only replacement imports before deleting the existing module', async () => {
     const originalFetch = globalThis.fetch;
     const requests: Array<{ path: string; method: string; body?: any }> = [];
-    let searchCalls = 0;
 
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === 'string'
@@ -907,383 +1034,29 @@ describe('module-import CLI', () => {
       });
 
       if (requestPath === '/module/search') {
-        searchCalls += 1;
-        if (searchCalls === 1) {
-          return json({ data: [{ id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } }] });
-        }
-        return json({ data: [{ id: 'new-module', name: MODULE_NAME, latestVersion: { id: 'new-version' } }] });
-      }
-
-      if (requestPath === '/module/installation/search') {
-        return json({
-          data: [{ gameserverId: 'gs-1', userConfig: { foo: 'bar' }, systemConfig: { cron: true } }],
-          meta: { total: 1 },
-        });
-      }
-
-      if (requestPath === '/module/old-module/export') {
-        return json({ data: { name: MODULE_NAME, versions: [] } });
-      }
-
-      if (requestPath === '/module/old-module' && method === 'DELETE') {
-        return json({ data: {} });
-      }
-
-      if (requestPath === '/module/import') {
-        return json({ data: {} });
-      }
-
-      if (requestPath === '/variables/search') {
-        if (body?.filters?.moduleId?.[0] === 'old-module' && !body?.filters?.key) {
-          return json({
-            data: [
-              { key: 'server_messages_state', value: '{"sequentialIndex":1}', gameServerId: 'gs-1' },
-              { key: 'server_messages_lock', value: '{"token":"transient"}', gameServerId: 'gs-1' },
-              { key: 'server_messages_delivery_receipt', value: '{"messageIndex":0}', gameServerId: 'gs-1' },
-            ],
-            meta: { total: 3 },
-          });
-        }
-
-        return json({ data: [], meta: { total: 0 } });
-      }
-
-      if (requestPath === '/variables' && method === 'POST') {
-        return json({ data: body });
-      }
-
-      if (requestPath === '/permissions' && method === 'GET') {
-        return json({
-          data: [
-            { id: 'old-perm', permission: 'HELLO_USE', module: { id: 'old-module', name: MODULE_NAME } },
-            { id: 'new-perm', permission: 'HELLO_USE', module: { id: 'new-module', name: MODULE_NAME } },
-          ],
-        });
-      }
-
-      if (requestPath === '/role/search') {
-        return json({
-          data: [{ id: 'role-1', permissions: [{ permissionId: 'old-perm', count: 2 }] }],
-          meta: { total: 1 },
-        });
-      }
-
-      if (requestPath === '/role/role-1' && method === 'GET') {
-        return json({ data: { id: 'role-1', permissions: [] } });
-      }
-
-      if (requestPath === '/role/role-1' && method === 'PUT') {
-        return json({ data: {} });
-      }
-
-      if (requestPath === '/module/installation/' && method === 'POST') {
-        return json({ data: {} });
+        return json({ data: [{ id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } }] });
       }
 
       throw new Error(`Unexpected fetch request: ${method} ${requestPath}`);
     }) as typeof fetch;
 
     try {
-      await importModuleExportWithToken(
-        { url: 'https://takaro.invalid', domainId: 'domain-1', token: 'token-only' },
-        { name: MODULE_NAME, versions: [] } as any,
+      await assert.rejects(
+        importModuleExportWithToken(
+          { url: 'https://takaro.invalid', domainId: 'domain-1', token: 'token-only' },
+          { name: MODULE_NAME, versions: [] } as any,
+        ),
+        /token-only replacement import.*disabled/i,
       );
     } finally {
       globalThis.fetch = originalFetch;
     }
 
-    const createdVariableBodies = requests
-      .filter((request) => request.path === '/variables' && request.method === 'POST')
-      .map((request) => request.body);
-
-    assert.deepEqual(createdVariableBodies, [
-      {
-        key: 'server_messages_state',
-        value: '{"sequentialIndex":1}',
-        gameServerId: 'gs-1',
-        moduleId: 'new-module',
-      },
-      {
-        key: 'server_messages_lock',
-        value: '{"token":"transient"}',
-        gameServerId: 'gs-1',
-        moduleId: 'new-module',
-      },
-      {
-        key: 'server_messages_delivery_receipt',
-        value: '{"messageIndex":0}',
-        gameServerId: 'gs-1',
-        moduleId: 'new-module',
-      },
-    ]);
-    assert.ok(
-      requests.some((request) => request.path === '/module/installation/' && request.method === 'POST'),
-      'Expected token-only replacement flow to reinstall prior installations',
+    assert.deepEqual(
+      requests.map((request) => `${request.method} ${request.path}`),
+      ['POST /module/search'],
+      'Expected token-only replacement guard to stop before any destructive API calls',
     );
-    assert.ok(
-      requests.some((request) => request.path === '/role/role-1' && request.method === 'PUT'),
-      'Expected token-only replacement flow to rebind role permissions',
-    );
-  });
-
-  it('replays paginated replacement snapshots through the token-only import path', async () => {
-    const originalFetch = globalThis.fetch;
-    const requests: Array<{ path: string; method: string; body?: any }> = [];
-    let moduleSearchCalls = 0;
-
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const url = typeof input === 'string'
-        ? input
-        : input instanceof URL
-          ? input.toString()
-          : input.url;
-      const requestPath = new URL(url).pathname;
-      const method = init?.method ?? 'POST';
-      const body = typeof init?.body === 'string' && init.body.length > 0 ? JSON.parse(init.body) : undefined;
-      requests.push({ path: requestPath, method, body });
-
-      const json = (payload: unknown) => new Response(JSON.stringify(payload), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      if (requestPath === '/module/search') {
-        moduleSearchCalls += 1;
-        if (moduleSearchCalls === 1) {
-          return json({ data: [{ id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } }] });
-        }
-        return json({ data: [{ id: 'new-module', name: MODULE_NAME, latestVersion: { id: 'new-version' } }] });
-      }
-
-      if (requestPath === '/module/installation/search') {
-        if (body?.page === 0) {
-          return json({
-            data: Array.from({ length: 100 }, (_, index) => ({
-              gameserverId: `gs-${index + 1}`,
-              userConfig: { slot: index + 1 },
-              systemConfig: { enabled: true },
-            })),
-            meta: { total: 101 },
-          });
-        }
-        if (body?.page === 1) {
-          return json({
-            data: [{ gameserverId: 'gs-101', userConfig: { slot: 101 }, systemConfig: { enabled: true } }],
-            meta: { total: 101 },
-          });
-        }
-      }
-
-      if (requestPath === '/module/old-module/export') {
-        return json({ data: { name: MODULE_NAME, versions: [] } });
-      }
-
-      if (requestPath === '/module/old-module' && method === 'DELETE') {
-        return json({ data: {} });
-      }
-
-      if (requestPath === '/module/import') {
-        return json({ data: {} });
-      }
-
-      if (requestPath === '/variables/search') {
-        if (body?.filters?.moduleId?.[0] === 'old-module' && !body?.filters?.key) {
-          if (body?.page === 0) {
-            return json({
-              data: Array.from({ length: 100 }, (_, index) => ({
-                key: `persistent_${index + 1}`,
-                value: JSON.stringify({ index: index + 1 }),
-                gameServerId: 'gs-1',
-              })),
-              meta: { total: 101 },
-            });
-          }
-          if (body?.page === 1) {
-            return json({
-              data: [{ key: 'persistent_101', value: '{"index":101}', gameServerId: 'gs-1' }],
-              meta: { total: 101 },
-            });
-          }
-        }
-
-        return json({ data: [], meta: { total: 0 } });
-      }
-
-      if (requestPath === '/variables' && method === 'POST') {
-        return json({ data: body });
-      }
-
-      if (requestPath === '/permissions' && method === 'GET') {
-        return json({
-          data: [
-            { id: 'old-perm-1', permission: 'HELLO_USE', module: { id: 'old-module', name: MODULE_NAME } },
-            { id: 'old-perm-2', permission: 'HELLO_ADMIN', module: { id: 'old-module', name: MODULE_NAME } },
-            { id: 'new-perm-1', permission: 'HELLO_USE', module: { id: 'new-module', name: MODULE_NAME } },
-            { id: 'new-perm-2', permission: 'HELLO_ADMIN', module: { id: 'new-module', name: MODULE_NAME } },
-          ],
-        });
-      }
-
-      if (requestPath === '/role/search') {
-        if (body?.page === 0) {
-          return json({
-            data: Array.from({ length: 100 }, (_, index) => ({
-              id: `role-${index + 1}`,
-              permissions: [{ permissionId: 'old-perm-1', count: index + 1 }],
-            })),
-            meta: { total: 101 },
-          });
-        }
-        if (body?.page === 1) {
-          return json({
-            data: [{ id: 'role-101', permissions: [{ permissionId: 'old-perm-2', count: 101 }] }],
-            meta: { total: 101 },
-          });
-        }
-      }
-
-      if (requestPath.startsWith('/role/') && method === 'GET') {
-        return json({ data: { id: requestPath.split('/').at(-1), permissions: [] } });
-      }
-
-      if (requestPath.startsWith('/role/') && method === 'PUT') {
-        return json({ data: {} });
-      }
-
-      if (requestPath === '/module/installation/' && method === 'POST') {
-        return json({ data: {} });
-      }
-
-      throw new Error(`Unexpected fetch request: ${method} ${requestPath}`);
-    }) as typeof fetch;
-
-    try {
-      await importModuleExportWithToken(
-        { url: 'https://takaro.invalid', domainId: 'domain-1', token: 'token-only' },
-        { name: MODULE_NAME, versions: [] } as any,
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-
-    const installationPosts = requests.filter((request) => request.path === '/module/installation/' && request.method === 'POST');
-    const variablePosts = requests.filter((request) => request.path === '/variables' && request.method === 'POST');
-    const roleUpdates = requests.filter((request) => request.path.startsWith('/role/') && request.method === 'PUT');
-
-    assert.equal(installationPosts.length, 101, 'Expected token-only import to replay all paginated installations');
-    assert.equal(variablePosts.length, 101, 'Expected token-only import to replay all paginated persistent variables');
-    assert.equal(roleUpdates.length, 101, 'Expected token-only import to replay all paginated role bindings');
-    assert.ok(
-      requests.some((request) => request.path === '/module/installation/search' && request.body?.page === 1),
-      'Expected token-only import to request the second installations page',
-    );
-    assert.ok(
-      requests.some((request) => request.path === '/variables/search' && request.body?.page === 1),
-      'Expected token-only import to request the second variables page',
-    );
-    assert.ok(
-      requests.some((request) => request.path === '/role/search' && request.body?.page === 1),
-      'Expected token-only import to request the second roles page',
-    );
-  });
-
-  it('paginates token-only permission discovery before rebinding replacement role assignments', async () => {
-    const originalFetch = globalThis.fetch;
-    const requests: Array<{ path: string; method: string; body?: any; page?: string | null }> = [];
-    const roleUpdates: Array<{ path: string; body?: any }> = [];
-    let moduleSearchCalls = 0;
-
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const url = typeof input === 'string'
-        ? input
-        : input instanceof URL
-          ? input.toString()
-          : input.url;
-      const parsedUrl = new URL(url);
-      const requestPath = parsedUrl.pathname;
-      const method = init?.method ?? 'POST';
-      const body = typeof init?.body === 'string' && init.body.length > 0 ? JSON.parse(init.body) : undefined;
-      requests.push({ path: requestPath, method, body, page: parsedUrl.searchParams.get('page') });
-      if (requestPath.startsWith('/role/') && method === 'PUT') {
-        roleUpdates.push({ path: requestPath, body });
-      }
-
-      const json = (payload: unknown) => new Response(JSON.stringify(payload), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      if (requestPath === '/module/search') {
-        moduleSearchCalls += 1;
-        if (moduleSearchCalls === 1) {
-          return json({ data: [{ id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } }] });
-        }
-        return json({ data: [{ id: 'new-module', name: MODULE_NAME, latestVersion: { id: 'new-version' } }] });
-      }
-
-      if (requestPath === '/module/old-module/export') return json({ data: { name: MODULE_NAME, versions: [] } });
-      if (requestPath === '/module/old-module' && method === 'DELETE') return json({ data: {} });
-      if (requestPath === '/module/import') return json({ data: {} });
-      if (requestPath === '/module/installation/search') return json({ data: [], meta: { total: 0 } });
-      if (requestPath === '/variables/search') return json({ data: [], meta: { total: 0 } });
-      if (requestPath === '/role/search') {
-        return json({
-          data: [{ id: 'role-1', permissions: [{ permissionId: 'old-perm-2', count: 7 }] }],
-          meta: { total: 1 },
-        });
-      }
-      if (requestPath === '/role/role-1' && method === 'GET') return json({ data: { id: 'role-1', permissions: [] } });
-      if (requestPath === '/role/role-1' && method === 'PUT') return json({ data: {} });
-      if (requestPath === '/module/installation/' && method === 'POST') return json({ data: {} });
-
-      if (requestPath === '/permissions' && method === 'GET') {
-        const page = Number(parsedUrl.searchParams.get('page') ?? '0');
-        if (page === 0) {
-          return json({
-            data: Array.from({ length: 100 }, (_, index) => ({
-              id: `noise-${index + 1}`,
-              permission: `NOISE_${index + 1}`,
-              module: { id: 'noise-module', name: 'noise' },
-            })),
-            meta: { total: 102 },
-          });
-        }
-
-        if (page === 1) {
-          return json({
-            data: [
-              { id: 'old-perm-2', permission: 'HELLO_USE', module: { id: 'old-module', name: MODULE_NAME } },
-              { id: 'new-perm-2', permission: 'HELLO_USE', module: { id: 'new-module', name: MODULE_NAME } },
-            ],
-            meta: { total: 102 },
-          });
-        }
-      }
-
-      throw new Error(`Unexpected fetch request: ${method} ${requestPath}`);
-    }) as typeof fetch;
-
-    try {
-      await importModuleExportWithToken(
-        { url: 'https://takaro.invalid', domainId: 'domain-1', token: 'token-only' },
-        { name: MODULE_NAME, versions: [] } as any,
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-
-    assert.ok(
-      requests.some((request) => request.path === '/permissions' && request.page === '1'),
-      'Expected token-only import to request the second permissions page',
-    );
-    assert.deepEqual(roleUpdates, [
-      {
-        path: '/role/role-1',
-        body: {
-          permissions: [{ permissionId: 'new-perm-2', count: 7 }],
-        },
-      },
-    ]);
   });
 
   it('surfaces HTTP status and raw response text for non-JSON token-only failures', async () => {

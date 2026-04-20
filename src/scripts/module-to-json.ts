@@ -197,6 +197,7 @@ const result: TakaroModuleExport = {
   name: mod.name,
   author: mod.author ?? 'Unknown',
   supportedGames: mod.supportedGames ?? ['all'],
+  xPiReplacementState: mod.xPiReplacementState,
   versions: [
     {
       tag: mod.version ?? 'latest',

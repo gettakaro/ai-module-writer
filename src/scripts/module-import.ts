@@ -9,7 +9,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { config } from 'dotenv';
 import { Client, ModuleOutputDTO } from '@takaro/apiclient';
-import { TakaroModuleExport } from '../types/module.js';
+import { ReplacementStateConfig, TakaroModuleExport } from '../types/module.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,6 +19,8 @@ const INSTALLATION_PAGE_SIZE = 100;
 const PAGE_SIZE = 100;
 const REPLACEMENT_PERMISSION_POLL_DELAY_MS = 500;
 const REPLACEMENT_PERMISSION_POLL_TIMEOUT_MS = 15000;
+const REPLACEMENT_MODULE_POLL_DELAY_MS = 500;
+const REPLACEMENT_MODULE_POLL_TIMEOUT_MS = 15000;
 
 export function loadRepoEnv(): void {
   config({ path: path.join(REPO_ROOT, '.env') });
@@ -90,6 +92,11 @@ interface ReplacementSnapshot {
   variables: VariableSnapshot[];
   rolesUsingModulePermissions: RoleSnapshot[];
   permissionIdToCode: Map<string, string>;
+}
+
+interface ReplacementPlan {
+  existingModuleId?: string;
+  variableConfig?: ReplacementStateConfig;
 }
 
 interface ImportModuleExportOptions {
@@ -168,8 +175,17 @@ function isExpiredVariable(variable: VariableSnapshot, now = Date.now()): boolea
   return Number.isFinite(expiresAt) && expiresAt <= now;
 }
 
-function shouldRestoreModuleVariable(variable: VariableSnapshot): boolean {
-  return !isExpiredVariable(variable);
+function shouldRestoreModuleVariable(variable: VariableSnapshot, config?: ReplacementStateConfig): boolean {
+  if (isExpiredVariable(variable)) {
+    return false;
+  }
+
+  const durableVariableKeys = config?.durableVariableKeys;
+  if (!durableVariableKeys || durableVariableKeys.length === 0) {
+    return true;
+  }
+
+  return durableVariableKeys.includes(variable.key);
 }
 
 export function getTakaroAuthConfig(env: NodeJS.ProcessEnv = process.env): TakaroAuthConfig {
@@ -563,7 +579,11 @@ function createClientImportOps(
   };
 }
 
-async function snapshotReplacementState(ops: ImportOps, existingModule: ModuleOutputDTO): Promise<ReplacementSnapshot> {
+async function snapshotReplacementState(
+  ops: ImportOps,
+  existingModule: ModuleOutputDTO,
+  variableConfig?: ReplacementStateConfig,
+): Promise<ReplacementSnapshot> {
   const permissionIdToCode = await ops.getModulePermissionIdToCode(existingModule.id);
 
   const [installations, variables, roleSnapshot] = await Promise.all([
@@ -574,7 +594,7 @@ async function snapshotReplacementState(ops: ImportOps, existingModule: ModuleOu
 
   return {
     installations,
-    variables: variables.filter(shouldRestoreModuleVariable),
+    variables: variables.filter((variable) => shouldRestoreModuleVariable(variable, variableConfig)),
     rolesUsingModulePermissions: roleSnapshot.roles,
     permissionIdToCode: roleSnapshot.permissionIdToCode,
   };
@@ -677,8 +697,47 @@ async function applyReplacementSnapshot(
   await ops.reinstallInstallations(replacementModule, snapshot.installations);
 }
 
-async function importModuleExportWithOps(ops: ImportOps, moduleExport: TakaroModuleExport): Promise<ModuleOutputDTO> {
+async function waitForImportedModule(
+  ops: ImportOps,
+  moduleName: string,
+  existingModuleId?: string,
+): Promise<ModuleOutputDTO> {
+  if (!existingModuleId) {
+    const found = await ops.findExactModuleByName(moduleName);
+    if (!found) {
+      throw new Error(`Module '${moduleName}' not found after import`);
+    }
+    return found;
+  }
+
+  const deadline = Date.now() + REPLACEMENT_MODULE_POLL_TIMEOUT_MS;
+  let lastSeen: ModuleOutputDTO | null = null;
+
+  while (Date.now() <= deadline) {
+    lastSeen = await ops.findExactModuleByName(moduleName);
+    if (lastSeen && lastSeen.id !== existingModuleId) {
+      return lastSeen;
+    }
+
+    if (Date.now() + REPLACEMENT_MODULE_POLL_DELAY_MS > deadline) {
+      break;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, REPLACEMENT_MODULE_POLL_DELAY_MS));
+  }
+
+  if (!lastSeen) {
+    throw new Error(`Module '${moduleName}' not found after import`);
+  }
+
+  throw new Error(
+    `Module '${moduleName}' search still resolves to the deleted module id '${existingModuleId}' after import; refusing to continue until the replacement record is discoverable.`,
+  );
+}
+
+async function importModuleExportWithOps(ops: ImportOps, moduleExport: TakaroModuleExport, plan: ReplacementPlan = {}): Promise<ModuleOutputDTO> {
   const existingModule = await ops.findExactModuleByName(moduleExport.name);
+  const existingModuleId = plan.existingModuleId ?? existingModule?.id;
   let backupModuleExport: TakaroModuleExport | null = null;
   let replacementSnapshot: ReplacementSnapshot = {
     installations: [],
@@ -689,7 +748,7 @@ async function importModuleExportWithOps(ops: ImportOps, moduleExport: TakaroMod
 
   if (existingModule) {
     console.error(`Module '${moduleExport.name}' already exists (id: ${existingModule.id}), exporting backup before replacement...`);
-    replacementSnapshot = await snapshotReplacementState(ops, existingModule);
+    replacementSnapshot = await snapshotReplacementState(ops, existingModule, plan.variableConfig);
     backupModuleExport = await ops.exportModule(existingModule.id);
     await ops.removeModule(existingModule.id);
     console.error(`Removed existing module ${existingModule.id}`);
@@ -697,10 +756,7 @@ async function importModuleExportWithOps(ops: ImportOps, moduleExport: TakaroMod
 
   try {
     await ops.importModule(moduleExport);
-    const found = await ops.findExactModuleByName(moduleExport.name);
-    if (!found) {
-      throw new Error(`Module '${moduleExport.name}' not found after import`);
-    }
+    const found = await waitForImportedModule(ops, moduleExport.name, existingModuleId);
 
     await applyReplacementSnapshot(ops, found, replacementSnapshot);
     console.error(`Successfully imported module '${found.name}' (id: ${found.id})`);
@@ -738,7 +794,9 @@ export async function importModuleExport(
   options: ImportModuleExportOptions = {},
 ): Promise<ModuleOutputDTO> {
   const request = options.request ?? (async <T>(operation: () => Promise<T>) => operation());
-  return await importModuleExportWithOps(createClientImportOps(client, request), moduleExport);
+  return await importModuleExportWithOps(createClientImportOps(client, request), moduleExport, {
+    variableConfig: moduleExport.xPiReplacementState,
+  });
 }
 
 async function takaroTokenRequest<T>(
@@ -1077,7 +1135,17 @@ export async function importModuleExportWithToken(auth: TakaroAuthConfig, module
     token: auth.token,
   };
 
-  return await importModuleExportWithOps(createTokenImportOps(tokenAuth), moduleExport);
+  const ops = createTokenImportOps(tokenAuth);
+  const existingModule = await ops.findExactModuleByName(moduleExport.name);
+  if (existingModule) {
+    throw new Error(
+      `Token-only replacement import for '${moduleExport.name}' is disabled because it deletes the existing module before the replacement is fully restored. Provide TAKARO_USERNAME and TAKARO_PASSWORD so module-import can recover safely if auth expires mid-flight.`,
+    );
+  }
+
+  return await importModuleExportWithOps(ops, moduleExport, {
+    variableConfig: moduleExport.xPiReplacementState,
+  });
 }
 
 export async function importModuleExportFile(jsonFile: string): Promise<ModuleOutputDTO> {

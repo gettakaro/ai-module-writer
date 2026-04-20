@@ -60,12 +60,17 @@ export interface ModuleVersion {
 }
 
 /** The format for importing/exporting a module to/from Takaro */
+export interface ReplacementStateConfig {
+  durableVariableKeys?: string[];
+}
+
 export interface TakaroModuleExport {
   takaroVersion: string;
   name: string;
   author: string;
   supportedGames: string[];
   versions: ModuleVersion[];
+  xPiReplacementState?: ReplacementStateConfig;
 }
 
 /** New consolidated module.json format — all metadata in one file */
@@ -107,4 +112,5 @@ export interface LocalModuleJson {
   hooks?: Record<string, LocalHookDef>;
   cronJobs?: Record<string, LocalCronJobDef>;
   functions?: Record<string, LocalFunctionDef>;
+  xPiReplacementState?: ReplacementStateConfig;
 }
