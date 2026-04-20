@@ -1,5 +1,5 @@
 import { data } from '@takaro/helpers';
-import { compactRules } from './utils-helpers.js';
+import { compactRules, safePrivateMessage } from './utils-helpers.js';
 
 async function main() {
   const { pog, module: mod } = data;
@@ -7,8 +7,7 @@ async function main() {
 
   if (rules.length === 0) {
     const message = 'This server has not configured any rules yet.';
-    console.log(message);
-    await pog.pm(message);
+    await safePrivateMessage(pog, message);
     return;
   }
 
@@ -18,8 +17,7 @@ async function main() {
   }
 
   const message = lines.join('\n');
-  console.log(message);
-  await pog.pm(message);
+  await safePrivateMessage(pog, message);
 }
 
 await main();

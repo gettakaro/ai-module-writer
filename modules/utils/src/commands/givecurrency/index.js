@@ -29,6 +29,10 @@ async function main() {
     throw new TakaroUserError('Usage: givecurrency <player> <amount> — Amount must be a positive whole number.');
   }
 
+  if (target.online === false || !target.gameId || (target.gameServerId && target.gameServerId !== gameServerId)) {
+    throw new TakaroUserError('That player is not currently online.');
+  }
+
   if (!await isEconomyEnabled(gameServerId)) {
     throw new TakaroUserError('Currency is not available on this game server. Ask an admin to enable economy support before using givecurrency.');
   }
@@ -37,10 +41,6 @@ async function main() {
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),
   ]);
-
-  if (target.online === false || !target.gameId || (target.gameServerId && target.gameServerId !== gameServerId)) {
-    throw new TakaroUserError('That player is not currently online.');
-  }
 
   try {
     if (await consumeUtilsDebugFlag(gameServerId, mod.moduleId, UTILS_DEBUG_FORCE_GIVECURRENCY_API_FAILURE_KEY)) {

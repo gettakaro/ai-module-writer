@@ -45,7 +45,11 @@ interface RoleBindingBackup {
 }
 
 function shouldPreserveModuleVariable(key: string): boolean {
-  return !key.startsWith('__debug_');
+  if (key.startsWith('__debug_')) {
+    return false;
+  }
+
+  return !/(^|[_-])(lock|mutex|semaphore)([_-]|$)/i.test(key);
 }
 
 async function collectAllPages<T>(
@@ -262,6 +266,46 @@ async function restoreModuleState(
   return restoredModule;
 }
 
+async function removeModuleCompletely(
+  client: Client,
+  moduleId: string,
+  installations?: ModuleInstallationBackup[],
+): Promise<void> {
+  const knownInstallations = installations ?? await collectModuleInstallations(client, moduleId);
+
+  for (const installation of knownInstallations) {
+    try {
+      await uninstallModule(client, moduleId, installation.gameServerId);
+    } catch (err) {
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      if (status === 404) {
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  const maxAttempts = 5;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await client.module.moduleControllerRemove(moduleId);
+      return;
+    } catch (err) {
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      if (status === 404) {
+        return;
+      }
+
+      if (status === 400 && attempt < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 500));
+        continue;
+      }
+
+      throw err;
+    }
+  }
+}
+
 /**
  * Push a local module to Takaro via the import API.
  * If a module with the same name already exists, preserve its installations/state across replacement
@@ -316,7 +360,7 @@ export async function pushModule(
       : [];
 
     if (existingModule) {
-      await moduleApi.moduleControllerRemove(existingModule.id);
+      await removeModuleCompletely(client, existingModule.id, existingInstallations);
     }
 
     let importedModule: ModuleOutputDTO | undefined;
@@ -336,7 +380,7 @@ export async function pushModule(
 
       if (importedModule) {
         try {
-          await moduleApi.moduleControllerRemove(importedModule.id);
+          await removeModuleCompletely(client, importedModule.id);
         } catch (cleanupErr) {
           throw new Error(
             `Import of '${name}' failed after creating replacement module '${importedModule.id}', and cleanup of that replacement failed before rollback. Import error: ${err}. Cleanup error: ${cleanupErr}`,
@@ -402,7 +446,7 @@ export async function deleteModule(client: Client, moduleId: string | undefined)
     return;
   }
   try {
-    await client.module.moduleControllerRemove(moduleId);
+    await removeModuleCompletely(client, moduleId);
   } catch (err) {
     const status = (err as { response?: { status?: number } })?.response?.status;
     if (status === 404) {
@@ -458,7 +502,8 @@ export async function cleanupTestModules(client: Client): Promise<void> {
     const mods = result.data.data.filter((m) => m.name.startsWith('test-'));
     if (mods.length === 0) break;
     for (const mod of mods) {
-      await client.module.moduleControllerRemove(mod.id);
+      const installations = await collectModuleInstallations(client, mod.id);
+      await removeModuleCompletely(client, mod.id, installations);
     }
   }
 }

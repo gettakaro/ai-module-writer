@@ -1,5 +1,5 @@
 import { data } from '@takaro/helpers';
-import { fetchOnlinePlayers, getGameServerName, trimOrEmpty } from './utils-helpers.js';
+import { fetchOnlinePlayers, getGameServerName, safePrivateMessage, trimOrEmpty } from './utils-helpers.js';
 
 async function main() {
   const { gameServerId, pog, module: mod } = data;
@@ -19,8 +19,7 @@ async function main() {
   }
 
   const message = lines.join('\n');
-  console.log(message);
-  await pog.pm(message);
+  await safePrivateMessage(pog, message);
 }
 
 await main();

@@ -222,7 +222,7 @@ export async function fetchOnlinePlayers(gameServerId) {
       data: result.data.data,
       total: result.data.meta?.total,
     };
-  }, { limit: 5 });
+  }, { limit: 5, maxIterations: 1000 });
 
   const uniquePlayers = collapsePlayersById(players);
   const namedPlayers = await Promise.all(uniquePlayers.map(async (player) => ({

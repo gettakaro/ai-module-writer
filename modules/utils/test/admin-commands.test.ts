@@ -276,6 +276,26 @@ describe('utils: admin commands', () => {
     assert.ok(!res.logs.some((msg) => msg.includes(`Gave 5 currency to ${otherServerPlayerName}.`)), JSON.stringify(res.logs));
   });
 
+  it('prioritizes the offline-target error over the economy-disabled error for /givecurrency', async () => {
+    const otherServerPlayerName = await getPlayerName(otherCtx.players[0].playerId);
+
+    await client.settings.settingsControllerSet('economyEnabled', {
+      gameServerId: ctx.gameServer.id,
+      value: 'false',
+    });
+
+    const res = await trigger(ctx.players[0].playerId, `${prefix}givecurrency ${otherServerPlayerName} 5`);
+
+    assert.equal(res.success, false, 'Expected /givecurrency to fail when the target is on another server');
+    assert.ok(res.logs.some((msg) => msg.includes('not currently online')), JSON.stringify(res.logs));
+    assert.ok(!res.logs.some((msg) => msg.includes('Currency is not available on this game server.')), JSON.stringify(res.logs));
+
+    await client.settings.settingsControllerSet('economyEnabled', {
+      gameServerId: ctx.gameServer.id,
+      value: 'true',
+    });
+  });
+
   it('allows self /givecurrency', async () => {
     const self = ctx.players[0];
     const selfName = await getPlayerName(self.playerId);
@@ -829,7 +849,7 @@ describe('test helper: pushModule successful replacement migration', () => {
     assert.ok(logs.some((msg) => msg.includes('Kicked')), JSON.stringify(logs));
   });
 
-  it('drops transient debug flags but preserves non-debug lock variables during replacement', async () => {
+  it('drops transient debug flags and live lock variables during replacement', async () => {
     const original = await pushModule(client, MODULE_DIR);
     moduleId = original.id;
 
@@ -863,11 +883,9 @@ describe('test helper: pushModule successful replacement migration', () => {
 
     assert.equal(
       transientVariables.data.data.length,
-      1,
-      `Expected only the debug flag to be dropped during replacement, got: ${JSON.stringify(transientVariables.data.data)}`,
+      0,
+      `Expected debug flags and live locks to be dropped during replacement, got: ${JSON.stringify(transientVariables.data.data)}`,
     );
-    assert.equal(transientVariables.data.data[0].key, 'fund_state_lock');
-    assert.equal(transientVariables.data.data[0].value, JSON.stringify({ owner: 'stale-test-lock' }));
   });
 
   it('keeps role rebinding working when the replacement removes a previously assigned permission', async () => {

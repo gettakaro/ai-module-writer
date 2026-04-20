@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
+import os from 'node:os';
+import fs from 'node:fs/promises';
 
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..');
@@ -27,6 +29,34 @@ async function runBootstrap(extraEnv: NodeJS.ProcessEnv = {}, timeout = 14 * 60 
   });
 }
 
+async function createMockBootstrapBin() {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ci-bootstrap-mock-bin-'));
+  const realNode = process.execPath;
+
+  await fs.writeFile(path.join(dir, 'docker'), '#!/usr/bin/env bash\nexit 0\n');
+  await fs.writeFile(path.join(dir, 'curl'), '#!/usr/bin/env bash\nexit 0\n');
+  await fs.writeFile(path.join(dir, 'sleep'), '#!/usr/bin/env bash\nexit 0\n');
+  await fs.writeFile(path.join(dir, 'node'), `#!/usr/bin/env bash
+set -euo pipefail
+REAL_NODE=${JSON.stringify(realNode)}
+for arg in "$@"; do
+  if [[ "$arg" == *"ci-create-domain.ts" ]]; then
+    cat <<'EOF'
+TAKARO_DOMAIN_ID=test-domain-id
+TAKARO_USERNAME=test-user@example.com
+TAKARO_PASSWORD=test-password
+TAKARO_REGISTRATION_TOKEN=test-registration-token
+EOF
+    exit 0
+  fi
+done
+exec "$REAL_NODE" "$@"
+`);
+
+  await Promise.all(['docker', 'curl', 'sleep', 'node'].map((file) => fs.chmod(path.join(dir, file), 0o755)));
+  return dir;
+}
+
 describe('ci bootstrap smoke', () => {
   it('fails fast with a clear error when AWS_ECR_REGISTRY is not set', async () => {
     await assert.rejects(
@@ -40,7 +70,7 @@ describe('ci bootstrap smoke', () => {
   });
 
   it('keeps the CI compose file wired to the bootstrap environment variables', async () => {
-    const compose = await import('node:fs/promises').then((fs) => fs.readFile(COMPOSE_FILE, 'utf8'));
+    const compose = await fs.readFile(COMPOSE_FILE, 'utf8');
     assert.match(compose, /\$\{AWS_ECR_REGISTRY\}\/takaro-app-api:/);
     assert.match(compose, /\$\{AWS_ECR_REGISTRY\}\/takaro-app-connector:/);
     assert.match(compose, /\$\{AWS_ECR_REGISTRY\}\/takaro-app-mock-gameserver:/);
@@ -48,9 +78,61 @@ describe('ci bootstrap smoke', () => {
     assert.match(compose, /ADMIN_CLIENT_SECRET: \$\{ADMIN_CLIENT_SECRET\}/);
   });
 
-  it('boots the CI stack far enough to export Takaro credentials for both GitHub Actions and sourced local-shell usage', { timeout: 30 * 60 * 1000 }, async (t) => {
+  it('exercises the bootstrap success path outside CI with mocked infrastructure and exports usable credentials', async () => {
+    const envFile = path.join(REPO_ROOT, `.tmp-ci-bootstrap-mocked-${Date.now()}.env`);
+    const mockBin = await createMockBootstrapBin();
+
+    try {
+      const bootstrapEnv = {
+        ...process.env,
+        PATH: `${mockBin}:${process.env.PATH}`,
+        AWS_ECR_REGISTRY: process.env.AWS_ECR_REGISTRY || 'mock.registry.local',
+      };
+
+      const { stdout, stderr } = await execFileAsync('bash', [SCRIPT_PATH], {
+        cwd: REPO_ROOT,
+        env: {
+          ...bootstrapEnv,
+          GITHUB_ENV: envFile,
+        },
+        timeout: 60_000,
+      });
+      const exported = await fs.readFile(envFile, 'utf8');
+      assert.match(stdout + stderr, /Bootstrap complete\. Takaro stack is ready\./);
+      assert.match(exported, /^TAKARO_HOST=http:\/\/localhost:13000$/m);
+      assert.match(exported, /^TAKARO_WS_URL=ws:\/\/localhost:3004$/m);
+      assert.match(exported, /^TAKARO_DOMAIN_ID=test-domain-id$/m);
+      assert.match(exported, /^TAKARO_USERNAME=test-user@example.com$/m);
+      assert.match(exported, /^TAKARO_PASSWORD=test-password$/m);
+      assert.match(exported, /^TAKARO_REGISTRATION_TOKEN=test-registration-token$/m);
+
+      const shellEnvJson = execFileSync(
+        'bash',
+        ['-lc', `source ${JSON.stringify(SCRIPT_PATH)} >/tmp/ci-bootstrap-smoke.log && node -e "console.log(JSON.stringify({TAKARO_HOST:process.env.TAKARO_HOST,TAKARO_WS_URL:process.env.TAKARO_WS_URL,TAKARO_DOMAIN_ID:process.env.TAKARO_DOMAIN_ID,TAKARO_USERNAME:process.env.TAKARO_USERNAME,TAKARO_PASSWORD:process.env.TAKARO_PASSWORD,TAKARO_REGISTRATION_TOKEN:process.env.TAKARO_REGISTRATION_TOKEN}))"`],
+        {
+          cwd: REPO_ROOT,
+          env: bootstrapEnv,
+          timeout: 60_000,
+          encoding: 'utf8',
+        },
+      );
+
+      const exportedShellEnv = JSON.parse(shellEnvJson.trim()) as Record<string, string>;
+      assert.equal(exportedShellEnv.TAKARO_HOST, 'http://localhost:13000');
+      assert.equal(exportedShellEnv.TAKARO_WS_URL, 'ws://localhost:3004');
+      assert.equal(exportedShellEnv.TAKARO_DOMAIN_ID, 'test-domain-id');
+      assert.equal(exportedShellEnv.TAKARO_USERNAME, 'test-user@example.com');
+      assert.equal(exportedShellEnv.TAKARO_PASSWORD, 'test-password');
+      assert.equal(exportedShellEnv.TAKARO_REGISTRATION_TOKEN, 'test-registration-token');
+    } finally {
+      await fs.rm(envFile, { force: true });
+      await fs.rm(mockBin, { recursive: true, force: true });
+    }
+  });
+
+  it('boots the CI stack far enough to export Takaro credentials for both GitHub Actions and sourced local-shell usage when CI registry access is available', { timeout: 30 * 60 * 1000 }, async (t) => {
     if (!process.env.AWS_ECR_REGISTRY) {
-      t.skip('AWS_ECR_REGISTRY is not set; skipping CI bootstrap smoke test outside CI.');
+      t.skip('AWS_ECR_REGISTRY is not set; live CI bootstrap coverage runs in CI.');
       return;
     }
 
@@ -59,7 +141,7 @@ describe('ci bootstrap smoke', () => {
       await composeDown();
 
       const { stdout, stderr } = await runBootstrap({ GITHUB_ENV: envFile });
-      const exported = await import('node:fs/promises').then((fs) => fs.readFile(envFile, 'utf8'));
+      const exported = await fs.readFile(envFile, 'utf8');
       assert.match(stdout + stderr, /Bootstrap complete\. Takaro stack is ready\./);
       assert.match(exported, /^TAKARO_HOST=http:\/\/localhost:13000$/m);
       assert.match(exported, /^TAKARO_WS_URL=ws:\/\/localhost:3004$/m);
@@ -89,7 +171,7 @@ describe('ci bootstrap smoke', () => {
       assert.match(exportedShellEnv.TAKARO_PASSWORD, /.+/);
       assert.match(exportedShellEnv.TAKARO_REGISTRATION_TOKEN, /.+/);
     } finally {
-      await import('node:fs/promises').then((fs) => fs.rm(envFile, { force: true }));
+      await fs.rm(envFile, { force: true });
       await composeDown();
     }
   });
