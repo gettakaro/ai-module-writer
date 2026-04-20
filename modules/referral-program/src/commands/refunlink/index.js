@@ -12,6 +12,7 @@ import {
   getCommandPrefix,
   withReferralLocks,
   notifyReferralRollback,
+  deleteAdminRepairMarker,
 } from './referral-helpers.js';
 
 async function main() {
@@ -76,6 +77,9 @@ async function main() {
 
           await adjustReferrerStatsForLink(gameServerId, moduleId, link.referrerId, link, -1);
           await removePendingReferee(gameServerId, moduleId, referee.id);
+          if (link.adminLinked && link.referrerId) {
+            await deleteAdminRepairMarker(gameServerId, moduleId, referee.id, link.referrerId);
+          }
           await deleteReferralLink(gameServerId, moduleId, referee.id);
 
           console.log(

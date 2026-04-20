@@ -21,14 +21,16 @@ async function main() {
 
   if (voteState.status === 'passed') {
     const elapsedSincePassed = (Date.now() - new Date(voteState.passedAt).getTime()) / 1000;
-    const remainingDelay = Math.ceil(getEffectiveRestartDelaySeconds(config) - elapsedSincePassed);
+    const restartDelaySeconds = getEffectiveRestartDelaySeconds(config);
+    const remainingDelay = Math.ceil(restartDelaySeconds - elapsedSincePassed);
 
-    if (remainingDelay <= 0) {
+    if (restartDelaySeconds <= 0) {
       console.log('vote-status: passed, restart already initiated');
       await pog.pm('[Vote Restart] Server restart is imminent or has already been initiated. If the server hasn\'t restarted, please contact an admin.');
     } else {
-      console.log(`vote-status: passed, restarting in ${remainingDelay}s`);
-      await pog.pm(`[Vote Restart] Vote passed! Server restarting in ${remainingDelay}s.`);
+      const displayedDelay = Math.max(1, remainingDelay);
+      console.log(`vote-status: passed, restarting in ${displayedDelay}s`);
+      await pog.pm(`[Vote Restart] Vote passed! Server restarting in ${displayedDelay}s.`);
     }
     return;
   }

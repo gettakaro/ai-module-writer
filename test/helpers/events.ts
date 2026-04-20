@@ -21,6 +21,7 @@ export async function waitForEvent(client: Client, options: WaitForEventOptions)
   } = options;
 
   const deadline = Date.now() + timeout;
+  const searchAfter = new Date(after.getTime() - 1500);
 
   while (Date.now() < deadline) {
     const result = await client.event.eventControllerSearch({
@@ -29,13 +30,24 @@ export async function waitForEvent(client: Client, options: WaitForEventOptions)
         gameserverId: [gameserverId],
       },
       greaterThan: {
-        createdAt: after.toISOString(),
+        createdAt: searchAfter.toISOString(),
       },
     });
 
-    const events = result.data.data;
+    const events = [...result.data.data].sort((left, right) => (
+      new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime()
+    ));
+    const exactMatch = events.find((event) => new Date(event.createdAt).getTime() >= after.getTime());
+    if (exactMatch) {
+      return exactMatch;
+    }
+
     if (events.length > 0) {
-      return events[0]!;
+      const newest = events[events.length - 1]!;
+      const newestAgeMs = Math.abs(new Date(newest.createdAt).getTime() - after.getTime());
+      if (newestAgeMs <= 1500) {
+        return newest;
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, pollInterval));

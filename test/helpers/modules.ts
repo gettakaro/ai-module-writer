@@ -36,6 +36,31 @@ async function waitForModuleNameToClear(client: Client, name: string, timeoutMs 
   }
 }
 
+function isConflictError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') {
+    return /409|conflict|already exists/i.test(String(err));
+  }
+
+  const maybeError = err as {
+    message?: string;
+    status?: number;
+    statusCode?: number;
+    response?: { status?: number; data?: unknown };
+    body?: unknown;
+  };
+
+  if (maybeError.status === 409 || maybeError.statusCode === 409 || maybeError.response?.status === 409) {
+    return true;
+  }
+
+  const bodyText = [maybeError.body, maybeError.response?.data]
+    .filter((value) => value !== undefined)
+    .map((value) => (typeof value === 'string' ? value : JSON.stringify(value)))
+    .join(' ');
+
+  return /409|conflict|already exists/i.test(`${maybeError.message ?? ''} ${bodyText}`);
+}
+
 export async function pushModule(
   client: Client,
   moduleDir: string,
@@ -84,8 +109,7 @@ export async function pushModule(
         break;
       } catch (err) {
         lastImportErr = err;
-        const message = err instanceof Error ? err.message : String(err);
-        if (!/409|conflict|already exists/i.test(message) || attempt === 3) {
+        if (!isConflictError(err) || attempt === 3) {
           if (existingModule) {
             throw new Error(
               `Import of '${name}' failed. Previous module version was deleted before this import failure. Cause: ${err}`,

@@ -30,8 +30,8 @@ async function main() {
 
   const refereeName = String(args.referee || '').trim();
   const referrerName = String(args.referrer || '').trim();
+  const prefix = await getCommandPrefix(gameServerId);
   if (!refereeName || !referrerName) {
-    const prefix = await getCommandPrefix(gameServerId);
     throw new TakaroUserError(`Usage: ${prefix}reflink <referee> <referrer>`);
   }
 
@@ -42,6 +42,9 @@ async function main() {
 
   if (!referee) throw new TakaroUserError(`Referee "${refereeName}" was not found on this server.`);
   if (!referrer) throw new TakaroUserError(`Referrer "${referrerName}" was not found on this server.`);
+  if (referee.id === referrer.id) {
+    throw new TakaroUserError('Admins cannot create self-referrals. Use a different referrer.');
+  }
 
   const config = getNormalizedConfig(mod);
 
@@ -52,16 +55,22 @@ async function main() {
     async () => {
       const existingLink = await getReferralLink(gameServerId, moduleId, referee.id);
       if (existingLink) {
-        throw new TakaroUserError(`Player "${referee.name}" already has a referral link. Use refunlink first if you need to replace it.`);
+        throw new TakaroUserError(`Player "${referee.name}" already has a referral link. Use ${prefix}refunlink first if you need to replace it.`);
       }
 
       const adminRepairMarker = await getAdminRepairMarker(gameServerId, moduleId, referee.id, referrer.id);
       if (adminRepairMarker) {
-        throw new TakaroUserError(`That referee/referrer pair has already been paid through /reflink before. Use manual compensation instead of replaying admin repair rewards.`);
+        throw new TakaroUserError(`That referee/referrer pair has already been paid through ${prefix}reflink before. Use manual compensation instead of replaying admin repair rewards.`);
       }
 
       const referrerStatsRaw = await getReferralStats(gameServerId, moduleId, referrer.id);
       const referrerStats = resetDailyCounterIfNeeded(referrerStatsRaw);
+      if (referrerStats.referralsToday >= config.maxReferralsPerDay) {
+        throw new TakaroUserError(`That referrer has reached their daily referral limit. Wait until the UTC reset or use ${prefix}refunlink to repair an existing link first.`);
+      }
+      if (referrerStats.referralsTotal >= config.maxReferralsLifetime) {
+        throw new TakaroUserError('That referrer has reached their lifetime referral limit. Remove an old referral before creating another admin repair.');
+      }
 
       const baseLink = {
         referrerId: referrer.id,

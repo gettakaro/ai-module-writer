@@ -345,6 +345,10 @@ export async function setAdminRepairMarker(gameServerId, moduleId, refereeId, re
   await writeVariable(gameServerId, moduleId, getReferralAdminRepairKey(refereeId, referrerId), marker, refereeId);
 }
 
+export async function deleteAdminRepairMarker(gameServerId, moduleId, refereeId, referrerId) {
+  await deleteVariable(gameServerId, moduleId, getReferralAdminRepairKey(refereeId, referrerId), refereeId);
+}
+
 export async function setReferralStats(gameServerId, moduleId, playerId, stats) {
   await writeVariable(gameServerId, moduleId, getReferralStatsKey(playerId), { ...defaultReferralStats(), ...stats }, playerId);
   await addToStringIndex(gameServerId, moduleId, REFERRAL_STATS_INDEX_KEY, playerId);

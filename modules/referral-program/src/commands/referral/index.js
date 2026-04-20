@@ -82,7 +82,7 @@ async function main() {
       const referrerStatsRaw = await getReferralStats(gameServerId, moduleId, lookup.playerId);
       const referrerStats = resetDailyCounterIfNeeded(referrerStatsRaw);
       if (referrerStats.referralsToday >= config.maxReferralsPerDay) {
-        throw new TakaroUserError('That referrer has reached their daily referral limit. Please try again tomorrow or use a different code.');
+        throw new TakaroUserError('That referrer has reached their daily referral limit. Please try again after the next UTC midnight reset or use a different code.');
       }
       if (referrerStats.referralsTotal >= config.maxReferralsLifetime) {
         throw new TakaroUserError('That referrer has reached their lifetime referral limit. Please contact an admin if this needs an override.');

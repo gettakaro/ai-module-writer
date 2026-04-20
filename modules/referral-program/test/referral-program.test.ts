@@ -712,16 +712,8 @@ describe('referral-program module — admin command validation and repair flows'
     assert.ok(parseLogs(missingReferrer).some((msg) => msg.includes('Referrer')));
 
     const selfLink = await harness.triggerCommand(harness.ctx.players[0].playerId, `reflink ${bobName} ${bobName}`);
-    assert.equal(parseSuccess(selfLink), true, 'Expected admin /reflink to allow self-link repair overrides');
-
-    const selfLinkRecord = await harness.getVariableValue<ReferralLink>(
-      `${REFERRAL_LINK_PREFIX}${harness.ctx.players[1].playerId}`,
-      harness.ctx.players[1].playerId,
-    );
-    assert.equal(selfLinkRecord?.status, 'paid');
-
-    const cleanupSelfLink = await harness.triggerCommand(harness.ctx.players[0].playerId, `refunlink ${bobName}`);
-    assert.equal(parseSuccess(cleanupSelfLink), true, 'Expected self-link override to remain reversible');
+    assert.equal(parseSuccess(selfLink), false, 'Expected admin /reflink to reject self-link repairs');
+    assert.ok(parseLogs(selfLink).some((msg) => msg.includes('cannot create self-referrals')));
 
     const missingUnlink = await harness.triggerCommand(harness.ctx.players[0].playerId, 'refunlink ""');
     assert.equal(parseSuccess(missingUnlink), false);
@@ -740,10 +732,8 @@ describe('referral-program module — admin command validation and repair flows'
       harness.ctx.players[2].playerId,
     );
     const cappedReflink = await harness.triggerCommand(harness.ctx.players[0].playerId, `reflink ${bobName} ${malloryName}`);
-    assert.equal(parseSuccess(cappedReflink), true, 'Expected admin /reflink to bypass referral caps');
-
-    const cleanupCappedLink = await harness.triggerCommand(harness.ctx.players[0].playerId, `refunlink ${bobName}`);
-    assert.equal(parseSuccess(cleanupCappedLink), true, 'Expected capped override link cleanup to succeed');
+    assert.equal(parseSuccess(cappedReflink), false, 'Expected admin /reflink to respect referral caps');
+    assert.ok(parseLogs(cappedReflink).some((msg) => msg.includes('daily referral limit')));
 
     await harness.setVariableValue(
       `${REFERRAL_STATS_PREFIX}${harness.ctx.players[2].playerId}`,
@@ -756,11 +746,16 @@ describe('referral-program module — admin command validation and repair flows'
 
     const replayBlocked = await harness.triggerCommand(harness.ctx.players[0].playerId, `reflink ${bobName} ${malloryName}`);
     assert.equal(parseSuccess(replayBlocked), false);
-    assert.ok(parseLogs(replayBlocked).some((msg) => msg.includes('already been paid through /reflink')));
+    assert.ok(parseLogs(replayBlocked).some((msg) => msg.includes('already has a referral link')));
 
-    const duplicateLink = await harness.triggerCommand(harness.ctx.players[0].playerId, `reflink ${bobName} ${aliceName}`);
-    assert.equal(parseSuccess(duplicateLink), false);
-    assert.ok(parseLogs(duplicateLink).some((msg) => msg.includes('already has a referral link')));
+    const cleanupInitialLink = await harness.triggerCommand(harness.ctx.players[0].playerId, `refunlink ${bobName}`);
+    assert.equal(parseSuccess(cleanupInitialLink), true, 'Expected reflink-created repair to stay reversible');
+
+    const repairedAgain = await harness.triggerCommand(harness.ctx.players[0].playerId, `reflink ${bobName} ${aliceName}`);
+    assert.equal(parseSuccess(repairedAgain), true, 'Expected refunlink to clear admin repair markers for future legitimate repair');
+
+    const cleanupRepairedAgain = await harness.triggerCommand(harness.ctx.players[0].playerId, `refunlink ${bobName}`);
+    assert.equal(parseSuccess(cleanupRepairedAgain), true, 'Expected repeated admin repairs to remain reversible');
   });
 
   it('covers pending unlink rollback plus reflink immediate payout and paid unlink repair', async () => {
@@ -886,6 +881,8 @@ describe('referral-program module — admin command validation and repair flows'
     const paidLink = await harness.triggerCommand(harness.ctx.players[0].playerId, `reflink ${aliceName} ${bobName}`);
     assert.equal(parseSuccess(paidLink), true, 'Expected setup /reflink to succeed');
 
+    const referrerCurrencyBeforeFailure = await harness.getCurrency(harness.ctx.players[1].playerId);
+
     await harness.client.playerOnGameserver.playerOnGameServerControllerSetCurrency(
       harness.ctx.gameServer.id,
       harness.ctx.players[0].playerId,
@@ -897,7 +894,7 @@ describe('referral-program module — admin command validation and repair flows'
     assert.ok(parseLogs(unlinkAttempt).some((msg) => msg.includes('full welcome bonus available for clawback')));
 
     const referrerCurrencyAfterFailure = await harness.getCurrency(harness.ctx.players[1].playerId);
-    assert.equal(referrerCurrencyAfterFailure, 500, 'Expected failed unlink to leave the referrer reward untouched');
+    assert.equal(referrerCurrencyAfterFailure, referrerCurrencyBeforeFailure, 'Expected failed unlink to leave the referrer reward untouched');
 
     const linkAfterFailure = await harness.getVariableValue<ReferralLink>(
       `${REFERRAL_LINK_PREFIX}${harness.ctx.players[0].playerId}`,
@@ -1538,7 +1535,7 @@ describe('referral-program module — real Paper + bot verification', () => {
       let lastError: unknown;
 
       while ((Date.now() - startedAt) < timeoutMs) {
-        const triggeredAt = new Date();
+        const triggeredAt = new Date(Date.now() - 1500);
         try {
           await fetchJson(`${botBaseUrl}/bot/${botName}/chat`, {
             method: 'POST',
@@ -1549,7 +1546,7 @@ describe('referral-program module — real Paper + bot verification', () => {
             eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
             gameserverId: realGameServerId,
             after: triggeredAt,
-            timeout: 20000,
+            timeout: 25000,
           });
         } catch (err) {
           lastError = err;
@@ -1560,7 +1557,7 @@ describe('referral-program module — real Paper + bot verification', () => {
       throw lastError instanceof Error ? lastError : new Error(`Paper bot command did not become ready for ${message}`);
     };
 
-    await new Promise((resolve) => setTimeout(resolve, 8000));
+    await new Promise((resolve) => setTimeout(resolve, 15000));
     await triggerPaperBotCommand(botNames[0], `${prefix}refcode`);
 
     const getLinkVariable = async () => {

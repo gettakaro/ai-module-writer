@@ -297,3 +297,132 @@ describe('afk-kick: check-afk cronjob', () => {
     );
   });
 });
+
+async function fetchJson(url: string, init?: RequestInit) {
+  const response = await fetch(url, init);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} for ${url}: ${await response.text()}`);
+  }
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
+}
+
+async function waitForBotConnection(baseUrl: string, botName: string, timeoutMs = 30000) {
+  const startedAt = Date.now();
+  while ((Date.now() - startedAt) < timeoutMs) {
+    const status = await fetchJson(`${baseUrl}/status`) as Record<string, { connected?: boolean }>;
+    if (status?.[botName]?.connected) return;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error(`Bot ${botName} did not connect within ${timeoutMs}ms`);
+}
+
+async function waitForRealPlayer(client: Client, gameServerId: string, username: string, timeoutMs = 30000) {
+  const startedAt = Date.now();
+  while ((Date.now() - startedAt) < timeoutMs) {
+    const players = await client.player.playerControllerSearch({ search: { name: [username] }, limit: 10 });
+    const exact = players.data.data.find((player) => player.name === username);
+    if (exact) {
+      const pogs = await client.playerOnGameserver.playerOnGameServerControllerSearch({
+        filters: {
+          gameServerId: [gameServerId],
+          playerId: [exact.id],
+        },
+        limit: 1,
+      });
+      if (pogs.data.data[0]) return { playerId: exact.id, pogId: pogs.data.data[0].id };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error(`Player ${username} did not appear on gameserver ${gameServerId} within ${timeoutMs}ms`);
+}
+
+describe('afk-kick: real Paper immune verification', () => {
+  let client: Client;
+  let moduleId: string | undefined;
+  let versionId: string | undefined;
+  let gameServerId: string | undefined;
+  let roleId: string | undefined;
+  const botBaseUrl = `http://localhost:${process.env.BOT_PORT || '3101'}`;
+  const botName = `afk${Date.now().toString(36).slice(-4)}`;
+
+  after(async () => {
+    await fetch(`${botBaseUrl}/bots/${botName}`, { method: 'DELETE' }).catch(() => undefined);
+    if (client) await cleanupRole(client, roleId);
+    if (client && moduleId && gameServerId) {
+      await uninstallModule(client, moduleId, gameServerId).catch((err) => {
+        console.error('Paper cleanup: failed to uninstall afk-kick module:', err);
+      });
+    }
+    if (client && moduleId) {
+      await deleteModule(client, moduleId).catch((err) => {
+        console.error('Paper cleanup: failed to delete afk-kick module:', err);
+      });
+    }
+  });
+
+  it('verifies the immune-player early exit on the real Paper server with a bot', async () => {
+    await fetchJson(`${botBaseUrl}/status`);
+
+    client = await createClient();
+    const gsSearch = await client.gameserver.gameServerControllerSearch({ limit: 50, page: 0 });
+    const paper = gsSearch.data.data.find((gs) => gs.identityToken === 'minecraft' || gs.name === 'minecraft');
+    assert.ok(paper, 'Registered Paper game server not found');
+    gameServerId = paper.id;
+
+    const mod = await pushModule(client, MODULE_DIR);
+    moduleId = mod.id;
+    versionId = mod.latestVersion.id;
+    await installModule(client, versionId, gameServerId, {
+      userConfig: {
+        checksBeforeWarning: 2,
+        checksBeforeKick: 3,
+        warningMessage: 'You will be kicked for being AFK!',
+        kickMessage: 'Kicked for being AFK',
+        positionThreshold: 5,
+      },
+    });
+
+    const cronjobId = mod.latestVersion.cronJobs[0]!.id;
+
+    await fetchJson(`${botBaseUrl}/bots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: botName }),
+    });
+    await waitForBotConnection(botBaseUrl, botName);
+    const realPlayer = await waitForRealPlayer(client, gameServerId, `Bot_${botName}`);
+    roleId = await assignPermissions(client, realPlayer.playerId, gameServerId, ['IMMUNE_TO_AFK_KICK']);
+
+    await new Promise((resolve) => setTimeout(resolve, 10000));
+
+    for (let i = 0; i < 2; i += 1) {
+      const before = new Date(Date.now() - 1500);
+      await client.cronjob.cronJobControllerTrigger({
+        gameServerId,
+        cronjobId,
+        moduleId,
+      });
+      const event = await waitForEvent(client, {
+        eventName: EventSearchInputAllowedFiltersEventNameEnum.CronjobExecuted,
+        gameserverId: gameServerId,
+        after: before,
+        timeout: 30000,
+      });
+      const logs = (((event.meta as { result?: { logs?: Array<{ msg: string }> } }).result?.logs) ?? []).map((log) => log.msg.toLowerCase());
+      assert.ok(logs.some((msg) => msg.includes('immune')), `Expected immune log on Paper cron run ${i + 1}, got: ${JSON.stringify(logs)}`);
+    }
+
+    const tracking = await client.variable.variableControllerSearch({
+      filters: {
+        key: ['afk_tracking'],
+        gameServerId: [gameServerId],
+        moduleId: [moduleId],
+      },
+    });
+    assert.ok(tracking.data.data[0], 'Expected afk_tracking variable to be written on the real Paper server');
+    const parsed = JSON.parse(tracking.data.data[0].value) as Record<string, { idleCount?: number; warned?: boolean }>;
+    assert.equal(parsed[realPlayer.playerId]?.idleCount, 0, 'Expected immune Paper bot idleCount to stay reset');
+    assert.equal(parsed[realPlayer.playerId]?.warned, false, 'Expected immune Paper bot warned flag to stay reset');
+  });
+});
