@@ -2,11 +2,10 @@ import { data, takaro, TakaroUserError, checkPermission } from '@takaro/helpers'
 import {
   UTILS_DEBUG_FORCE_GIVECURRENCY_API_FAILURE_KEY,
   consumeUtilsDebugFlag,
-  getOnlinePogForPlayer,
+  getCommandTargetPlayer,
   getPlayerName,
   isEconomyEnabled,
   renderTemplate,
-  resolvePlayerTarget,
   safeBroadcast,
   safeDirectMessage,
   safePrivateMessage,
@@ -21,9 +20,9 @@ async function main() {
 
   const amount = args.amount;
 
-  const target = await resolvePlayerTarget(args.player);
+  const target = getCommandTargetPlayer(args.player);
   if (!target) {
-    throw new TakaroUserError('Please specify a valid player.');
+    throw new TakaroUserError('Please specify a valid player to receive currency.');
   }
 
   if (!Number.isInteger(amount) || amount <= 0) {
@@ -34,13 +33,12 @@ async function main() {
     throw new TakaroUserError('Currency is not available on this game server. Ask an admin to enable economy support before using givecurrency.');
   }
 
-  const [adminName, targetName, targetPog] = await Promise.all([
+  const [adminName, targetName] = await Promise.all([
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),
-    getOnlinePogForPlayer(gameServerId, target.playerId),
   ]);
 
-  if (!targetPog?.online) {
+  if (target.online === false || !target.gameId || (target.gameServerId && target.gameServerId !== gameServerId)) {
     throw new TakaroUserError('That player is not currently online.');
   }
 
@@ -49,7 +47,7 @@ async function main() {
       throw new Error('Debug-forced givecurrency API failure');
     }
 
-    await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(targetPog.gameServerId || gameServerId, target.playerId, {
+    await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, target.playerId, {
       currency: amount,
     });
   } catch (err) {
@@ -68,7 +66,7 @@ async function main() {
   await safePrivateMessage(pog, `Gave ${amount} currency to ${targetName}.`);
   await safeDirectMessage(
     gameServerId,
-    targetPog,
+    target,
     `${adminName} gave you ${amount} currency.`,
   );
 

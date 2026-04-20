@@ -260,7 +260,7 @@ describe('utils: admin commands', () => {
 
     assert.equal(res.success, false, 'Expected /givecurrency with an invalid player to fail');
     assert.ok(
-      res.logs.some((msg) => msg.includes('Please specify a valid player.'))
+      res.logs.some((msg) => msg.includes('Please specify a valid player to receive currency.'))
         || res.logs.some((msg) => msg.includes('No player found with the name or ID')),
       JSON.stringify(res.logs),
     );
@@ -317,7 +317,7 @@ describe('utils: admin commands', () => {
 
     assert.equal(res.success, false, 'Expected /ban with an invalid player to fail');
     assert.ok(
-      res.logs.some((msg) => msg.includes('Please specify a valid player.'))
+      res.logs.some((msg) => msg.includes('Please specify a valid player to ban.'))
         || res.logs.some((msg) => msg.includes('No player found with the name or ID')),
       JSON.stringify(res.logs),
     );
@@ -356,7 +356,7 @@ describe('utils: admin commands', () => {
     assert.ok(res.logs.some((msg) => msg.includes(`${targetName} was banned`) && msg.includes('10 minutes')), JSON.stringify(res.logs));
 
     assert.ok(
-      res.logs.some((msg) => msg.includes('utils:ban payload=') && msg.includes('"reason":"griefing"') && msg.includes('"until":"')),
+      res.logs.some((msg) => msg.includes('utils:ban payload=') && msg.includes('"reason":"griefing"') && msg.includes('"expiresAt":"')),
       JSON.stringify(res.logs),
     );
 
@@ -487,7 +487,7 @@ describe('utils: admin commands', () => {
     const res = await trigger(ctx.players[0].playerId, `${prefix}kick definitely-not-a-real-player-name`);
 
     assert.equal(res.success, false, 'Expected /kick with an invalid player to fail');
-    assert.ok(res.logs.some((msg) => msg.includes('Please specify a valid player.')), JSON.stringify(res.logs));
+    assert.ok(res.logs.some((msg) => msg.includes('not currently online')), JSON.stringify(res.logs));
   });
 
   it('rejects /kick when the player exists globally but is not online on this server', async () => {

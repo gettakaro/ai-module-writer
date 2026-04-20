@@ -3,12 +3,11 @@ import {
   UTILS_DEBUG_FORCE_BAN_API_FAILURE_KEY,
   consumeUtilsDebugFlag,
   extractReason,
-  getCommandArgumentTokens,
+  getCommandTargetPlayer,
   getPlayerName,
   normalizeReason,
   parseBanDurationToken,
   renderTemplate,
-  resolvePlayerTarget,
   safeBroadcast,
   safePrivateMessage,
 } from './utils-helpers.js';
@@ -20,9 +19,9 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const target = await resolvePlayerTarget(args.player);
+  const target = getCommandTargetPlayer(args.player);
   if (!target) {
-    throw new TakaroUserError('Please specify a valid player.');
+    throw new TakaroUserError('Please specify a valid player to ban.');
   }
 
   if (target.playerId === player.id) {
@@ -38,18 +37,13 @@ async function main() {
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),
   ]);
-  const [typedTargetToken] = getCommandArgumentTokens(chatMessage);
-  const reason = normalizeReason(extractReason(args.reason, chatMessage, [typedTargetToken, args.duration]), 'Banned by an admin.');
+  const reason = normalizeReason(extractReason(args.reason, chatMessage, [target.name, args.duration]), 'Banned by an admin.');
 
   const payload = {
-    gameServerId,
-    playerId: target.playerId,
     reason,
-    isGlobal: false,
-    takaroManaged: true,
   };
   if (!parsedDuration.isPermanent) {
-    payload.until = parsedDuration.expiresAt;
+    payload.expiresAt = parsedDuration.expiresAt;
   }
 
   console.log(`utils:ban payload=${JSON.stringify(payload)}`);
@@ -60,7 +54,7 @@ async function main() {
       throw new Error('Debug-forced ban API failure');
     }
 
-    banResult = await takaro.player.banControllerCreate(payload);
+    banResult = await takaro.gameserver.gameServerControllerBanPlayer(gameServerId, target.playerId, payload);
   } catch (err) {
     console.error(`utils:ban failed for target=${target.playerId}: ${err}`);
     throw new TakaroUserError('The ban could not be created right now. Please try again in a moment. If it keeps failing, contact a server owner.');

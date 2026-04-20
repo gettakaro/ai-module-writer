@@ -26,15 +26,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const MODULE_DIR = path.resolve(__dirname, '..');
 
-// NOTE: Tests in this suite run sequentially and share fund state within the suite.
-// player[0] has COMMUNITY_FUND_CONTRIBUTE permission; player[1] does NOT.
-// The threshold is 100 and later tests intentionally build on earlier state:
-// 1. contribute 20 (fund=20)
-// 2. permission/validation failures keep fund at 20
-// 3. same-player concurrent 30+30 submissions serialize behind the lock, so one paid contribution lands (fund=50)
-// 4. the completion test reads the live total and contributes only what is needed to cross the threshold once
-// 5. the final multiplayer concurrency test resets state and proves two simultaneous valid deposits both persist
-
 describe('community-fund: fund-contribute command', () => {
   let client: Client;
   let ctx: MockServerContext;
@@ -145,10 +136,10 @@ describe('community-fund: fund-contribute command', () => {
     await Promise.all(vars.data.data.map((variable) => client.variable.variableControllerDelete(variable.id)));
   }
 
-  async function upsertLockValue(value: string) {
+  async function upsertModuleVariable(key: string, value: string) {
     const existing = await client.variable.variableControllerSearch({
       filters: {
-        key: ['fund_state_lock'],
+        key: [key],
         gameServerId: [ctx.gameServer.id],
         moduleId: [moduleId],
       },
@@ -162,12 +153,26 @@ describe('community-fund: fund-contribute command', () => {
     }
 
     const created = await client.variable.variableControllerCreate({
-      key: 'fund_state_lock',
+      key,
       value,
       gameServerId: ctx.gameServer.id,
       moduleId,
     });
     return created.data.data.id;
+  }
+
+  async function upsertLockValue(value: string) {
+    return upsertModuleVariable('fund_state_lock', value);
+  }
+
+  async function setFundState(total: number, cycle = 0) {
+    await resetFundState();
+    if (total > 0) {
+      await upsertModuleVariable('fund_total', JSON.stringify(total));
+    }
+    if (cycle > 0) {
+      await upsertModuleVariable('fund_cycle', JSON.stringify(cycle));
+    }
   }
 
   async function setCurrencyExact(playerId: string, desiredCurrency: number) {
@@ -191,13 +196,8 @@ describe('community-fund: fund-contribute command', () => {
 
   it('should contribute currency to the fund and PM the player', async () => {
     const player = ctx.players[0]!;
-
-    // Give the player some currency first
-    await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(
-      ctx.gameServer.id,
-      player.playerId,
-      { currency: 500 },
-    );
+    await setFundState(0);
+    await setCurrencyExact(player.playerId, 500);
 
     const before = new Date();
 
@@ -252,6 +252,7 @@ describe('community-fund: fund-contribute command', () => {
   it('should deny contribution when player lacks permission', async () => {
     // player[1] has no COMMUNITY_FUND_CONTRIBUTE permission
     const player = ctx.players[1]!;
+    await setFundState(0);
     const before = new Date();
 
     await client.command.commandControllerTrigger(ctx.gameServer.id, {
@@ -279,6 +280,8 @@ describe('community-fund: fund-contribute command', () => {
 
   it('should reject contribution below minimumContribution', async () => {
     const player = ctx.players[0]!;
+    await setFundState(0);
+    await setCurrencyExact(player.playerId, 500);
 
     const before = new Date();
 
@@ -302,9 +305,9 @@ describe('community-fund: fund-contribute command', () => {
 
   it('should reject contribution when player has insufficient currency', async () => {
     const player = ctx.players[0]!;
+    await setFundState(0);
+    await setCurrencyExact(player.playerId, 20);
 
-    // Player0 started with 500, contributed 20, so has ~480 left
-    // Contribute a huge amount the player definitely doesn't have
     const before = new Date();
 
     await client.command.commandControllerTrigger(ctx.gameServer.id, {
@@ -332,6 +335,8 @@ describe('community-fund: fund-contribute command', () => {
 
   it('should reject contribution of 0', async () => {
     const player = ctx.players[0]!;
+    await setFundState(0);
+    await setCurrencyExact(player.playerId, 500);
     const before = new Date();
 
     await client.command.commandControllerTrigger(ctx.gameServer.id, {
@@ -363,6 +368,7 @@ describe('community-fund: fund-contribute command', () => {
 
   it('should not advance the fund when a concurrent deduction fails', async () => {
     const player = ctx.players[0]!;
+    await setFundState(20);
     const beforePog = await getPog(player.playerId);
     assert.ok(beforePog, 'Expected player POG to exist before concurrent contribution test');
 
@@ -445,16 +451,9 @@ describe('community-fund: fund-contribute command', () => {
 
   it('should trigger completion when fund reaches threshold', async () => {
     const player = ctx.players[0]!;
+    await setFundState(50);
 
-    const totalVariable = await client.variable.variableControllerSearch({
-      filters: {
-        key: ['fund_total'],
-        gameServerId: [ctx.gameServer.id],
-        moduleId: [moduleId],
-      },
-    });
-    const currentTotal = totalVariable.data.data[0] ? JSON.parse(totalVariable.data.data[0].value) : 0;
-    const amountNeeded = Math.max(10, 100 - currentTotal);
+    const amountNeeded = 50;
 
     await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(ctx.gameServer.id, player.playerId, {
       currency: amountNeeded,
@@ -539,6 +538,10 @@ describe('community-fund: fund-contribute command', () => {
     assert.ok(
       logMessages.some((msg) => msg.includes('5 currency carried over into the next fund cycle.')),
       `Expected completion message to mention the carryover amount, got: ${JSON.stringify(logMessages)}`,
+    );
+    assert.ok(
+      logMessages.some((msg) => msg.includes('New fund total: 5/100. Current round: 2.')),
+      `Expected completion feedback to include the post-reset fund state, got: ${JSON.stringify(logMessages)}`,
     );
 
     const statusBefore = new Date();

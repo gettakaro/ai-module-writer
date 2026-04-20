@@ -3,12 +3,11 @@ import {
   UTILS_DEBUG_FORCE_KICK_API_FAILURE_KEY,
   consumeUtilsDebugFlag,
   extractReason,
-  getCommandArgumentTokens,
-  getOnlinePogForPlayer,
+  getCommandTargetPlayer,
   getPlayerName,
+  isPlayerOnlineHere,
   normalizeReason,
   renderTemplate,
-  resolvePlayerTarget,
   safeBroadcast,
   safePrivateMessage,
 } from './utils-helpers.js';
@@ -20,33 +19,27 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const target = await resolvePlayerTarget(args.player);
-  if (!target) {
-    throw new TakaroUserError('Please specify a valid player.');
+  const target = getCommandTargetPlayer(args.player);
+  if (!target || !isPlayerOnlineHere(target, gameServerId)) {
+    throw new TakaroUserError('That player is not currently online.');
   }
 
   if (target.playerId === player.id) {
     throw new TakaroUserError('You cannot use this command on yourself.');
   }
 
-  const targetPog = await getOnlinePogForPlayer(gameServerId, target.playerId);
-  if (!targetPog?.online) {
-    throw new TakaroUserError('That player is not currently online.');
-  }
-
   const [adminName, targetName] = await Promise.all([
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),
   ]);
-  const [typedTargetToken] = getCommandArgumentTokens(chatMessage);
-  const reason = normalizeReason(extractReason(args.reason, chatMessage, [typedTargetToken]), 'Kicked by an admin.');
+  const reason = normalizeReason(extractReason(args.reason, chatMessage, [target.name]), 'Kicked by an admin.');
 
   try {
     if (await consumeUtilsDebugFlag(gameServerId, mod.moduleId, UTILS_DEBUG_FORCE_KICK_API_FAILURE_KEY)) {
       throw new Error('Debug-forced kick API failure');
     }
 
-    await takaro.gameserver.gameServerControllerKickPlayer(targetPog.gameServerId || gameServerId, target.playerId, {
+    await takaro.gameserver.gameServerControllerKickPlayer(gameServerId, target.playerId, {
       reason,
     });
   } catch (err) {

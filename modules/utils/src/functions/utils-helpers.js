@@ -137,62 +137,6 @@ export function getCommandTargetPlayer(target) {
   };
 }
 
-export function requireResolvedPlayerArgument(target) {
-  const resolved = getCommandTargetPlayer(target);
-  if (!resolved) {
-    return null;
-  }
-
-  return {
-    ...resolved,
-    online: target?.online,
-  };
-}
-
-export async function resolvePlayerTarget(value) {
-  const token = trimOrEmpty(value);
-  if (token === '') return null;
-
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(token)) {
-    try {
-      const result = await takaro.player.playerControllerGetOne(token);
-      return {
-        playerId: result.data.data.id,
-        name: trimOrEmpty(result.data.data.name) || 'Unknown Player',
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  try {
-    const candidates = await collectPaginatedResults(async ({ page, limit }) => {
-      const result = await takaro.player.playerControllerSearch({
-        search: { name: [token] },
-        page,
-        limit,
-      });
-
-      return {
-        data: result.data.data,
-        total: result.data.meta?.total,
-      };
-    }, { limit: 100, maxIterations: 20 });
-
-    const exactNameMatch = candidates.find((player) => trimOrEmpty(player.name).toLowerCase() === token.toLowerCase());
-    if (!exactNameMatch) {
-      return null;
-    }
-
-    return {
-      playerId: exactNameMatch.id,
-      name: trimOrEmpty(exactNameMatch.name) || 'Unknown Player',
-    };
-  } catch (err) {
-    console.error(`utils-helpers: failed to resolve player token "${token}": ${err}`);
-    return null;
-  }
-}
 
 export function renderTemplate(template, placeholders) {
   const source = trimOrEmpty(template);

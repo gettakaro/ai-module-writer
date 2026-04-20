@@ -28,6 +28,26 @@ async function runBootstrap(extraEnv: NodeJS.ProcessEnv = {}, timeout = 14 * 60 
 }
 
 describe('ci bootstrap smoke', () => {
+  it('fails fast with a clear error when AWS_ECR_REGISTRY is not set', async () => {
+    await assert.rejects(
+      runBootstrap({ AWS_ECR_REGISTRY: '' }, 30_000),
+      (err: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
+        const output = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+        assert.match(output, /AWS_ECR_REGISTRY is required but not set/);
+        return true;
+      },
+    );
+  });
+
+  it('keeps the CI compose file wired to the bootstrap environment variables', async () => {
+    const compose = await import('node:fs/promises').then((fs) => fs.readFile(COMPOSE_FILE, 'utf8'));
+    assert.match(compose, /\$\{AWS_ECR_REGISTRY\}\/takaro-app-api:/);
+    assert.match(compose, /\$\{AWS_ECR_REGISTRY\}\/takaro-app-connector:/);
+    assert.match(compose, /\$\{AWS_ECR_REGISTRY\}\/takaro-app-mock-gameserver:/);
+    assert.match(compose, /POSTGRES_PASSWORD: \$\{POSTGRES_PASSWORD/);
+    assert.match(compose, /ADMIN_CLIENT_SECRET: \$\{ADMIN_CLIENT_SECRET\}/);
+  });
+
   it('boots the CI stack far enough to export Takaro credentials for both GitHub Actions and sourced local-shell usage', { timeout: 30 * 60 * 1000 }, async (t) => {
     if (!process.env.AWS_ECR_REGISTRY) {
       t.skip('AWS_ECR_REGISTRY is not set; skipping CI bootstrap smoke test outside CI.');

@@ -354,16 +354,24 @@ export async function installModule(
  */
 export async function uninstallModule(
   client: Client,
-  moduleId: string,
+  moduleId: string | undefined,
   gameServerId: string,
 ): Promise<void> {
+  if (!moduleId) {
+    console.error(`uninstallModule: skipping uninstall because moduleId was not set for game server '${gameServerId}'`);
+    return;
+  }
   await client.module.moduleInstallationsControllerUninstallModule(moduleId, gameServerId);
 }
 
 /**
  * Delete a module entirely from Takaro.
  */
-export async function deleteModule(client: Client, moduleId: string): Promise<void> {
+export async function deleteModule(client: Client, moduleId: string | undefined): Promise<void> {
+  if (!moduleId) {
+    console.error('deleteModule: skipping delete because moduleId was not set');
+    return;
+  }
   try {
     await client.module.moduleControllerRemove(moduleId);
   } catch (err) {
