@@ -121,13 +121,13 @@
     "kick": {
       "trigger": "kick",
       "description": "Kick an online player",
-      "helpText": "Usage: kick <player> [reason] — use your server's command prefix; target must be online on this server.",
+      "helpText": "Usage: kick <player> [reason] — use your server's command prefix; target can be a player name or player ID and must be online on this server.",
       "function": "src/commands/kick/index.js",
       "arguments": [
         {
           "name": "player",
-          "type": "player",
-          "helpText": "The player to kick",
+          "type": "string",
+          "helpText": "Player name or player ID to kick",
           "position": 0
         },
         {
@@ -141,14 +141,14 @@
     },
     "ban": {
       "trigger": "ban",
-      "description": "Ban a Takaro-resolvable player temporarily or permanently",
-      "helpText": "Usage: ban <player> <duration> [reason] — use your server's command prefix; works for players already known to Takaro, including offline players it can resolve.",
+      "description": "Ban a player temporarily or permanently",
+      "helpText": "Usage: ban <player> <duration> [reason] — use your server's command prefix; target can be a player name or player ID, including offline players already seen by this server network.",
       "function": "src/commands/ban/index.js",
       "arguments": [
         {
           "name": "player",
-          "type": "player",
-          "helpText": "The player to ban",
+          "type": "string",
+          "helpText": "Player name or player ID to ban",
           "position": 0
         },
         {
@@ -169,13 +169,13 @@
     "givecurrency": {
       "trigger": "givecurrency",
       "description": "Grant currency to a player",
-      "helpText": "Usage: givecurrency <player> <amount> — use your server's command prefix; target must currently be online on this server.",
+      "helpText": "Usage: givecurrency <player> <amount> — use your server's command prefix; target can be a player name or player ID and must currently be online on this server.",
       "function": "src/commands/givecurrency/index.js",
       "arguments": [
         {
           "name": "player",
-          "type": "player",
-          "helpText": "The player who should receive currency",
+          "type": "string",
+          "helpText": "Player name or player ID who should receive currency",
           "position": 0
         },
         {

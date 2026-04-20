@@ -29,6 +29,7 @@ interface ModuleVariableBackup {
   key: string;
   value: string;
   gameServerId?: string;
+  playerId?: string;
 }
 
 interface RolePermissionBackup {
@@ -43,13 +44,40 @@ interface RoleBindingBackup {
   permissions: RolePermissionBackup[];
 }
 
+async function collectAllPages<T>(
+  fetchPage: (page: number, limit: number) => Promise<{ data: T[]; total?: number }>,
+  { limit = 100, maxPages = 100 }: { limit?: number; maxPages?: number } = {},
+): Promise<T[]> {
+  const items: T[] = [];
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const result = await fetchPage(page, limit);
+    const batch = result.data;
+    items.push(...batch);
+
+    if (batch.length === 0) break;
+    if (typeof result.total === 'number' && items.length >= result.total) break;
+    if (batch.length < limit && result.total === undefined) break;
+  }
+
+  return items;
+}
+
 async function collectModuleInstallations(client: Client, moduleId: string): Promise<ModuleInstallationBackup[]> {
-  const result = await client.module.moduleInstallationsControllerGetInstalledModules({
-    filters: { moduleId: [moduleId] },
-    limit: 100,
+  const installations = await collectAllPages(async (page, limit) => {
+    const result = await client.module.moduleInstallationsControllerGetInstalledModules({
+      filters: { moduleId: [moduleId] },
+      page,
+      limit,
+    });
+
+    return {
+      data: result.data.data,
+      total: result.data.meta?.total,
+    };
   });
 
-  return result.data.data.map((installation) => ({
+  return installations.map((installation) => ({
     gameServerId: installation.gameserverId,
     userConfig: installation.userConfig as Record<string, unknown> | undefined,
     systemConfig: installation.systemConfig as Record<string, unknown> | undefined,
@@ -57,16 +85,27 @@ async function collectModuleInstallations(client: Client, moduleId: string): Pro
 }
 
 async function collectModuleVariables(client: Client, moduleId: string): Promise<ModuleVariableBackup[]> {
-  const result = await client.variable.variableControllerSearch({
-    filters: { moduleId: [moduleId] },
-    limit: 1000,
-  });
+  const variables = await collectAllPages(async (page, limit) => {
+    const result = await client.variable.variableControllerSearch({
+      filters: { moduleId: [moduleId] },
+      page,
+      limit,
+    });
 
-  return result.data.data.map((variable) => ({
+    return {
+      data: result.data.data,
+      total: result.data.meta?.total,
+    };
+  }, { limit: 250 });
+
+  return variables.map((variable) => ({
     key: variable.key,
     value: variable.value,
     gameServerId: typeof variable.gameServerId === 'string' && variable.gameServerId !== ''
       ? variable.gameServerId as string
+      : undefined,
+    playerId: typeof variable.playerId === 'string' && variable.playerId !== ''
+      ? variable.playerId as string
       : undefined,
   }));
 }
@@ -83,8 +122,15 @@ async function collectModuleRoleBindings(client: Client, moduleId: string): Prom
     return [];
   }
 
-  const rolesResult = await client.role.roleControllerSearch({ limit: 1000 });
-  return rolesResult.data.data
+  const roles = await collectAllPages(async (page, limit) => {
+    const result = await client.role.roleControllerSearch({ page, limit });
+    return {
+      data: result.data.data,
+      total: result.data.meta?.total,
+    };
+  }, { limit: 250 });
+
+  return roles
     .filter((role) => role.permissions.some((permissionOnRole) => modulePermissionIds.has(permissionOnRole.permissionId)))
     .map((role) => ({
       roleId: role.id,
@@ -103,6 +149,7 @@ async function restoreVariables(client: Client, moduleId: string, variables: Mod
       key: variable.key,
       value: variable.value,
       gameServerId: variable.gameServerId,
+      playerId: variable.playerId,
       moduleId,
     });
   }
@@ -188,6 +235,7 @@ export async function pushModule(
   moduleDir: string,
 ): Promise<ModuleOutputDTO> {
   const absoluteModuleDir = path.resolve(moduleDir);
+  const moduleApi = client.module;
 
   // Convert the module dir to JSON using the compiled script
   const tempFile = path.join(os.tmpdir(), `takaro-push-${Date.now()}.json`);
@@ -212,12 +260,12 @@ export async function pushModule(
     }
     const { name } = moduleJson;
 
-    const existing = await client.module.moduleControllerSearch({
+    const existing = await moduleApi.moduleControllerSearch({
       filters: { name: [name] },
     });
     const existingModule = existing.data.data.find((m) => m.name === name);
     const existingBackup = existingModule
-      ? (await client.module.moduleControllerExport(existingModule.id, {})).data.data as unknown as Record<string, unknown>
+      ? (await moduleApi.moduleControllerExport(existingModule.id, {})).data.data as unknown as Record<string, unknown>
       : null;
     const existingInstallations = existingModule
       ? await collectModuleInstallations(client, existingModule.id)
@@ -230,12 +278,12 @@ export async function pushModule(
       : [];
 
     if (existingModule) {
-      await client.module.moduleControllerRemove(existingModule.id);
+      await moduleApi.moduleControllerRemove(existingModule.id);
     }
 
     let importedModule: ModuleOutputDTO | undefined;
     try {
-      await client.module.moduleControllerImport(moduleJson);
+      await moduleApi.moduleControllerImport(moduleJson);
       importedModule = await findModuleByName(client, name);
 
       await restoreInstallations(client, importedModule, existingInstallations);
@@ -250,7 +298,7 @@ export async function pushModule(
 
       if (importedModule) {
         try {
-          await client.module.moduleControllerRemove(importedModule.id);
+          await moduleApi.moduleControllerRemove(importedModule.id);
         } catch (cleanupErr) {
           throw new Error(
             `Import of '${name}' failed after creating replacement module '${importedModule.id}', and cleanup of that replacement failed before rollback. Import error: ${err}. Cleanup error: ${cleanupErr}`,

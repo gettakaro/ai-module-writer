@@ -31,6 +31,35 @@ export async function createClient(): Promise<Client> {
   await client.login();
   client.setDomain(domainId);
 
+  for (const key of [
+    'item',
+    'user',
+    'role',
+    'gameserver',
+    'cronjob',
+    'function',
+    'module',
+    'hook',
+    'command',
+    'player',
+    'settings',
+    'variable',
+    'discord',
+    'event',
+    'playerOnGameserver',
+    'stats',
+    'tracking',
+    'entity',
+    'analytics',
+  ] as const) {
+    Object.defineProperty(client, key, {
+      value: client[key],
+      configurable: true,
+      enumerable: true,
+      writable: false,
+    });
+  }
+
   cachedClient = client;
   return client;
 }

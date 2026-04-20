@@ -441,6 +441,28 @@ describe('utils: admin commands', () => {
     await waitForOnline(target.playerId, true);
   });
 
+  it('accepts the permanent alias and supported temporary duration units', async () => {
+    const target = ctx.players[2];
+    const targetName = await getPlayerName(target.playerId);
+
+    for (const [token, fragment] of [
+      ['permanent', 'Banned by an admin.'],
+      ['12h', '12 hours'],
+      ['7d', '7 days'],
+      ['2w', '2 weeks'],
+    ] as const) {
+      await clearBans(target.playerId);
+      const res = await trigger(ctx.players[0].playerId, `${prefix}ban ${targetName} ${token}`);
+
+      assert.equal(res.success, true, `Expected /ban ${token} to succeed, logs: ${JSON.stringify(res.logs)}`);
+      assert.ok(res.logs.some((msg) => msg.includes(fragment)), JSON.stringify(res.logs));
+    }
+
+    await clearBans(target.playerId);
+    await ctx.server.executeConsoleCommand('connectAll');
+    await waitForOnline(target.playerId, true);
+  });
+
   it('surfaces the generic /ban API failure message when the ban creation call fails', async () => {
     const targetName = await getPlayerName(ctx.players[1].playerId);
     await setDebugFlag(UTILS_DEBUG_FORCE_BAN_API_FAILURE_KEY);
@@ -722,6 +744,12 @@ describe('test helper: pushModule successful replacement migration', () => {
       value: JSON.stringify({ scope: 'global' }),
       moduleId: original.id,
     });
+    await client.variable.variableControllerCreate({
+      key: '__migration_player_marker',
+      value: JSON.stringify({ scope: 'player' }),
+      playerId: ctx.players[1].playerId,
+      moduleId: original.id,
+    });
 
     tempModuleDir = await mkdtemp(path.join(os.tmpdir(), 'test-utils-migration-'));
     await cp(MODULE_DIR, tempModuleDir, { recursive: true });
@@ -770,6 +798,17 @@ describe('test helper: pushModule successful replacement migration', () => {
       globalVariables.data.data[0].gameServerId == null,
       `Expected global variable to remain unbound, got: ${JSON.stringify(globalVariables.data.data[0])}`,
     );
+
+    const playerScopedVariables = await client.variable.variableControllerSearch({
+      filters: {
+        moduleId: [replaced.id],
+        playerId: [ctx.players[1].playerId],
+        key: ['__migration_player_marker'],
+      },
+      limit: 10,
+    });
+    assert.equal(playerScopedVariables.data.data.length, 1, `Expected preserved player-scoped variable, got: ${JSON.stringify(playerScopedVariables.data.data)}`);
+    assert.equal(playerScopedVariables.data.data[0].playerId, ctx.players[1].playerId);
 
     const prefix = await getCommandPrefix(client, ctx.gameServer.id);
     const targetName = (await client.player.playerControllerGetOne(ctx.players[1].playerId)).data.data.name;

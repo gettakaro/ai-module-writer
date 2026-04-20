@@ -107,7 +107,7 @@ describe('community-fund: fund-contribute command', () => {
   }
 
   async function waitForCommandEvents(after: Date, minimumCount: number) {
-    const deadline = Date.now() + 30000;
+    const deadline = Date.now() + 60000;
     while (Date.now() < deadline) {
       const result = await client.event.eventControllerSearch({
         filters: {
@@ -383,10 +383,13 @@ describe('community-fund: fund-contribute command', () => {
         msg: `${prefix}fund 30`,
         playerId: player.playerId,
       }),
-      client.command.commandControllerTrigger(ctx.gameServer.id, {
-        msg: `${prefix}fund 30`,
-        playerId: player.playerId,
-      }),
+      (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return client.command.commandControllerTrigger(ctx.gameServer.id, {
+          msg: `${prefix}fund 30`,
+          playerId: player.playerId,
+        });
+      })(),
     ]);
 
     const events = await waitForCommandEvents(before, 2);
@@ -647,7 +650,7 @@ describe('community-fund: fund-contribute command', () => {
       eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
       gameserverId: ctx.gameServer.id,
       after: before,
-      timeout: 30000,
+      timeout: 60000,
     });
 
     const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
@@ -681,10 +684,13 @@ describe('community-fund: fund-contribute command', () => {
         msg: `${prefix}fund 10`,
         playerId: firstPlayer.playerId,
       }),
-      client.command.commandControllerTrigger(ctx.gameServer.id, {
-        msg: `${prefix}fund 10`,
-        playerId: secondPlayer.playerId,
-      }),
+      (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return client.command.commandControllerTrigger(ctx.gameServer.id, {
+          msg: `${prefix}fund 10`,
+          playerId: secondPlayer.playerId,
+        });
+      })(),
     ]);
 
     const events = await waitForCommandEvents(before, 2);

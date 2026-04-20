@@ -97,8 +97,10 @@ async function main() {
       previousTotalVariable = await getFundVariable(gameServerId, moduleId, FUND_TOTAL_KEY);
       previousCycleVariable = await getFundVariable(gameServerId, moduleId, FUND_CYCLE_KEY);
       previousCompletionVariable = await getFundVariable(gameServerId, moduleId, FUND_LAST_COMPLETION_KEY);
-      currentTotal = await getFundTotal(gameServerId, moduleId);
-      currentCycle = await getFundCycle(gameServerId, moduleId);
+      currentTotal = previousTotalVariable ? Math.floor(JSON.parse(previousTotalVariable.value)) : 0;
+      currentCycle = previousCycleVariable ? Math.floor(JSON.parse(previousCycleVariable.value)) : 0;
+      currentTotal = Number.isFinite(currentTotal) ? currentTotal : 0;
+      currentCycle = Number.isFinite(currentCycle) ? currentCycle : 0;
       newTotal = currentTotal + amount;
 
       console.log(`Fund contribution: player=${player.name}, amount=${amount}, previousTotal=${currentTotal}, newTotal=${newTotal}, threshold=${threshold}`);
@@ -107,9 +109,7 @@ async function main() {
         thresholdReached = true;
         const carryover = newTotal - threshold;
         await setFundTotal(gameServerId, moduleId, carryover);
-        await assertFundStateLock(gameServerId, moduleId, lockOwner);
         newCycle = await incrementFundCycle(gameServerId, moduleId);
-        await assertFundStateLock(gameServerId, moduleId, lockOwner);
         await recordCompletion(gameServerId, moduleId, newCycle, player.name);
       } else {
         await setFundTotal(gameServerId, moduleId, newTotal);
@@ -205,10 +205,14 @@ async function main() {
       ? ` ${carryover} currency carried over into the next fund cycle.`
       : ' The fund has been reset and is ready for the next cycle.';
     const completionBroadcast = `${completionMsg}${carryoverMessage}`;
-    await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-      message: completionBroadcast,
-      opts: {},
-    });
+    try {
+      await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
+        message: completionBroadcast,
+        opts: {},
+      });
+    } catch (broadcastErr) {
+      console.error(`Fund completion: failed to broadcast completion message. Error: ${broadcastErr}`);
+    }
 
     // Fire-and-forget: completion commands are best-effort. Failures are logged to Takaro's
     // execution logs but do not interrupt the player's contribution flow or block the fund reset.
@@ -225,19 +229,31 @@ async function main() {
     const playerMessage = `You contributed ${amount} to the community fund. The community fund goal has been met!${carryoverMessage}`;
 
     console.log(playerMessage);
-    await pog.pm(playerMessage);
+    try {
+      await pog.pm(playerMessage);
+    } catch (pmErr) {
+      console.error(`Fund completion: failed to PM player ${player.name}. Error: ${pmErr}`);
+    }
   } else {
     const percent = Math.floor((newTotal / threshold) * 100);
     const playerMessage = `You contributed ${amount} to the community fund. Current total: ${newTotal}/${threshold} (${percent}%).`;
 
     console.log(playerMessage);
-    await pog.pm(playerMessage);
+    try {
+      await pog.pm(playerMessage);
+    } catch (pmErr) {
+      console.error(`Fund contribution: failed to PM player ${player.name}. Error: ${pmErr}`);
+    }
 
     if (config.broadcastContributions) {
-      await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-        message: `${player.name} contributed ${amount} to the community fund! Total: ${newTotal}/${threshold} (${percent}%)`,
-        opts: {},
-      });
+      try {
+        await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
+          message: `${player.name} contributed ${amount} to the community fund! Total: ${newTotal}/${threshold} (${percent}%)`,
+          opts: {},
+        });
+      } catch (broadcastErr) {
+        console.error(`Fund contribution: failed to broadcast contribution message. Error: ${broadcastErr}`);
+      }
     }
   }
 }

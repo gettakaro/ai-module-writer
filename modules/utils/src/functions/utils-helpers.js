@@ -42,8 +42,7 @@ function stripConsumedPrefix(text, consumedValues = []) {
 }
 
 export function extractReason(argsReason, chatMessage, consumedValues = []) {
-  const parsedReasonSource = trimOrEmpty(argsReason) === '?' ? '' : trimOrEmpty(argsReason);
-  const parsedReason = stripConsumedPrefix(parsedReasonSource, consumedValues);
+  const parsedReason = trimOrEmpty(argsReason) === '?' ? '' : trimOrEmpty(argsReason);
 
   let remaining = trimOrEmpty(getChatMessageText(chatMessage));
   if (remaining !== '') {
@@ -148,6 +147,42 @@ export function requireResolvedPlayerArgument(target) {
     ...resolved,
     online: target?.online,
   };
+}
+
+export async function resolvePlayerTarget(value) {
+  const token = trimOrEmpty(value);
+  if (token === '') return null;
+
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(token)) {
+    try {
+      const result = await takaro.player.playerControllerGetOne(token);
+      return {
+        playerId: result.data.data.id,
+        name: trimOrEmpty(result.data.data.name) || 'Unknown Player',
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  try {
+    const byName = await takaro.player.playerControllerSearch({
+      search: { name: [token] },
+      limit: 10,
+    });
+    const exactNameMatch = byName.data.data.find((player) => trimOrEmpty(player.name).toLowerCase() === token.toLowerCase());
+    if (!exactNameMatch) {
+      return null;
+    }
+
+    return {
+      playerId: exactNameMatch.id,
+      name: trimOrEmpty(exactNameMatch.name) || 'Unknown Player',
+    };
+  } catch (err) {
+    console.error(`utils-helpers: failed to resolve player token "${token}": ${err}`);
+    return null;
+  }
 }
 
 export function renderTemplate(template, placeholders) {

@@ -8,7 +8,7 @@ import {
   normalizeReason,
   parseBanDurationToken,
   renderTemplate,
-  requireResolvedPlayerArgument,
+  resolvePlayerTarget,
   safeBroadcast,
   safePrivateMessage,
 } from './utils-helpers.js';
@@ -20,7 +20,7 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const target = requireResolvedPlayerArgument(args.player);
+  const target = await resolvePlayerTarget(args.player);
   if (!target) {
     throw new TakaroUserError('Please specify a valid player.');
   }
@@ -63,7 +63,7 @@ async function main() {
     banResult = await takaro.player.banControllerCreate(payload);
   } catch (err) {
     console.error(`utils:ban failed for target=${target.playerId}: ${err}`);
-    throw new TakaroUserError('The ban could not be created right now. Please try again or check the server logs.');
+    throw new TakaroUserError('The ban could not be created right now. Please try again in a moment. If it keeps failing, contact a server owner.');
   }
 
   console.log(`utils:ban result=${JSON.stringify(banResult.data.data)}`);

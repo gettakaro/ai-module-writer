@@ -6,7 +6,7 @@ import {
   getPlayerName,
   isEconomyEnabled,
   renderTemplate,
-  requireResolvedPlayerArgument,
+  resolvePlayerTarget,
   safeBroadcast,
   safeDirectMessage,
   safePrivateMessage,
@@ -21,7 +21,7 @@ async function main() {
 
   const amount = args.amount;
 
-  const target = requireResolvedPlayerArgument(args.player);
+  const target = await resolvePlayerTarget(args.player);
   if (!target) {
     throw new TakaroUserError('Please specify a valid player.');
   }
@@ -60,7 +60,7 @@ async function main() {
       throw new TakaroUserError('Currency is not available on this game server. Ask an admin to enable economy support before using givecurrency.');
     }
 
-    throw new TakaroUserError('The currency grant could not be completed because the game server API returned an error. Please try again or check the server logs.');
+    throw new TakaroUserError('The currency grant could not be completed because the game server API returned an error. Please try again in a moment. If it keeps failing, contact a server owner.');
   }
 
   console.log(`utils:givecurrency admin=${adminName} target=${targetName} amount=${amount}`);

@@ -8,7 +8,7 @@ import {
   getPlayerName,
   normalizeReason,
   renderTemplate,
-  requireResolvedPlayerArgument,
+  resolvePlayerTarget,
   safeBroadcast,
   safePrivateMessage,
 } from './utils-helpers.js';
@@ -20,7 +20,7 @@ async function main() {
     throw new TakaroUserError('You do not have permission to use this command.');
   }
 
-  const target = requireResolvedPlayerArgument(args.player);
+  const target = await resolvePlayerTarget(args.player);
   if (!target) {
     throw new TakaroUserError('Please specify a valid player.');
   }

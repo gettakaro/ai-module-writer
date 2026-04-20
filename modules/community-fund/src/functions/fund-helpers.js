@@ -70,10 +70,13 @@ export async function acquireFundStateLock(
   gameServerId,
   moduleId,
   owner,
-  { maxWaitMs = 5000, pollMs = 200, staleAfterMs = 120000 } = {},
+  { maxWaitMs = 45000, pollMs = 200, staleAfterMs = 120000, inactiveLockFailMs = 5000 } = {},
 ) {
   const deadline = Date.now() + Math.max(0, maxWaitMs);
   const retryBudgetMs = Math.max(1, pollMs);
+  let lastObservedOwner = '';
+  let lastObservedRefresh = 0;
+  let unchangedSince = 0;
 
   while (Date.now() <= deadline) {
     const now = Date.now();
@@ -104,10 +107,26 @@ export async function acquireFundStateLock(
         try {
           await takaro.variable.variableControllerDelete(existing.id);
           console.warn(`fund-helpers: removed stale fund lock owned by ${parsed?.owner ?? 'unknown'} after ${ageMs}ms`);
+          unchangedSince = 0;
+          lastObservedOwner = '';
+          lastObservedRefresh = 0;
           continue;
         } catch (deleteErr) {
           console.warn(`fund-helpers: failed to delete stale fund lock: ${deleteErr}`);
         }
+      }
+
+      const observedOwner = parsed?.owner ?? 'unknown';
+      const observedRefresh = parsed?.refreshedAt ?? 0;
+      if (observedOwner === lastObservedOwner && observedRefresh === lastObservedRefresh) {
+        unchangedSince = unchangedSince || Date.now();
+        if (Date.now() - unchangedSince >= inactiveLockFailMs) {
+          throw new Error('Timed out acquiring the community fund state lock');
+        }
+      } else {
+        lastObservedOwner = observedOwner;
+        lastObservedRefresh = observedRefresh;
+        unchangedSince = Date.now();
       }
     }
 
