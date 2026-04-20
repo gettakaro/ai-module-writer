@@ -37,7 +37,10 @@ async function main() {
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),
   ]);
-  const reason = normalizeReason(extractReason(args.reason, chatMessage, 2), 'Banned by an admin.');
+  const reason = normalizeReason(
+    extractReason(args.reason, chatMessage, [targetName, target.playerId, args.duration]),
+    'Banned by an admin.',
+  );
 
   const payload = {
     reason,

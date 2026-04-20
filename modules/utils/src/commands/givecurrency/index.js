@@ -4,6 +4,7 @@ import {
   consumeUtilsDebugFlag,
   getCommandTargetPlayer,
   getPlayerName,
+  getSameServerOnlineRequirementError,
   isEconomyEnabled,
   renderTemplate,
   safeBroadcast,
@@ -29,8 +30,9 @@ async function main() {
     throw new TakaroUserError('Usage: givecurrency <player> <amount> — Amount must be a positive whole number.');
   }
 
-  if (target.online === false || !target.gameId || (target.gameServerId && target.gameServerId !== gameServerId)) {
-    throw new TakaroUserError('That player is not currently online.');
+  const sameServerRequirementError = getSameServerOnlineRequirementError(target, gameServerId);
+  if (sameServerRequirementError) {
+    throw new TakaroUserError(sameServerRequirementError);
   }
 
   if (!await isEconomyEnabled(gameServerId)) {

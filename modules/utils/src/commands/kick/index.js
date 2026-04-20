@@ -5,7 +5,7 @@ import {
   extractReason,
   getCommandTargetPlayer,
   getPlayerName,
-  isPlayerOnlineHere,
+  getSameServerOnlineRequirementError,
   normalizeReason,
   renderTemplate,
   safeBroadcast,
@@ -20,8 +20,9 @@ async function main() {
   }
 
   const target = getCommandTargetPlayer(args.player);
-  if (!target || !isPlayerOnlineHere(target, gameServerId)) {
-    throw new TakaroUserError('That player is not currently online.');
+  const sameServerRequirementError = getSameServerOnlineRequirementError(target, gameServerId);
+  if (sameServerRequirementError) {
+    throw new TakaroUserError(sameServerRequirementError);
   }
 
   if (target.playerId === player.id) {
@@ -32,7 +33,10 @@ async function main() {
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),
   ]);
-  const reason = normalizeReason(extractReason(args.reason, chatMessage, 1), 'Kicked by an admin.');
+  const reason = normalizeReason(
+    extractReason(args.reason, chatMessage, [targetName, target.playerId]),
+    'Kicked by an admin.',
+  );
 
   try {
     if (await consumeUtilsDebugFlag(gameServerId, mod.moduleId, UTILS_DEBUG_FORCE_KICK_API_FAILURE_KEY)) {

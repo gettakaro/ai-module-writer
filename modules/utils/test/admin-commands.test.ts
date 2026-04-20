@@ -272,7 +272,7 @@ describe('utils: admin commands', () => {
     const res = await trigger(ctx.players[0].playerId, `${prefix}givecurrency ${otherServerPlayerName} 5`);
 
     assert.equal(res.success, false, 'Expected /givecurrency to reject a player from another server');
-    assert.ok(res.logs.some((msg) => msg.includes('not currently online')), JSON.stringify(res.logs));
+    assert.ok(res.logs.some((msg) => msg.includes('online on a different game server')), JSON.stringify(res.logs));
     assert.ok(!res.logs.some((msg) => msg.includes(`Gave 5 currency to ${otherServerPlayerName}.`)), JSON.stringify(res.logs));
   });
 
@@ -287,7 +287,7 @@ describe('utils: admin commands', () => {
     const res = await trigger(ctx.players[0].playerId, `${prefix}givecurrency ${otherServerPlayerName} 5`);
 
     assert.equal(res.success, false, 'Expected /givecurrency to fail when the target is on another server');
-    assert.ok(res.logs.some((msg) => msg.includes('not currently online')), JSON.stringify(res.logs));
+    assert.ok(res.logs.some((msg) => msg.includes('online on a different game server')), JSON.stringify(res.logs));
     assert.ok(!res.logs.some((msg) => msg.includes('Currency is not available on this game server.')), JSON.stringify(res.logs));
 
     await client.settings.settingsControllerSet('economyEnabled', {
@@ -515,7 +515,7 @@ describe('utils: admin commands', () => {
     const res = await trigger(ctx.players[0].playerId, `${prefix}kick ${otherServerPlayerName}`);
 
     assert.equal(res.success, false, 'Expected /kick to reject a player from another server');
-    assert.ok(res.logs.some((msg) => msg.includes('not currently online')), JSON.stringify(res.logs));
+    assert.ok(res.logs.some((msg) => msg.includes('online on a different game server')), JSON.stringify(res.logs));
     assert.ok(!res.logs.some((msg) => msg.includes(`Kicked ${otherServerPlayerName}.`)), JSON.stringify(res.logs));
   });
 
@@ -914,5 +914,55 @@ describe('test helper: pushModule successful replacement migration', () => {
     const reboundPermissionCodes = reboundRole?.permissions.map((entry) => entry.permission.permission) ?? [];
     assert.ok(reboundPermissionCodes.includes('UTILS_BAN'), JSON.stringify(reboundPermissionCodes));
     assert.ok(!reboundPermissionCodes.includes('UTILS_KICK'), JSON.stringify(reboundPermissionCodes));
+  });
+
+  it('preserves unrelated role edits that happen after the replacement snapshot is taken', async () => {
+    await cleanupRole(client, adminRoleId);
+    adminRoleId = undefined;
+
+    const original = await pushModule(client, MODULE_DIR);
+    moduleId = original.id;
+    adminRoleId = await assignPermissions(client, ctx.players[0].playerId, ctx.gameServer.id, ['UTILS_BAN']);
+
+    const permissions = (await client.role.roleControllerGetPermissions()).data.data;
+    const unrelatedPermission = permissions.find((permission) => !permission.permission.startsWith('UTILS_'));
+    assert.ok(unrelatedPermission, `Expected to find an unrelated permission for the merge test, got: ${JSON.stringify(permissions)}`);
+
+    tempModuleDir = await mkdtemp(path.join(os.tmpdir(), 'utils-role-merge-migration-'));
+    await cp(MODULE_DIR, tempModuleDir, { recursive: true });
+
+    const originalImport = client.module.moduleControllerImport.bind(client.module);
+    client.module.moduleControllerImport = (async (...args: Parameters<typeof originalImport>) => {
+      const result = await originalImport(...args);
+      const currentRole = (await client.role.roleControllerGetOne(adminRoleId!)).data.data;
+      if (!currentRole.permissions.some((entry) => entry.permissionId === unrelatedPermission!.id)) {
+        await client.role.roleControllerUpdate(adminRoleId!, {
+          name: `${currentRole.name}-edited`,
+          linkedDiscordRoleId: currentRole.linkedDiscordRoleId,
+          permissions: [
+            ...currentRole.permissions.map((entry) => ({
+              permissionId: entry.permissionId,
+              count: entry.count,
+            })),
+            { permissionId: unrelatedPermission!.id },
+          ],
+        });
+      }
+      return result;
+    }) as typeof client.module.moduleControllerImport;
+
+    try {
+      const replaced = await pushModule(client, tempModuleDir);
+      moduleId = replaced.id;
+    } finally {
+      client.module.moduleControllerImport = originalImport;
+    }
+
+    const reboundRole = (await client.role.roleControllerGetOne(adminRoleId)).data.data;
+    assert.match(reboundRole.name, /-edited$/, `Expected concurrent role-name edit to survive replacement, got: ${reboundRole.name}`);
+
+    const reboundPermissionCodes = reboundRole.permissions.map((entry) => entry.permission.permission);
+    assert.ok(reboundPermissionCodes.includes('UTILS_BAN'), JSON.stringify(reboundPermissionCodes));
+    assert.ok(reboundPermissionCodes.includes(unrelatedPermission!.permission), JSON.stringify(reboundPermissionCodes));
   });
 });

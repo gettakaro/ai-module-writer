@@ -542,8 +542,8 @@ describe('community-fund: fund-contribute command', () => {
       `Expected completion message to mention the carryover amount, got: ${JSON.stringify(logMessages)}`,
     );
     assert.ok(
-      logMessages.some((msg) => msg.includes('New fund total: 5/100. Current round: 1.')),
-      `Expected completion feedback to include the post-reset fund state, got: ${JSON.stringify(logMessages)}`,
+      logMessages.some((msg) => msg.includes('New fund total: 5/100. Current round: 2.')),
+      `Expected completion feedback to include the next active round after the reset, got: ${JSON.stringify(logMessages)}`,
     );
 
     const statusBefore = new Date();
@@ -925,8 +925,8 @@ describe('community-fund: completion command failures', () => {
       `Expected the completion-command failure to be logged, got: ${JSON.stringify(logMessages)}`,
     );
     assert.ok(
-      logMessages.some((msg) => msg.includes('Current round: 1.')),
-      `Expected the player success path to continue after the completion-command failure, got: ${JSON.stringify(logMessages)}`,
+      logMessages.some((msg) => msg.includes('Current round: 2.')),
+      `Expected the player success path to report the next active round after the completion-command failure, got: ${JSON.stringify(logMessages)}`,
     );
   });
 });

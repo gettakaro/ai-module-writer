@@ -70,7 +70,7 @@ export async function acquireFundStateLock(
   gameServerId,
   moduleId,
   owner,
-  { maxWaitMs = 45000, pollMs = 200, staleAfterMs = 120000, inactiveLockFailMs = 5000 } = {},
+  { maxWaitMs = 45000, pollMs = 200, staleAfterMs = 120000, inactiveLockFailMs = maxWaitMs } = {},
 ) {
   const deadline = Date.now() + Math.max(0, maxWaitMs);
   const retryBudgetMs = Math.max(1, pollMs);
@@ -120,7 +120,7 @@ export async function acquireFundStateLock(
       const observedRefresh = parsed?.refreshedAt ?? 0;
       if (observedOwner === lastObservedOwner && observedRefresh === lastObservedRefresh) {
         unchangedSince = unchangedSince || Date.now();
-        if (Date.now() - unchangedSince >= inactiveLockFailMs) {
+        if (Date.now() - unchangedSince >= Math.max(maxWaitMs, inactiveLockFailMs)) {
           throw new Error('Timed out acquiring the community fund state lock');
         }
       } else {

@@ -43,33 +43,19 @@ function stripConsumedPrefix(text, consumedValues = []) {
 
 export function extractReason(argsReason, chatMessage, consumedValues = []) {
   const parsedReason = trimOrEmpty(argsReason) === '?' ? '' : trimOrEmpty(argsReason);
-  const argumentTokens = getCommandArgumentTokens(chatMessage);
+  const consumedPrefixValues = Array.isArray(consumedValues)
+    ? consumedValues
+    : (typeof consumedValues === 'number' ? [] : [consumedValues]);
 
-  if (argumentTokens.length > 0) {
-    if (typeof consumedValues === 'number') {
-      const reconstructedReason = trimOrEmpty(argumentTokens.slice(consumedValues).join(' '));
-      const consumedPrefix = trimOrEmpty(argumentTokens.slice(0, consumedValues).join(' '));
-      const parsedLooksShifted = consumedPrefix !== '' && parsedReason.toLowerCase().startsWith(consumedPrefix.toLowerCase());
+  let remaining = trimOrEmpty(getChatMessageText(chatMessage));
+  if (remaining === '') {
+    return parsedReason;
+  }
 
-      if (parsedReason === '') {
-        if (reconstructedReason !== '') {
-          return reconstructedReason;
-        }
-      } else if (parsedLooksShifted && reconstructedReason !== '') {
-        return reconstructedReason;
-      } else {
-        return parsedReason;
-      }
-    } else {
-      let remaining = trimOrEmpty(getChatMessageText(chatMessage));
-      if (remaining !== '') {
-        remaining = remaining.replace(/^\S+\s*/, '');
-        const reconstructedReason = stripConsumedPrefix(remaining, consumedValues);
-        if (reconstructedReason !== '') {
-          return reconstructedReason;
-        }
-      }
-    }
+  remaining = remaining.replace(/^\S+\s*/, '');
+  const reconstructedReason = stripConsumedPrefix(remaining, consumedPrefixValues);
+  if (reconstructedReason !== '') {
+    return reconstructedReason;
   }
 
   return parsedReason;
@@ -375,9 +361,22 @@ export async function safeDirectMessage(gameServerId, recipient, message) {
   }
 }
 
+export function getSameServerOnlineRequirementError(target, gameServerId) {
+  if (!target) {
+    return 'That player is not currently online.';
+  }
+
+  if (target.online === false || !target.gameId) {
+    return 'That player is not currently online.';
+  }
+
+  if (target.gameServerId && target.gameServerId !== gameServerId) {
+    return 'That player is online on a different game server.';
+  }
+
+  return null;
+}
+
 export function isPlayerOnlineHere(target, gameServerId) {
-  if (!target) return false;
-  if (target.gameServerId && target.gameServerId !== gameServerId) return false;
-  if (target.online === false) return false;
-  return Boolean(target.gameId);
+  return getSameServerOnlineRequirementError(target, gameServerId) === null;
 }

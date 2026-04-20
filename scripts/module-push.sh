@@ -19,23 +19,39 @@ TEMP_FILE=$(mktemp /tmp/takaro-push-XXXXXX.json)
 trap 'rm -f "$TEMP_FILE"' EXIT
 node "$SCRIPT_DIR/../dist/scripts/module-to-json.js" "$MODULE_DIR" "$TEMP_FILE"
 
-# Check if a module with this name already exists; if so, delete it first
-# Use exact-match filter to avoid matching modules that merely contain the name as a substring
+# Check if modules with this exact name already exist. Some hosted/built-in modules cannot be
+# deleted (HTTP 400), so treat those as protected and leave them in place instead of aborting.
 SEARCH_RESULT=$(bash "$SCRIPT_DIR/takaro-api.sh" POST /module/search "$(jq -n --arg name "$MODULE_NAME" '{"filters":{"name":[$name]}}')")
-EXISTING_ID=$(echo "$SEARCH_RESULT" | jq -r --arg name "$MODULE_NAME" '[.data[] | select(.name == $name)][0].id // empty')
+mapfile -t EXISTING_IDS < <(echo "$SEARCH_RESULT" | jq -r --arg name "$MODULE_NAME" '.data[] | select(.name == $name) | .id')
+REPLACED_ID=""
 
-if [[ -n "$EXISTING_ID" ]]; then
-  echo "Module '$MODULE_NAME' already exists (id: $EXISTING_ID), deleting before re-import..." >&2
-  # NOTE: Delete then re-import is non-atomic. If import fails after delete, module is lost.
-  # WARNING will be printed below if that happens.
-  bash "$SCRIPT_DIR/takaro-api.sh" DELETE "/module/$EXISTING_ID" '{}' >/dev/null
-  echo "Deleted existing module $EXISTING_ID" >&2
-fi
+for EXISTING_ID in "${EXISTING_IDS[@]}"; do
+  [[ -z "$EXISTING_ID" ]] && continue
+  echo "Module '$MODULE_NAME' already exists (id: $EXISTING_ID), deleting before re-import if allowed..." >&2
+  if bash "$SCRIPT_DIR/takaro-api.sh" DELETE "/module/$EXISTING_ID" '{}' >/dev/null 2>/tmp/takaro-module-delete.stderr; then
+    echo "Deleted existing module $EXISTING_ID" >&2
+    if [[ -n "$REPLACED_ID" ]]; then
+      echo "ERROR: Found multiple replaceable modules named '$MODULE_NAME'. Refusing to continue blindly." >&2
+      exit 1
+    fi
+    REPLACED_ID="$EXISTING_ID"
+    continue
+  fi
+
+  if grep -q '400' /tmp/takaro-module-delete.stderr; then
+    echo "Skipping protected module $EXISTING_ID; Takaro rejected deletion with HTTP 400." >&2
+    continue
+  fi
+
+  cat /tmp/takaro-module-delete.stderr >&2
+  exit 1
+done
+rm -f /tmp/takaro-module-delete.stderr
 
 # Import the module
 IMPORT_RESULT=$(bash "$SCRIPT_DIR/takaro-api.sh" POST /module/import "@$TEMP_FILE") || {
-  if [[ -n "$EXISTING_ID" ]]; then
-    echo "WARNING: Module '$MODULE_NAME' was deleted (id: $EXISTING_ID) but re-import failed. Module may need manual re-push." >&2
+  if [[ -n "$REPLACED_ID" ]]; then
+    echo "WARNING: Module '$MODULE_NAME' was deleted (id: $REPLACED_ID) but re-import failed. Module may need manual re-push." >&2
   else
     echo "ERROR: Import of '$MODULE_NAME' failed." >&2
   fi

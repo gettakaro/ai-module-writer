@@ -39,8 +39,7 @@ interface RolePermissionBackup {
 
 interface RoleBindingBackup {
   roleId: string;
-  name: string;
-  linkedDiscordRoleId?: string;
+  roleName: string;
   permissions: RolePermissionBackup[];
 }
 
@@ -141,15 +140,20 @@ async function collectModuleRoleBindings(client: Client, moduleId: string): Prom
   }, { limit: 250 });
 
   return roles
-    .filter((role) => role.permissions.some((permissionOnRole) => modulePermissionIds.has(permissionOnRole.permissionId)))
     .map((role) => ({
+      role,
+      modulePermissions: role.permissions
+        .filter((permissionOnRole) => modulePermissionIds.has(permissionOnRole.permissionId))
+        .map((permissionOnRole) => ({
+          permission: permissionOnRole.permission.permission,
+          count: permissionOnRole.count,
+        })),
+    }))
+    .filter(({ modulePermissions }) => modulePermissions.length > 0)
+    .map(({ role, modulePermissions }) => ({
       roleId: role.id,
-      name: role.name,
-      linkedDiscordRoleId: role.linkedDiscordRoleId,
-      permissions: role.permissions.map((permissionOnRole) => ({
-        permission: permissionOnRole.permission.permission,
-        count: permissionOnRole.count,
-      })),
+      roleName: role.name,
+      permissions: modulePermissions,
     }));
 }
 
@@ -176,38 +180,85 @@ async function rebindRoles(client: Client, roles: RoleBindingBackup[]): Promise<
   );
 
   for (const role of roles) {
-    const reboundPermissions = role.permissions.flatMap((permission) => {
+    let currentRole;
+    try {
+      currentRole = (await client.role.roleControllerGetOne(role.roleId)).data.data;
+    } catch (err) {
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      if (status === 404) {
+        console.warn(`rebindRoles: skipping missing role '${role.roleName}' (${role.roleId}) during module replacement`);
+        continue;
+      }
+      throw err;
+    }
+
+    const mergedPermissions = new Map<string, { permissionId: string; count?: number }>(
+      currentRole.permissions.map((permissionOnRole) => [
+        permissionOnRole.permissionId,
+        {
+          permissionId: permissionOnRole.permissionId,
+          count: permissionOnRole.count,
+        },
+      ]),
+    );
+
+    for (const permission of role.permissions) {
       const permissionId = permissionsByCode.get(permission.permission);
       if (!permissionId) {
         console.warn(
-          `rebindRoles: skipping missing permission '${permission.permission}' while rebinding role '${role.name}'`,
+          `rebindRoles: skipping missing permission '${permission.permission}' while rebinding role '${role.roleName}'`,
         );
-        return [];
+        continue;
       }
 
-      return [{
+      mergedPermissions.set(permissionId, {
         permissionId,
         count: permission.count,
-      }];
-    });
+      });
+    }
 
     await client.role.roleControllerUpdate(role.roleId, {
-      name: role.name,
-      linkedDiscordRoleId: role.linkedDiscordRoleId,
-      permissions: reboundPermissions,
+      name: currentRole.name,
+      linkedDiscordRoleId: currentRole.linkedDiscordRoleId,
+      permissions: Array.from(mergedPermissions.values()),
     });
   }
 }
 
-async function findModuleByName(client: Client, name: string): Promise<ModuleOutputDTO> {
+async function findModulesByName(client: Client, name: string): Promise<ModuleOutputDTO[]> {
   const searchResult = await client.module.moduleControllerSearch({
     filters: { name: [name] },
   });
 
-  const found = searchResult.data.data.find((m) => m.name === name);
-  if (!found) throw new Error(`Module '${name}' not found after import`);
+  return searchResult.data.data.filter((module) => module.name === name);
+}
 
-  return found;
+async function findImportedModuleByName(
+  client: Client,
+  name: string,
+  preexistingIds: Iterable<string> = [],
+): Promise<ModuleOutputDTO> {
+  const beforeIds = new Set(preexistingIds);
+  const matches = await findModulesByName(client, name);
+  const newMatches = matches.filter((module) => !beforeIds.has(module.id));
+
+  if (newMatches.length === 1) {
+    return newMatches[0];
+  }
+
+  if (newMatches.length > 1) {
+    throw new Error(`Multiple new modules named '${name}' appeared after import; refusing to guess which one was imported`);
+  }
+
+  if (matches.length === 1) {
+    return matches[0];
+  }
+
+  if (matches.length === 0) {
+    throw new Error(`Module '${name}' not found after import`);
+  }
+
+  throw new Error(`Module '${name}' is ambiguous after import; found ${matches.length} exact-name matches and could not identify the new one`);
 }
 
 async function waitForInstalledModule(
@@ -256,8 +307,9 @@ async function restoreModuleState(
   variables: ModuleVariableBackup[],
   roles: RoleBindingBackup[],
 ): Promise<ModuleOutputDTO> {
+  const preexistingIds = (await findModulesByName(client, moduleName)).map((module) => module.id);
   await client.module.moduleControllerImport(moduleExport);
-  const restoredModule = await findModuleByName(client, moduleName);
+  const restoredModule = await findImportedModuleByName(client, moduleName, preexistingIds);
 
   await restoreInstallations(client, restoredModule, installations);
   await restoreVariables(client, restoredModule.id, variables);
@@ -342,31 +394,47 @@ export async function pushModule(
     }
     const { name } = moduleJson;
 
-    const existing = await moduleApi.moduleControllerSearch({
-      filters: { name: [name] },
-    });
-    const existingModule = existing.data.data.find((m) => m.name === name);
-    const existingBackup = existingModule
-      ? (await moduleApi.moduleControllerExport(existingModule.id, {})).data.data as unknown as Record<string, unknown>
-      : null;
-    const existingInstallations = existingModule
-      ? await collectModuleInstallations(client, existingModule.id)
-      : [];
-    const existingVariables = existingModule
-      ? await collectModuleVariables(client, existingModule.id)
-      : [];
-    const existingRoles = existingModule
-      ? await collectModuleRoleBindings(client, existingModule.id)
-      : [];
+    const existingModules = await findModulesByName(client, name);
+    const preexistingIds = existingModules.map((module) => module.id);
 
-    if (existingModule) {
-      await removeModuleCompletely(client, existingModule.id, existingInstallations);
+    let existingBackup: Record<string, unknown> | null = null;
+    let existingInstallations: ModuleInstallationBackup[] = [];
+    let existingVariables: ModuleVariableBackup[] = [];
+    let existingRoles: RoleBindingBackup[] = [];
+
+    for (const existingModule of existingModules) {
+      const candidateBackup = (await moduleApi.moduleControllerExport(existingModule.id, {})).data.data as unknown as Record<string, unknown>;
+      const candidateInstallations = await collectModuleInstallations(client, existingModule.id);
+      const candidateVariables = await collectModuleVariables(client, existingModule.id);
+      const candidateRoles = await collectModuleRoleBindings(client, existingModule.id);
+
+      try {
+        await removeModuleCompletely(client, existingModule.id, candidateInstallations);
+      } catch (err) {
+        const status = (err as { response?: { status?: number } })?.response?.status;
+        if (status === 400) {
+          console.warn(
+            `pushModule: leaving protected module '${name}' (${existingModule.id}) in place because Takaro rejected deletion with HTTP 400`,
+          );
+          continue;
+        }
+        throw err;
+      }
+
+      if (existingBackup) {
+        throw new Error(`Found multiple replaceable modules named '${name}'. Refusing to replace them blindly.`);
+      }
+
+      existingBackup = candidateBackup;
+      existingInstallations = candidateInstallations;
+      existingVariables = candidateVariables;
+      existingRoles = candidateRoles;
     }
 
     let importedModule: ModuleOutputDTO | undefined;
     try {
       await moduleApi.moduleControllerImport(moduleJson);
-      importedModule = await findModuleByName(client, name);
+      importedModule = await findImportedModuleByName(client, name, preexistingIds);
 
       await restoreInstallations(client, importedModule, existingInstallations);
       await restoreVariables(client, importedModule.id, existingVariables);
