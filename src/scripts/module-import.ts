@@ -624,6 +624,29 @@ async function restoreVariablesOnModule(ops: ImportOps, moduleId: string, variab
   }
 }
 
+async function waitForReplacementPermissionMap(
+  ops: ImportOps,
+  replacementModule: ModuleOutputDTO,
+  expectedCodes: string[],
+): Promise<Map<string, string>> {
+  const uniqueExpectedCodes = [...new Set(expectedCodes)];
+  let lastSeen = new Map<string, string>();
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    lastSeen = await ops.getModulePermissionCodeToId(replacementModule.id);
+    const missingCodes = uniqueExpectedCodes.filter((code) => !lastSeen.has(code));
+    if (missingCodes.length === 0) {
+      return lastSeen;
+    }
+
+    if (attempt < 9) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  return lastSeen;
+}
+
 async function rebindRolesToReplacementPermissions(
   ops: ImportOps,
   replacementModule: ModuleOutputDTO,
@@ -633,14 +656,15 @@ async function rebindRolesToReplacementPermissions(
     return;
   }
 
-  const newPermissionCodeToId = await ops.getModulePermissionCodeToId(replacementModule.id);
+  const expectedCodes = [...snapshot.permissionIdToCode.values()];
+  const newPermissionCodeToId = await waitForReplacementPermissionMap(ops, replacementModule, expectedCodes);
   const missingCodes = [...new Set(
-    [...snapshot.permissionIdToCode.values()].filter((code) => !newPermissionCodeToId.has(code)),
+    expectedCodes.filter((code) => !newPermissionCodeToId.has(code)),
   )];
 
   if (missingCodes.length > 0) {
-    console.warn(
-      `Replacement module '${replacementModule.name}' no longer defines permissions [${missingCodes.join(', ')}]; existing role bindings for those permissions will be removed during rebind.`,
+    throw new Error(
+      `Replacement module '${replacementModule.name}' is missing permissions required to preserve existing role bindings [${missingCodes.join(', ')}]. Aborting replacement import so the previous module can be restored without silently removing access.`,
     );
   }
 

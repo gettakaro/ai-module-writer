@@ -1,0 +1,43 @@
+{
+  "date": "2026-04-20",
+  "gameServerId": "eaf1086a-a81d-41c4-b3f0-afa6a60ddda9",
+  "moduleId": "e84fbc4f-6cbc-4c4b-ad6e-e5c78f85647f",
+  "versionId": "39dcc4bc-94bf-49a2-a669-1b481c854a1c",
+  "cronjobId": "c96c5b47-59b8-45b0-86ed-4028ba61ef3f",
+  "botName": "votebot",
+  "commandPrefix": "+",
+  "verifiedFlow": [
+    {
+      "step": "votestatus without active vote",
+      "eventId": "09d8445f-a2ed-4b38-9922-ed36d00c5f62",
+      "success": true,
+      "message": "[Vote Restart] No active restart vote."
+    },
+    {
+      "step": "voterestart with initiator permission",
+      "eventId": "16ac5e77-18c1-476f-b3ea-602f4c7698bd",
+      "success": true,
+      "message": "[Vote Restart] Bot_votebot started a restart vote! /voteyes to agree. (1/1, 120s remaining)",
+      "eligiblePlayersLogged": 1,
+      "thresholdLogged": 1
+    },
+    {
+      "step": "manual check-vote cron trigger",
+      "eventId": "cf0c952c-4c57-48cb-91fc-a6845b2244ff",
+      "success": true,
+      "message": "[Vote Restart] Vote passed! (1/1) Server will restart in 300s.",
+      "effectiveVotesLogged": 1,
+      "thresholdLogged": 1
+    },
+    {
+      "step": "votestatus after cron pass",
+      "eventId": "839fa1ec-bfd8-4ee5-98d8-9105ce7c21dc",
+      "success": true,
+      "message": "[Vote Restart] Vote passed! Server restarting in 295s."
+    }
+  ],
+  "notes": [
+    "Live command and cronjob logs showed POST /gameserver/player/search during both the voterestart command and the check-vote cronjob, exercising getOnlineNonImmunePlayers() on the real Paper server.",
+    "The pagination-specific >100-player path remains covered by automated integration tests; live Paper verification here confirms the changed runtime path still works end-to-end with real bots."
+  ]
+}

@@ -46,13 +46,12 @@ ensure_token() {
 }
 
 retry_after_auth() {
-  if [[ -n "${TAKARO_USERNAME:-}" && -n "${TAKARO_PASSWORD:-}" ]]; then
-    "$SCRIPT_DIR/takaro-auth.sh" >&2
+  if "$SCRIPT_DIR/takaro-auth.sh" >&2; then
     return 0
   fi
 
-  echo "ERROR: Takaro authentication expired and no TAKARO_USERNAME/TAKARO_PASSWORD were provided for automatic refresh." >&2
-  echo "Run scripts/takaro-auth.sh or set TAKARO_TOKEN before retrying module-push.sh." >&2
+  echo "ERROR: Takaro authentication expired and automatic refresh failed." >&2
+  echo "Check your .env / exported Takaro credentials, or set TAKARO_TOKEN before retrying module-push.sh." >&2
   return 1
 }
 

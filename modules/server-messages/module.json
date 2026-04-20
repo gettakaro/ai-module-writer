@@ -11,7 +11,7 @@
     "properties": {
       "messages": {
         "type": "array",
-        "description": "Messages to broadcast. Supports {playerCount} and {serverName}. Unknown placeholders are left unchanged. Weight only affects random order. Limit 100 messages. Message text must include at least one non-whitespace character.",
+        "description": "Messages to broadcast. Supports {playerCount} and {serverName}. Unsupported placeholder typos are rejected at install time. Weight only affects random order. Limit 100 messages. Message text must include at least one non-whitespace character.",
         "default": [],
         "maxItems": 100,
         "items": {
@@ -19,9 +19,16 @@
           "properties": {
             "text": {
               "type": "string",
-              "pattern": "\\S",
+              "allOf": [
+                {
+                  "pattern": "\\S"
+                },
+                {
+                  "pattern": "^(?!.*\\{(?!playerCount\\}|serverName\\})[^{}]*\\}).*$"
+                }
+              ],
               "title": "Broadcast message text",
-              "description": "The message text to broadcast. Supports {playerCount} and {serverName}. Unknown placeholders are left unchanged. Message text cannot be blank or whitespace only. Example: Welcome! There are {playerCount} players online."
+              "description": "The message text to broadcast. Supports {playerCount} and {serverName}. Whitespace-only messages are rejected at install time. Unsupported placeholder typos are rejected at install time. Example: Welcome! There are {playerCount} players online."
             },
             "weight": {
               "type": "integer",

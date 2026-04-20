@@ -693,7 +693,7 @@ describe('module-import CLI', () => {
     ]);
   });
 
-  it('drops bindings for deleted module permissions instead of aborting the whole replacement import', async () => {
+  it('aborts replacement imports when the new module would drop existing module permission bindings', async () => {
     const updatedRoles: Array<{ roleId: string; permissions: Array<{ permissionId: string; count?: number }> }> = [];
 
     let searchCalls = 0;
@@ -762,16 +762,12 @@ describe('module-import CLI', () => {
       },
     } as unknown as Client;
 
-    await importModuleExport(fakeClient, { name: MODULE_NAME, versions: [] } as any);
+    await assert.rejects(
+      importModuleExport(fakeClient, { name: MODULE_NAME, versions: [] } as any),
+      /missing permissions required to preserve existing role bindings/i,
+    );
 
-    assert.deepEqual(updatedRoles, [
-      {
-        roleId: 'role-1',
-        permissions: [
-          { permissionId: 'other-perm', count: 1 },
-        ],
-      },
-    ]);
+    assert.deepEqual(updatedRoles, []);
   });
 
   it('reinstalls prior installations again when a replacement import rolls back', async () => {

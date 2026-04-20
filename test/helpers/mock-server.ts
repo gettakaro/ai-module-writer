@@ -37,6 +37,38 @@ async function retry<T>(fn: () => Promise<T>, maxAttempts: number, delayMs: numb
   throw new Error('Retry exhausted');
 }
 
+async function fetchOnlinePlayers(client: Client, gameServerId: string, expectedPlayers: number): Promise<PlayerOnGameserverOutputDTO[]> {
+  const limit = 100;
+  const collected: PlayerOnGameserverOutputDTO[] = [];
+
+  for (let page = 0; page < 100; page++) {
+    const result = await client.playerOnGameserver.playerOnGameServerControllerSearch({
+      filters: {
+        gameServerId: [gameServerId],
+        online: [true],
+      },
+      limit,
+      page,
+    });
+
+    const batch = result.data.data;
+    collected.push(...batch);
+
+    const total = result.data.meta?.total;
+    if (typeof total === 'number' && collected.length >= total) {
+      break;
+    }
+    if (batch.length < limit) {
+      break;
+    }
+    if (collected.length >= expectedPlayers) {
+      break;
+    }
+  }
+
+  return collected;
+}
+
 export async function startMockServer(client: Client, options: StartMockServerOptions = {}): Promise<MockServerContext> {
   const registrationToken = process.env['TAKARO_REGISTRATION_TOKEN'];
   const wsUrl = process.env['TAKARO_WS_URL'];
@@ -67,9 +99,11 @@ export async function startMockServer(client: Client, options: StartMockServerOp
     population,
   });
 
+  let gameServer: GameServerOutputDTO | undefined;
+
   try {
     // Discover the game server in Takaro by identityToken
-    const gameServer: GameServerOutputDTO = await retry(
+    gameServer = await retry(
       async () => {
         const result = await client.gameserver.gameServerControllerSearch({
           filters: { identityToken: [identityToken] },
@@ -89,13 +123,7 @@ export async function startMockServer(client: Client, options: StartMockServerOp
     // Wait for players to appear in Takaro's playerOnGameserver records
     const players: PlayerOnGameserverOutputDTO[] = await retry(
       async () => {
-        const result = await client.playerOnGameserver.playerOnGameServerControllerSearch({
-          filters: {
-            gameServerId: [gameServer.id],
-            online: [true],
-          },
-        });
-        const found = result.data.data;
+        const found = await fetchOnlinePlayers(client, gameServer.id, population.totalPlayers);
         if (found.length < population.totalPlayers) throw new Error(`Waiting for ${population.totalPlayers} players to be online, only ${found.length} found so far`);
         return found;
       },
@@ -107,7 +135,7 @@ export async function startMockServer(client: Client, options: StartMockServerOp
     return { server, gameServer, players, identityToken };
   } catch (err) {
     // Clean up server resources before re-throwing so the process can exit cleanly
-    await stopMockServer(server).catch((cleanupErr) => {
+    await stopMockServer(server, client, gameServer?.id).catch((cleanupErr) => {
       console.error('startMockServer: cleanup after failure threw:', cleanupErr);
     });
     throw err;
