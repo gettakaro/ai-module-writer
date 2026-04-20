@@ -24,7 +24,7 @@ async function main() {
   const vipTier = targetPog ? getVipTier(targetPog) : Number(stats.lastVipTier ?? 0);
   const vipMultiplier = getVipMultiplier(vipTier);
   const wagerCap = config.wagerCap > 0 ? Math.floor(config.wagerCap * vipMultiplier) : 0;
-  const lossCap = config.lossCap > 0 ? Math.floor(config.lossCap * vipMultiplier) : 0;
+  const lossCap = config.lossCap > 0 ? Math.floor(config.lossCap) : 0;
   const resetAt = getNextWindowResetAt(config.capWindow);
 
   const lines = [

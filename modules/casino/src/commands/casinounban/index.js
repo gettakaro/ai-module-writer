@@ -1,5 +1,5 @@
-import { data, TakaroUserError, takaro } from '@takaro/helpers';
-import { requireManagePermission, resolvePlayerByName, clearBan } from './casino-helpers.js';
+import { data, TakaroUserError } from '@takaro/helpers';
+import { requireManagePermission, resolvePlayerByName, clearBan, setBanOverride, sendPlayerMessage } from './casino-helpers.js';
 
 async function main() {
   const { pog, gameServerId, arguments: args, module: mod } = data;
@@ -9,22 +9,16 @@ async function main() {
   const target = await resolvePlayerByName(targetName, gameServerId);
   if (!target) throw new TakaroUserError(`Player \"${targetName}\" not found.`);
   await clearBan(gameServerId, mod.moduleId, target.playerId);
+  await setBanOverride(gameServerId, mod.moduleId, target.playerId, {
+    active: true,
+    clearedAt: new Date().toISOString(),
+    reason: 'casinounban',
+  });
 
-  let removedPermissionRoles = 0;
-  try {
-    const playerRes = await takaro.player.playerControllerGetOne(target.playerId);
-    const roles = playerRes.data.data.roles ?? [];
-    for (const role of roles) {
-      const hasCasinoBan = (role.permissions ?? []).some((perm) => perm.permission === 'CASINO_BANNED');
-      if (!hasCasinoBan) continue;
-      await takaro.player.playerControllerRemoveRole(target.playerId, role.id, { gameServerId });
-      removedPermissionRoles += 1;
-    }
-  } catch (err) {
-    console.error(`casino.casinounban: failed to remove CASINO_BANNED role assignments for ${target.playerId}: ${err}`);
-  }
-
-  await pog.pm(`✅ ${target.player?.name ?? targetName} can use the casino again.${removedPermissionRoles > 0 ? ` Removed ${removedPermissionRoles} casino-ban role assignment${removedPermissionRoles === 1 ? '' : 's'}.` : ''}`);
+  await sendPlayerMessage(
+    pog,
+    `✅ ${target.player?.name ?? targetName} can use the casino again. Any module-local ban was cleared, and permission-based casino bans are now overridden for this player until they are banned again.`,
+  );
 }
 
 await main();

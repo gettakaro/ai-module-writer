@@ -17,6 +17,7 @@ import {
   ensureInteractivePlayAllowed,
   withCasinoLocks,
   consumeRecentCancellation,
+  sendPlayerMessage,
 } from './casino-helpers.js';
 
 async function finishHand({ session, gameServerId, mod, player, pog, config }) {
@@ -31,7 +32,7 @@ async function finishHand({ session, gameServerId, mod, player, pog, config }) {
   const result = await settle({ gameServerId, moduleId: mod.moduleId, player, config, game: 'blackjack', betAmount: session.stake, payout, skipLock: true });
   await deletePlayerSession(gameServerId, mod.moduleId, KEY_BLACKJACK_SESSION, player.id);
   const status = payout === 0 ? `Lost ${formatCurrency(session.stake)} coin.` : payout === session.stake ? 'Push — your stake was returned.' : `Won ${formatCurrency(payout)} coin.`;
-  await pog.pm(`🃏 You: ${session.playerHand.map(cardLabel).join(' ')} (${playerTotal})\nDealer: ${session.dealerHand.map(cardLabel).join(' ')} (${dealerTotal})\n${status} (Balance: ${formatCurrency(result.balance)})`);
+  await sendPlayerMessage(pog, `🃏 You: ${session.playerHand.map(cardLabel).join(' ')} (${playerTotal})\nDealer: ${session.dealerHand.map(cardLabel).join(' ')} (${dealerTotal})\n${status} (Balance: ${formatCurrency(result.balance)})`);
 }
 
 async function main() {
@@ -64,7 +65,7 @@ async function main() {
         await deletePlayerSession(gameServerId, mod.moduleId, KEY_BLACKJACK_SESSION, player.id);
         const playerHandText = `${session.playerHand.map(cardLabel).join(' ')} (${playerTotal})`;
         const dealerHandText = `${session.dealerHand.map(cardLabel).join(' ')} (${dealerTotal})`;
-        await pog.pm(`🃏 Blackjack! You: ${playerHandText}\nDealer: ${dealerHandText}\n${payout === session.stake ? 'Push.' : `Won ${formatCurrency(payout)} coin.`} (Balance: ${formatCurrency(result.balance)})`);
+        await sendPlayerMessage(pog, `🃏 Blackjack! You: ${playerHandText}\nDealer: ${dealerHandText}\n${payout === session.stake ? 'Push.' : `Won ${formatCurrency(payout)} coin.`} (Balance: ${formatCurrency(result.balance)})`);
         return;
       }
 
@@ -74,7 +75,7 @@ async function main() {
         await refund({ gameServerId, moduleId: mod.moduleId, playerId: player.id, amount: session.stake, config, skipLock: true });
         throw new TakaroUserError('Your blackjack hand could not be started, so your stake was refunded. Please try again.');
       }
-      await pog.pm(`🃏 Your hand: ${session.playerHand.map(cardLabel).join(' ')} (${playerTotal}). Dealer shows: ${cardLabel(session.dealerHand[0])}. /bj hit, /bj stand, /bj double`);
+      await sendPlayerMessage(pog, `🃏 Your hand: ${session.playerHand.map(cardLabel).join(' ')} (${playerTotal}). Dealer shows: ${cardLabel(session.dealerHand[0])}. /bj hit, /bj stand, /bj double`);
       return;
     }
 
@@ -101,11 +102,11 @@ async function main() {
       if (total > 21) {
         const result = await settle({ gameServerId, moduleId: mod.moduleId, player, config, game: 'blackjack', betAmount: session.stake, payout: 0, skipLock: true });
         await deletePlayerSession(gameServerId, mod.moduleId, KEY_BLACKJACK_SESSION, player.id);
-        await pog.pm(`🃏 Bust at ${total}. Lost ${formatCurrency(session.stake)} coin. (Balance: ${formatCurrency(result.balance)})`);
+        await sendPlayerMessage(pog, `🃏 Bust at ${total}. Lost ${formatCurrency(session.stake)} coin. (Balance: ${formatCurrency(result.balance)})`);
         return;
       }
       await setPlayerSession(gameServerId, mod.moduleId, KEY_BLACKJACK_SESSION, player.id, session);
-      await pog.pm(`🃏 Your hand: ${session.playerHand.map(cardLabel).join(' ')} (${total}). Dealer shows: ${cardLabel(session.dealerHand[0])}. /bj hit, /bj stand${total === 21 ? ' — 21! Stand to resolve the hand.' : ''}`);
+      await sendPlayerMessage(pog, `🃏 Your hand: ${session.playerHand.map(cardLabel).join(' ')} (${total}). Dealer shows: ${cardLabel(session.dealerHand[0])}. /bj hit, /bj stand${total === 21 ? ' — 21! Stand to resolve the hand.' : ''}`);
       return;
     }
 

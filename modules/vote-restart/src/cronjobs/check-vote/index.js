@@ -81,8 +81,10 @@ async function main() {
   }
 
   if (outcome.type === 'expired') {
+    const message = `[Vote Restart] The restart vote started by ${outcome.initiatorName} has expired. A new vote can be started in ${config.cooldownDuration}s.`;
+    console.log(message);
     await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-      message: `[Vote Restart] The restart vote started by ${outcome.initiatorName} has expired. A new vote can be started in ${config.cooldownDuration}s.`,
+      message,
       opts: {},
     });
     console.log(`check-vote: expired notice sent for ${outcome.initiatorName}`);

@@ -1,5 +1,5 @@
 import { data, TakaroUserError, checkPermission } from '@takaro/helpers';
-import { getDefaultConfig, sendPlayerMessage, assertNoLegacyCasinoModules, getBan, formatFutureTime } from './casino-helpers.js';
+import { getDefaultConfig, sendPlayerMessage, assertNoLegacyCasinoModules, getBan, formatFutureTime, isPermissionBanOverridden } from './casino-helpers.js';
 
 async function main() {
   const { gameServerId, player, pog, arguments: args, module: mod } = data;
@@ -37,7 +37,7 @@ async function main() {
   let playUnavailableReason = null;
   if (!checkPermission(pog, 'CASINO_PLAY')) {
     playUnavailableReason = 'You do not currently have access to casino games on this server.';
-  } else if (checkPermission(pog, 'CASINO_BANNED')) {
+  } else if (checkPermission(pog, 'CASINO_BANNED') && !(await isPermissionBanOverridden(gameServerId, mod.moduleId, player.id))) {
     playUnavailableReason = 'You are banned from the casino.';
   } else {
     const ban = await getBan(gameServerId, mod.moduleId, player.id);
@@ -82,16 +82,27 @@ async function main() {
     if (config.games.race) enabled.push('race');
   }
 
+  const allGamesDisabled = !playUnavailableReason && enabled.length === 0;
   const lines = playUnavailableReason
     ? [
       `🎰 Casino overview: unavailable right now. ${playUnavailableReason}`,
       'Utility commands: /casinostats, /casinotop <wager|won|winrate|roi|biggest>, /jackpot',
     ]
-    : [
-      '🎰 Casino games: ' + enabled.join(', '),
-      `Min bet: ${config.minBet} | Base max bet: ${config.maxBet} | Window: ${config.capWindow}`,
-      'Player commands: /casinostats, /casinotop <wager|won|winrate|roi|biggest>, /jackpot',
-    ];
+    : allGamesDisabled
+      ? [
+        '🎰 Casino overview: no games are currently enabled on this server.',
+        `Min bet: ${config.minBet} | Base max bet: ${config.maxBet} | Window: ${config.capWindow}`,
+        'Player commands: /casinostats, /casinotop <wager|won|winrate|roi|biggest>, /jackpot',
+      ]
+      : [
+        '🎰 Casino games: ' + enabled.map((name) => {
+          if (name === 'roulette') return 'roulette (/bet)';
+          if (name === 'blackjack') return 'blackjack (/bj)';
+          return name;
+        }).join(', '),
+        `Min bet: ${config.minBet} | Base max bet: ${config.maxBet} | Window: ${config.capWindow}`,
+        'Player commands: /casinostats, /casinotop <wager|won|winrate|roi|biggest>, /jackpot',
+      ];
 
   if (checkPermission(pog, 'CASINO_MANAGE')) {
     lines.push('Admin commands: /casinoreport [days], /casinoban <player> [hours], /casinounban <player>, /casinoresetstats <player>, /setjackpot <amount>');
@@ -99,6 +110,8 @@ async function main() {
 
   if (playUnavailableReason) {
     lines.push('If this seems wrong, ask an admin to grant you casino access, remove conflicting legacy gambling modules, or clear your casino ban.');
+  } else if (allGamesDisabled) {
+    lines.push('Ask a casino admin to enable at least one game before placing bets.');
   } else {
     lines.push('Tip: /casino <game> shows focused help for one game. You can use /roulette or /bet, and /blackjack or /bj.');
   }

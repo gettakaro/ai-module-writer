@@ -1,5 +1,5 @@
 import { data, TakaroUserError } from '@takaro/helpers';
-import { getDefaultConfig, placeBet, settle, roundCurrency, formatCurrency } from './casino-helpers.js';
+import { getDefaultConfig, placeBet, settle, roundCurrency, formatCurrency, sendPlayerMessage } from './casino-helpers.js';
 
 async function main() {
   const { gameServerId, pog, player, arguments: args, module: mod } = data;
@@ -21,9 +21,9 @@ async function main() {
   const result = await settle({ gameServerId, moduleId: mod.moduleId, player, config, game: 'dice', betAmount: placed.amount, payout });
 
   if (win) {
-    await pog.pm(`🎲 Rolled ${roll}. You bet ${direction} ${target} and won ${formatCurrency(payout)} coin. (Balance: ${formatCurrency(result.balance)})`);
+    await sendPlayerMessage(pog, `🎲 Rolled ${roll}. You bet ${direction} ${target} and won ${formatCurrency(payout)} coin. (Balance: ${formatCurrency(result.balance)})`);
   } else {
-    await pog.pm(`🎲 Rolled ${roll}. You bet ${direction} ${target} and lost ${formatCurrency(placed.amount)} coin. (Balance: ${formatCurrency(result.balance)})`);
+    await sendPlayerMessage(pog, `🎲 Rolled ${roll}. You bet ${direction} ${target} and lost ${formatCurrency(placed.amount)} coin. (Balance: ${formatCurrency(result.balance)})`);
   }
 }
 

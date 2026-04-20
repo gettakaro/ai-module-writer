@@ -78,6 +78,9 @@ async function main() {
   const snapshotNote = initiatorIsImmune
     ? ` ${player.name} is immune, so the vote starts at 0/${threshold}. They do not auto-vote.`
     : '';
+  if (initiatorIsImmune) {
+    console.log(`vote-restart: ${player.name} is immune, so this vote starts at 0/${threshold}`);
+  }
 
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
     message: `[Vote Restart] Restart vote started by ${player.name}. Type /voteyes to agree. ${currentVotes}/${threshold} yes votes so far, ${config.voteDuration}s left. Only the non-immune players who were online when the vote began can vote.${snapshotNote}`,

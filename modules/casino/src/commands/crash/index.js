@@ -1,5 +1,5 @@
 import { data, TakaroUserError } from '@takaro/helpers';
-import { getDefaultConfig, placeBet, settle, roundCurrency, formatCurrency, makeCrashPoint } from './casino-helpers.js';
+import { getDefaultConfig, placeBet, settle, roundCurrency, formatCurrency, makeCrashPoint, sendPlayerMessage } from './casino-helpers.js';
 
 function parseCashoutAt(args, chatMessage) {
   const rawMessage = String(chatMessage?.msg ?? chatMessage ?? '').trim();
@@ -24,9 +24,9 @@ async function main() {
   const result = await settle({ gameServerId, moduleId: mod.moduleId, player, config, game: 'crash', betAmount: placed.amount, payout });
 
   if (payout > 0) {
-    await pog.pm(`🚀 Crashed at ${crashPoint.toFixed(2)}x (you cashed ${cashoutAt.toFixed(2)}x) — won ${formatCurrency(payout)} coin. (Balance: ${formatCurrency(result.balance)})`);
+    await sendPlayerMessage(pog, `🚀 Crashed at ${crashPoint.toFixed(2)}x (you cashed ${cashoutAt.toFixed(2)}x) — won ${formatCurrency(payout)} coin. (Balance: ${formatCurrency(result.balance)})`);
   } else {
-    await pog.pm(`🚀 Crashed at ${crashPoint.toFixed(2)}x (you aimed ${cashoutAt.toFixed(2)}x) — lost ${formatCurrency(placed.amount)} coin. (Balance: ${formatCurrency(result.balance)})`);
+    await sendPlayerMessage(pog, `🚀 Crashed at ${crashPoint.toFixed(2)}x (you aimed ${cashoutAt.toFixed(2)}x) — lost ${formatCurrency(placed.amount)} coin. (Balance: ${formatCurrency(result.balance)})`);
   }
 }
 

@@ -1,5 +1,5 @@
 import { data, TakaroUserError } from '@takaro/helpers';
-import { getDefaultConfig, getRacePool, setRacePool, placeBet, refund, formatCurrency, formatFutureTime, parsePositiveNumberLike, withCasinoLocks } from './casino-helpers.js';
+import { getDefaultConfig, getRacePool, setRacePool, placeBet, refund, formatCurrency, formatFutureTime, parsePositiveNumberLike, withCasinoLocks, sendPlayerMessage } from './casino-helpers.js';
 
 async function main() {
   const { gameServerId, pog, player, arguments: args, module: mod } = data;
@@ -12,10 +12,10 @@ async function main() {
     const totalPot = participants.reduce((sum, entry) => sum + Number(entry.amount ?? 0), 0);
     const uniquePlayers = new Set(participants.map((entry) => entry.playerId)).size;
     if (participants.length === 0) {
-      await pog.pm('🏁 No race is currently open. Start one with /race <amount>.');
+      await sendPlayerMessage(pog, '🏁 No race is currently open. Start one with /race <amount>.');
       return;
     }
-    await pog.pm(`🏁 Current race pot: ${formatCurrency(totalPot)} coin across ${participants.length} entr${participants.length === 1 ? 'y' : 'ies'} from ${uniquePlayers} player${uniquePlayers === 1 ? '' : 's'}. Draw in about ${formatFutureTime(pool.drawAt)}. Join with /race <amount>.`);
+    await sendPlayerMessage(pog, `🏁 Current race pot: ${formatCurrency(totalPot)} coin across ${participants.length} entr${participants.length === 1 ? 'y' : 'ies'} from ${uniquePlayers} player${uniquePlayers === 1 ? '' : 's'}. Draw in about ${formatFutureTime(pool.drawAt)}. Bigger stakes buy more tickets and increase your win chance. Join with /race <amount>.`);
     return;
   }
 
@@ -54,7 +54,7 @@ async function main() {
   });
   const playerEntry = pool.participants[pool.participants.length - 1];
   const totalPot = pool.participants.reduce((sum, p) => sum + Number(p.amount ?? 0), 0);
-  await pog.pm(`🏁 Joined the race with ${formatCurrency(playerEntry.amount)} coin. Pot: ${formatCurrency(totalPot)} across ${pool.participants.length} entries. Draw in about ${formatFutureTime(pool.drawAt)}.`);
+  await sendPlayerMessage(pog, `🏁 Joined the race with ${formatCurrency(playerEntry.amount)} coin. Pot: ${formatCurrency(totalPot)} across ${pool.participants.length} entries. Draw in about ${formatFutureTime(pool.drawAt)}. Bigger stakes mean better odds in the weighted draw.`);
 }
 
 await main();

@@ -164,14 +164,12 @@ export async function getRestartState(gameServerId, moduleId) {
   try {
     const parsed = JSON.parse(variable.value);
     if (!parsed?.passedAt || isNaN(new Date(parsed.passedAt).getTime())) {
-      console.error('vote-helpers: restartState is invalid, deleting corrupt row');
-      await takaro.variable.variableControllerDelete(variable.id);
+      console.error('vote-helpers: restartState is invalid, ignoring corrupt row');
       return null;
     }
     return parsed;
   } catch (err) {
-    console.error(`vote-helpers: failed to parse restartState, deleting corrupt row: ${err}`);
-    await takaro.variable.variableControllerDelete(variable.id);
+    console.error(`vote-helpers: failed to parse restartState, ignoring corrupt row: ${err}`);
     return null;
   }
 }

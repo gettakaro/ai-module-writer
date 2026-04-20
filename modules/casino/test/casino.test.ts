@@ -404,6 +404,20 @@ describe('casino module', () => {
     assert.deepEqual(parsed, { participants: [], drawAt: null, status: 'open' });
   });
 
+  it('cancels an underfilled race and refunds the lone entry', async () => {
+    const player = ctx.players[0]!;
+    const before = await getPlayerCurrency(player.playerId);
+
+    const join = await triggerCommand(player.playerId, `${prefix}race 14`);
+    assert.equal(join.success, true, `expected solo /race join success, logs=${JSON.stringify(join.logs)}`);
+
+    await updateVariable('casino_race_pool', undefined, (pool) => ({ ...pool, drawAt: new Date(Date.now() - 1000).toISOString() }));
+    const draw = await triggerCronjob(drawRaceCronjobId);
+    assert.equal(draw.success, true, `expected underfilled draw-race success, logs=${JSON.stringify(draw.logs)}`);
+    assert.ok(draw.logs.some((msg) => /refunded undersized race pool/i.test(msg)), `expected cancelled-race log, logs=${JSON.stringify(draw.logs)}`);
+    assert.equal(await getPlayerCurrency(player.playerId), before, 'expected lone race stake refund after cancellation');
+  });
+
   it('settles every race entry even when the same player joins multiple times', async () => {
     const p1 = ctx.players[0]!;
     const p2 = ctx.players[1]!;
@@ -482,6 +496,23 @@ describe('casino module', () => {
     const afterCleanupBalance = await getPlayerCurrency(player.playerId);
     assert.equal(afterCleanupBalance, beforeBalance, 'expected abandoned hilo stake to be refunded');
     assert.equal(await getVariable('casino_session_hilo', player.playerId), null, 'expected hilo session deletion');
+  });
+
+  it('accepts direct /roulette and /blackjack aliases', async () => {
+    const player = ctx.players[0]!;
+
+    const roulette = await triggerCommand(player.playerId, `${prefix}roulette 10 red`);
+    assert.equal(roulette.success, true, `expected /roulette alias success, logs=${JSON.stringify(roulette.logs)}`);
+    assert.ok(roulette.logs.some((msg) => /Spun/i.test(msg)), `expected roulette alias wording, logs=${JSON.stringify(roulette.logs)}`);
+
+    const blackjack = await triggerCommand(player.playerId, `${prefix}blackjack 10`);
+    assert.equal(blackjack.success, true, `expected /blackjack alias success, logs=${JSON.stringify(blackjack.logs)}`);
+    assert.ok(blackjack.logs.some((msg) => /Dealer shows/i.test(msg) || /Blackjack!/i.test(msg)), `expected blackjack alias wording, logs=${JSON.stringify(blackjack.logs)}`);
+    const session = await getVariable('casino_session_blackjack', player.playerId);
+    if (session) {
+      const stand = await triggerCommand(player.playerId, `${prefix}blackjack stand`);
+      assert.equal(stand.success, true, `expected /blackjack stand alias success, logs=${JSON.stringify(stand.logs)}`);
+    }
   });
 
   it('covers blackjack hit, stand, and double branches', async () => {
@@ -793,6 +824,9 @@ describe('casino module', () => {
       },
     });
 
+    const overview = await triggerCommand(ctx.players[0]!.playerId, `${prefix}casino`);
+    assert.equal(overview.success, true, `expected /casino overview success, logs=${JSON.stringify(overview.logs)}`);
+
     const disabled = await triggerCommand(ctx.players[0]!.playerId, `${prefix}dice 10 over 55`);
     assert.equal(disabled.success, false, 'expected disabled game rejection');
     assert.ok(disabled.logs.some((msg) => /disabled/i.test(msg)), `expected disabled-game message, logs=${JSON.stringify(disabled.logs)}`);
@@ -807,6 +841,32 @@ describe('casino module', () => {
     const stats = await triggerCommand(ctx.players[0]!.playerId, `${prefix}casinostats`);
     assert.equal(stats.success, true, `expected casinostats success, logs=${JSON.stringify(stats.logs)}`);
     assert.ok(stats.logs.some((msg) => /remaining/i.test(msg)), `expected actionable cap feedback, logs=${JSON.stringify(stats.logs)}`);
+  });
+
+  it('shows a clear overview when every casino game is disabled', async () => {
+    const install = (await client.module.moduleInstallationsControllerGetModuleInstallation(moduleId, ctx.gameServer.id)).data.data;
+    await client.module.moduleInstallationsControllerUninstallModule(moduleId, ctx.gameServer.id);
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        ...(install.userConfig as any),
+        cooldownSeconds: 0,
+        games: {
+          flip: false,
+          dice: false,
+          hilo: false,
+          roulette: false,
+          slots: false,
+          blackjack: false,
+          crash: false,
+          duel: false,
+          race: false,
+        },
+      },
+    });
+
+    const overview = await triggerCommand(ctx.players[0]!.playerId, `${prefix}casino`);
+    assert.equal(overview.success, true, `expected /casino overview success with all games disabled, logs=${JSON.stringify(overview.logs)}`);
+    assert.ok(overview.logs.some((msg) => /no games are currently enabled/i.test(msg)), `expected disabled-overview wording, logs=${JSON.stringify(overview.logs)}`);
   });
 
   it('covers core validation failures across casino commands', async () => {

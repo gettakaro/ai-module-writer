@@ -192,7 +192,7 @@ async function main() {
     gameServerId,
     `⚔️ ${player.name} challenged ${opponentName} to a duel for ${formatCurrency(amount)} coin. ${opponentName}: use /duel accept or /duel decline within 60s.`,
   );
-  await pog.pm(`⚔️ Challenged ${opponentName} for ${formatCurrency(amount)} coin. They have 60s to /duel accept or /duel decline.`);
+  await pog.pm(`⚔️ Challenged ${opponentName} for ${formatCurrency(amount)} coin. Your stake was withdrawn immediately and will stay locked until they accept, decline, time out, or the duel is cancelled. They have 60s to /duel accept or /duel decline.`);
   if (target.pog?.pm) {
     await target.pog.pm(`⚔️ ${player.name} challenged you to a duel for ${formatCurrency(amount)} coin. Use /duel accept or /duel decline within 60s.`);
   }

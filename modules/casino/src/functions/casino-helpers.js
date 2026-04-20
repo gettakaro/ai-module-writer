@@ -13,6 +13,7 @@ export const KEY_WINDOW_PREFIX = 'casino_window';
 export const KEY_REPORT_DAY_PREFIX = 'casino_report_day';
 export const KEY_LOCK_PREFIX = 'casino_lock';
 export const KEY_LAST_CANCEL = 'casino_last_cancel';
+export const KEY_BAN_OVERRIDE = 'casino_ban_override';
 
 export const DEFAULT_STATS = {
   wagered: 0,
@@ -143,9 +144,6 @@ export function getEffectiveEdgeFraction(config, vipTier) {
 export function requirePlayPermission(pog) {
   if (!checkPermission(pog, 'CASINO_PLAY')) {
     throw new TakaroUserError('You do not have permission to play casino games.');
-  }
-  if (checkPermission(pog, 'CASINO_BANNED')) {
-    throw new TakaroUserError('You are banned from the casino.');
   }
 }
 
@@ -472,6 +470,29 @@ export async function clearBan(gameServerId, moduleId, playerId) {
   await deleteVariable(gameServerId, moduleId, KEY_BAN, playerId);
 }
 
+export async function getBanOverride(gameServerId, moduleId, playerId) {
+  return await readJsonVariable(gameServerId, moduleId, KEY_BAN_OVERRIDE, playerId, null);
+}
+
+export async function setBanOverride(gameServerId, moduleId, playerId, override) {
+  await writeVariable(gameServerId, moduleId, KEY_BAN_OVERRIDE, override, playerId);
+}
+
+export async function clearBanOverride(gameServerId, moduleId, playerId) {
+  await deleteVariable(gameServerId, moduleId, KEY_BAN_OVERRIDE, playerId);
+}
+
+export async function isPermissionBanOverridden(gameServerId, moduleId, playerId) {
+  const override = await getBanOverride(gameServerId, moduleId, playerId);
+  return Boolean(override?.active);
+}
+
+export async function ensurePlayerNotPermissionBanned(gameServerId, moduleId, playerId, pog) {
+  if (!checkPermission(pog, 'CASINO_BANNED')) return;
+  if (await isPermissionBanOverridden(gameServerId, moduleId, playerId)) return;
+  throw new TakaroUserError('You are banned from the casino.');
+}
+
 export async function setRecentCancellation(gameServerId, moduleId, playerId, cancellation) {
   await writeVariable(gameServerId, moduleId, KEY_LAST_CANCEL, cancellation, playerId);
 }
@@ -714,6 +735,7 @@ export async function maybeAnnounceBigWin({ gameServerId, moduleId, playerId, pl
 export async function placeBet({ gameServerId, moduleId, pog, player, config, game, amount, skipLock = false, skipCooldown = false }) {
   const run = async () => {
     requirePlayPermission(pog);
+    await ensurePlayerNotPermissionBanned(gameServerId, moduleId, player.id, pog);
     await assertNoLegacyCasinoModules(gameServerId, moduleId);
     await ensurePlayerNotBanned(gameServerId, moduleId, player.id);
     if (!getGameEnabled(config, game)) {
@@ -741,7 +763,7 @@ export async function placeBet({ gameServerId, moduleId, pog, player, config, ga
       }
     }
     if (config.lossCap > 0) {
-      const lossCap = Math.floor(config.lossCap * vipMultiplier);
+      const lossCap = Math.floor(config.lossCap);
       if (windowData.lost >= lossCap) {
         throw new TakaroUserError(`You already reached your ${config.capWindow} loss cap of ${formatCurrency(lossCap)}. Use /casinostats to see when your window resets.`);
       }
@@ -797,10 +819,12 @@ export async function placeBet({ gameServerId, moduleId, pog, player, config, ga
   return await withCasinoLocks(gameServerId, moduleId, [`player:${player.id}`], run);
 }
 
-export async function settle({ gameServerId, moduleId, player, config, game, betAmount, payout, jackpotWin = false, skipLock = false, announceBigWin = true, mutateJackpot = null }) {
+export async function settle({ gameServerId, moduleId, player, config, game, betAmount, payout, jackpotWin = false, skipLock = false, announceBigWin = true, mutateJackpot = null, playCount = 1, winCount = null, recordedLoss = null }) {
   const run = async () => {
     const safeBet = roundCurrency(betAmount);
     const safePayout = roundCurrency(payout);
+    const safePlayCount = Math.max(1, roundCurrency(playCount));
+    const safeRecordedLoss = recordedLoss === null || recordedLoss === undefined ? null : Math.max(0, roundCurrency(recordedLoss));
     const net = safePayout - safeBet;
     const settledAt = nowIso();
     const reportDay = settledAt.slice(0, 10);
@@ -822,7 +846,7 @@ export async function settle({ gameServerId, moduleId, player, config, game, bet
       previousJackpotRow = await findVariable(gameServerId, moduleId, KEY_JACKPOT);
       previousJackpot = await getJackpot(gameServerId, moduleId);
       previousReportDay = await readJsonVariable(gameServerId, moduleId, reportDayKey, undefined, null);
-      if (net < 0) {
+      if (net < 0 || (safeRecordedLoss ?? 0) > 0) {
         previousWindowData = await getWindowData(gameServerId, moduleId, player.id, config);
         previousWindowRow = await findVariable(gameServerId, moduleId, getWindowKey(previousWindowData.windowKey), player.id);
       }
@@ -838,18 +862,18 @@ export async function settle({ gameServerId, moduleId, player, config, game, bet
         ...previousStats,
         perGame: { ...(previousStats?.perGame ?? {}) },
       };
-      const isWinningRound = safePayout > safeBet;
+      const effectiveWinCount = winCount === null || winCount === undefined ? (safePayout > safeBet ? 1 : 0) : Math.max(0, roundCurrency(winCount));
       const currentGame = stats.perGame[game] ?? { wagered: 0, won: 0, plays: 0, wins: 0 };
       currentGame.wagered += safeBet;
       currentGame.won += safePayout;
-      currentGame.plays += 1;
-      currentGame.wins = Number(currentGame.wins ?? 0) + (isWinningRound ? 1 : 0);
+      currentGame.plays += safePlayCount;
+      currentGame.wins = Number(currentGame.wins ?? 0) + effectiveWinCount;
       stats.perGame[game] = currentGame;
       stats.wagered += safeBet;
       stats.won += safePayout;
       stats.net += net;
-      stats.gamesPlayed += 1;
-      stats.wins = Number(stats.wins ?? 0) + (isWinningRound ? 1 : 0);
+      stats.gamesPlayed += safePlayCount;
+      stats.wins = Number(stats.wins ?? 0) + effectiveWinCount;
       if (safePayout > Number(stats.biggestWin?.amount ?? 0)) {
         stats.biggestWin = { amount: safePayout, game, at: settledAt };
       }
@@ -857,9 +881,10 @@ export async function settle({ gameServerId, moduleId, player, config, game, bet
       let nextWindowData = previousWindowData ? { ...previousWindowData } : null;
       let shouldPersistJackpot = false;
       jackpot = { ...previousJackpot };
-      if (net < 0) {
-        nextWindowData.lost += Math.abs(net);
-        jackpotContribution = roundCurrency(Math.abs(net) * (config.jackpotContributionPct / 100));
+      const effectiveRecordedLoss = safeRecordedLoss ?? (net < 0 ? Math.abs(net) : 0);
+      if (effectiveRecordedLoss > 0) {
+        nextWindowData.lost += effectiveRecordedLoss;
+        jackpotContribution = roundCurrency(effectiveRecordedLoss * (config.jackpotContributionPct / 100));
         jackpot.amount += jackpotContribution;
         shouldPersistJackpot = true;
       }
@@ -902,7 +927,7 @@ export async function settle({ gameServerId, moduleId, player, config, game, bet
         const gameRow = current.perGame?.[game] ?? { wagered: 0, won: 0, plays: 0 };
         gameRow.wagered += safeBet;
         gameRow.won += safePayout;
-        gameRow.plays += 1;
+        gameRow.plays += safePlayCount;
         current.perGame = { ...(current.perGame ?? {}), [game]: gameRow };
 
         const playerRow = current.players?.[player.id] ?? { name: player.name, wagered: 0, won: 0, net: 0, perGame: {} };
@@ -913,7 +938,7 @@ export async function settle({ gameServerId, moduleId, player, config, game, bet
         const playerGameRow = playerRow.perGame?.[game] ?? { wagered: 0, won: 0, plays: 0 };
         playerGameRow.wagered += safeBet;
         playerGameRow.won += safePayout;
-        playerGameRow.plays += 1;
+        playerGameRow.plays += safePlayCount;
         playerRow.perGame = { ...(playerRow.perGame ?? {}), [game]: playerGameRow };
         current.players = { ...(current.players ?? {}), [player.id]: playerRow };
 
@@ -1108,9 +1133,13 @@ export function handTotal(hand) {
 }
 
 export function isSoft17(hand) {
-  const total = hand.reduce((sum, card) => sum + cardValue(card.rank), 0);
-  const aces = hand.filter((card) => card.rank === 1).length;
-  return aces > 0 && total === 17;
+  let total = hand.reduce((sum, card) => sum + cardValue(card.rank), 0);
+  let aces = hand.filter((card) => card.rank === 1).length;
+  while (total > 21 && aces > 0) {
+    total -= 10;
+    aces -= 1;
+  }
+  return total === 17 && aces > 0;
 }
 
 export function rouletteColor(number) {
@@ -1175,6 +1204,7 @@ export function parsePositiveNumberLike(value) {
 
 export async function ensureInteractivePlayAllowed(gameServerId, moduleId, pog, player, config, game) {
   requirePlayPermission(pog);
+  await ensurePlayerNotPermissionBanned(gameServerId, moduleId, player.id, pog);
   await assertNoLegacyCasinoModules(gameServerId, moduleId);
   await ensurePlayerNotBanned(gameServerId, moduleId, player.id);
   if (!getGameEnabled(config, game)) {
@@ -1449,8 +1479,13 @@ export async function sweepDisconnectedCasinoState(gameServerId, moduleId, confi
 
 export async function removePlayerFromRacePool(gameServerId, moduleId, playerId) {
   let removedEntries = [];
+  let blockedByDrawing = false;
   await mutateRacePool(gameServerId, moduleId, async (pool) => {
     const participants = Array.isArray(pool?.participants) ? pool.participants : [];
+    if ((pool?.status ?? 'open') === 'drawing') {
+      blockedByDrawing = participants.some((entry) => entry.playerId === playerId);
+      return pool;
+    }
     removedEntries = participants.filter((entry) => entry.playerId === playerId);
     if (removedEntries.length === 0) return pool;
     const remaining = participants.filter((entry) => entry.playerId !== playerId);
@@ -1461,7 +1496,7 @@ export async function removePlayerFromRacePool(gameServerId, moduleId, playerId)
       status: remaining.length > 0 ? (pool.status ?? 'open') : 'open',
     };
   });
-  return removedEntries;
+  return { removedEntries, blockedByDrawing };
 }
 
 export async function cancelPlayerCasinoState(gameServerId, moduleId, playerId, config) {
