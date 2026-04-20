@@ -801,14 +801,9 @@ export async function settle({ gameServerId, moduleId, player, config, game, bet
   const run = async () => {
     const safeBet = roundCurrency(betAmount);
     const safePayout = roundCurrency(payout);
-
-    if (safePayout > 0) {
-      await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, player.id, {
-        currency: safePayout,
-      });
-    }
-
     const net = safePayout - safeBet;
+    const settledAt = nowIso();
+
     const stats = await getPlayerStats(gameServerId, moduleId, player.id);
     const isWinningRound = safePayout > safeBet;
     const currentGame = stats.perGame[game] ?? { wagered: 0, won: 0, plays: 0, wins: 0 };
@@ -823,9 +818,8 @@ export async function settle({ gameServerId, moduleId, player, config, game, bet
     stats.gamesPlayed += 1;
     stats.wins = Number(stats.wins ?? 0) + (isWinningRound ? 1 : 0);
     if (safePayout > Number(stats.biggestWin?.amount ?? 0)) {
-      stats.biggestWin = { amount: safePayout, game, at: nowIso() };
+      stats.biggestWin = { amount: safePayout, game, at: settledAt };
     }
-    await setPlayerStats(gameServerId, moduleId, player.id, stats);
 
     let jackpotContribution = 0;
     let jackpot = await getJackpot(gameServerId, moduleId);
@@ -836,13 +830,16 @@ export async function settle({ gameServerId, moduleId, player, config, game, bet
 
       jackpotContribution = roundCurrency(Math.abs(net) * (config.jackpotContributionPct / 100));
       jackpot.amount += jackpotContribution;
-      await setJackpot(gameServerId, moduleId, jackpot);
     }
 
     if (jackpotWin) {
       jackpot.lastWinner = player.name;
-      jackpot.lastWinAt = nowIso();
+      jackpot.lastWinAt = settledAt;
       jackpot.lastWinGame = game;
+    }
+
+    await setPlayerStats(gameServerId, moduleId, player.id, stats);
+    if (net < 0 || jackpotWin) {
       await setJackpot(gameServerId, moduleId, jackpot);
     }
 
@@ -852,8 +849,14 @@ export async function settle({ gameServerId, moduleId, player, config, game, bet
       game,
       betAmount: safeBet,
       payout: safePayout,
-      occurredAt: nowIso(),
+      occurredAt: settledAt,
     });
+
+    if (safePayout > 0) {
+      await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, player.id, {
+        currency: safePayout,
+      });
+    }
 
     if (announceBigWin) {
       await maybeAnnounceBigWin({ gameServerId, moduleId, playerId: player.id, playerName: player.name, game, net, config, jackpotWin, payout: safePayout, betAmount: safeBet });
@@ -1268,8 +1271,11 @@ export async function handleDisconnect(gameServerId, moduleId, playerId, config)
     }
   });
 
-  const duelRecord = await findDuelForPlayer(gameServerId, moduleId, playerId);
-  if (duelRecord) {
+  const duelRecords = (await listDuels(gameServerId, moduleId)).filter(({ challengerId, duel }) => (
+    challengerId === playerId || duel?.opponentId === playerId
+  ));
+
+  for (const duelRecord of duelRecords) {
     await withCasinoLocks(gameServerId, moduleId, ['duel-registry', `player:${duelRecord.challengerId}`, `player:${duelRecord.duel.opponentId}`], async () => {
       const current = await getDuel(gameServerId, moduleId, duelRecord.challengerId);
       if (!current) return;
@@ -1278,7 +1284,7 @@ export async function handleDisconnect(gameServerId, moduleId, playerId, config)
         await refund({ gameServerId, moduleId, playerId: current.opponentId, amount: current.amount, config, skipLock: true });
       }
       await deleteDuel(gameServerId, moduleId, duelRecord.challengerId);
-      refunds.push({ key: KEY_DUEL, amount: current.amount });
+      refunds.push({ key: KEY_DUEL, amount: current.amount, challengerId: duelRecord.challengerId, opponentId: current.opponentId });
     });
   }
 

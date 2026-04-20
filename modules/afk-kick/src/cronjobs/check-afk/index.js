@@ -88,7 +88,7 @@ async function main() {
 
       stored.idleCount += 1;
 
-      if (stored.idleCount >= checksBeforeKick) {
+      if (stored.idleCount > checksBeforeKick) {
         if (checkPermission(pog, 'IMMUNE_TO_AFK_KICK')) {
           console.log(`AFK check: player ${playerId} is immune to AFK kick, skipping`);
           stored.idleCount = 0;
@@ -99,7 +99,7 @@ async function main() {
         });
         delete tracking[playerId];
         console.log(`AFK check: kicked player ${playerId} for being AFK`);
-      } else if (stored.idleCount >= checksBeforeWarning && !stored.warned) {
+      } else if (stored.idleCount > checksBeforeWarning && !stored.warned) {
         if (checkPermission(pog, 'IMMUNE_TO_AFK_KICK')) {
           console.log(`AFK check: player ${playerId} is immune to AFK kick, skipping warning`);
           stored.idleCount = 0;

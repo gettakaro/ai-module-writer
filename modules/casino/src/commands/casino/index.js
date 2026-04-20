@@ -1,8 +1,8 @@
 import { data, TakaroUserError, checkPermission } from '@takaro/helpers';
-import { getDefaultConfig, sendPlayerMessage } from './casino-helpers.js';
+import { getDefaultConfig, sendPlayerMessage, assertNoLegacyCasinoModules, getBan, formatFutureTime } from './casino-helpers.js';
 
 async function main() {
-  const { pog, arguments: args, module: mod } = data;
+  const { gameServerId, player, pog, arguments: args, module: mod } = data;
   const config = getDefaultConfig(mod.userConfig);
   const game = String(args.game ?? '?').toLowerCase();
 
@@ -34,6 +34,28 @@ async function main() {
     race: 'race',
   };
 
+  let playUnavailableReason = null;
+  if (!checkPermission(pog, 'CASINO_PLAY')) {
+    playUnavailableReason = 'You do not currently have permission to play casino games on this server.';
+  } else if (checkPermission(pog, 'CASINO_BANNED')) {
+    playUnavailableReason = 'You are explicitly banned from the casino.';
+  } else {
+    const ban = await getBan(gameServerId, mod.moduleId, player.id);
+    if (ban) {
+      playUnavailableReason = ban.expiresAt
+        ? `You are banned from the casino until ${formatFutureTime(ban.expiresAt)}.`
+        : 'You are banned from the casino.';
+    }
+  }
+
+  if (!playUnavailableReason) {
+    try {
+      await assertNoLegacyCasinoModules(gameServerId, mod.moduleId);
+    } catch (err) {
+      playUnavailableReason = String(err?.message ?? err ?? 'Old gambling modules are still installed.');
+    }
+  }
+
   if (game !== '?' && gameHelp[game]) {
     const normalizedGame = gameAliases[game];
     if (normalizedGame && config.games?.[normalizedGame] === false) {
@@ -48,27 +70,38 @@ async function main() {
   }
 
   const enabled = [];
-  if (config.games.flip) enabled.push('flip');
-  if (config.games.dice) enabled.push('dice');
-  if (config.games.hilo) enabled.push('hilo');
-  if (config.games.roulette) enabled.push('roulette (/bet)');
-  if (config.games.slots) enabled.push('slots');
-  if (config.games.blackjack) enabled.push('blackjack (/bj)');
-  if (config.games.crash) enabled.push('crash');
-  if (config.games.duel) enabled.push('duel');
-  if (config.games.race) enabled.push('race');
+  if (!playUnavailableReason) {
+    if (config.games.flip) enabled.push('flip');
+    if (config.games.dice) enabled.push('dice');
+    if (config.games.hilo) enabled.push('hilo');
+    if (config.games.roulette) enabled.push('roulette (/bet)');
+    if (config.games.slots) enabled.push('slots');
+    if (config.games.blackjack) enabled.push('blackjack (/bj)');
+    if (config.games.crash) enabled.push('crash');
+    if (config.games.duel) enabled.push('duel');
+    if (config.games.race) enabled.push('race');
+  }
 
-  const lines = [
-    '🎰 Casino games: ' + enabled.join(', '),
-    `Min bet: ${config.minBet} | Base max bet: ${config.maxBet} | Window: ${config.capWindow}`,
-    'Player commands: /casinostats, /casinotop <wager|won|winrate|roi|biggest>, /jackpot',
-  ];
+  const lines = playUnavailableReason
+    ? [
+      `🎰 Casino overview: unavailable right now. ${playUnavailableReason}`,
+      'Utility commands: /casinostats, /casinotop <wager|won|winrate|roi|biggest>, /jackpot',
+    ]
+    : [
+      '🎰 Casino games: ' + enabled.join(', '),
+      `Min bet: ${config.minBet} | Base max bet: ${config.maxBet} | Window: ${config.capWindow}`,
+      'Player commands: /casinostats, /casinotop <wager|won|winrate|roi|biggest>, /jackpot',
+    ];
 
   if (checkPermission(pog, 'CASINO_MANAGE')) {
     lines.push('Admin commands: /casinoreport [days], /casinoban <player> [hours], /casinounban <player>, /casinoresetstats <player>, /setjackpot <amount>');
   }
 
-  lines.push('Tip: /casino <game> shows focused help for one game. Roulette is /bet and blackjack is /bj.');
+  if (playUnavailableReason) {
+    lines.push('Ask an admin to grant CASINO_PLAY, remove conflicting legacy gambling modules, or clear your casino ban if this is unexpected.');
+  } else {
+    lines.push('Tip: /casino <game> shows focused help for one game. Roulette is /bet and blackjack is /bj.');
+  }
   await sendPlayerMessage(pog, lines.join('\n'));
 }
 

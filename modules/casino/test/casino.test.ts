@@ -901,7 +901,7 @@ describe('casino module', () => {
     }
   });
 
-  it('keeps the installation but blocks gameplay when a legacy gambling module is already installed', async () => {
+  it('uninstalls casino immediately when a legacy gambling module is already installed', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'casino-install-conflict-'));
     let legacyModuleId: string | undefined;
     try {
@@ -948,11 +948,7 @@ describe('casino module', () => {
       assert.ok((hookMeta?.result?.logs ?? []).some((log) => /install blocked/i.test(log.msg) || /legacy casino module conflict/i.test(log.msg)), `expected conflict logs, logs=${JSON.stringify(hookMeta?.result?.logs ?? [])}`);
 
       const installation = await client.module.moduleInstallationsControllerGetModuleInstallation(moduleId, ctx.gameServer.id).catch(() => null);
-      assert.ok(installation, 'expected casino installation to remain present during conflicting install');
-
-      const blocked = await triggerCommand(ctx.players[0]!.playerId, `${prefix}flip 10 heads`);
-      assert.equal(blocked.success, false, 'expected gameplay to stay blocked while legacy module remains installed');
-      assert.ok(blocked.logs.some((msg) => /old gambling modules are still installed/i.test(msg)), `expected legacy-conflict play message, logs=${JSON.stringify(blocked.logs)}`);
+      assert.equal(installation, null, 'expected casino installation to be removed during conflicting install');
 
       await uninstallModule(client, legacyModuleId, ctx.gameServer.id);
       await installModule(client, versionId, ctx.gameServer.id, {

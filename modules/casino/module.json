@@ -45,7 +45,7 @@
         "type": "object",
         "properties": {
           "refresh-leaderboards": { "type": "object", "properties": { "temporalValue": { "type": "string", "default": "*/5 * * * *" } }, "additionalProperties": true },
-          "draw-race": { "type": "object", "properties": { "temporalValue": { "type": "string", "default": "*/10 * * * *" } }, "additionalProperties": true },
+          "draw-race": { "type": "object", "properties": { "temporalValue": { "type": "string", "default": "* * * * *" } }, "additionalProperties": true },
           "expire-windows": { "type": "object", "properties": { "temporalValue": { "type": "string", "default": "0 0 * * *" } }, "additionalProperties": true },
           "expire-sessions": { "type": "object", "properties": { "temporalValue": { "type": "string", "default": "*/5 * * * *" } }, "additionalProperties": true },
           "expire-bans": { "type": "object", "properties": { "temporalValue": { "type": "string", "default": "0 * * * *" } }, "additionalProperties": true }
@@ -258,7 +258,7 @@
     },
     "on-module-installed": {
       "eventType": "module-installed",
-      "description": "Warn when legacy gambling modules are installed on the same game server and block gameplay until they are removed",
+      "description": "Reject installation when legacy gambling modules are installed on the same game server",
       "function": "src/hooks/on-module-installed/index.js"
     }
   },
@@ -269,7 +269,7 @@
       "function": "src/cronjobs/refresh-leaderboards/index.js"
     },
     "draw-race": {
-      "temporalValue": "*/10 * * * *",
+      "temporalValue": "* * * * *",
       "description": "Resolve the current race pool when the draw time arrives",
       "function": "src/cronjobs/draw-race/index.js"
     },
