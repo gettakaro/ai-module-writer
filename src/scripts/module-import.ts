@@ -71,6 +71,8 @@ interface VariableSnapshot {
 const TRANSIENT_MODULE_VARIABLE_PATTERNS = [
   /(?:^|_)lock$/i,
   /(?:^|_)delivery_receipt$/i,
+  /(?:^|_)test(?:_|$)/i,
+  /(?:^|_)force(?:_|$)/i,
 ];
 
 interface RolePermissionSnapshot {

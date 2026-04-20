@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'url';
 import { Client } from '@takaro/apiclient';
 import { createClient } from '../../../test/helpers/client.js';
-import { cleanupTestGameServers, cleanupTestModules, deleteModule, installModule } from '../../../test/helpers/modules.js';
+import { cleanupRole, cleanupTestGameServers, cleanupTestModules, deleteModule, installModule } from '../../../test/helpers/modules.js';
 import { MockServerContext, startMockServer, stopMockServer } from '../../../test/helpers/mock-server.js';
 import {
   createTakaroClient,
@@ -54,13 +54,21 @@ describe('module-import CLI', () => {
     }
   });
 
-  async function createModuleExport(description: string): Promise<string> {
+  async function createModuleExportFromDir(moduleDir: string, transform?: (moduleExport: Record<string, unknown>) => void): Promise<string> {
     const tempFile = path.join(os.tmpdir(), `takaro-module-import-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
-    await execFileAsync(process.execPath, [MODULE_TO_JSON_SCRIPT, MODULE_DIR, tempFile]);
-    const moduleExport = JSON.parse(await fs.readFile(tempFile, 'utf8')) as { description?: string };
-    moduleExport.description = description;
-    await fs.writeFile(tempFile, JSON.stringify(moduleExport, null, 2));
+    await execFileAsync(process.execPath, [MODULE_TO_JSON_SCRIPT, moduleDir, tempFile]);
+    if (transform) {
+      const moduleExport = JSON.parse(await fs.readFile(tempFile, 'utf8')) as Record<string, unknown>;
+      transform(moduleExport);
+      await fs.writeFile(tempFile, JSON.stringify(moduleExport, null, 2));
+    }
     return tempFile;
+  }
+
+  async function createModuleExport(description: string): Promise<string> {
+    return createModuleExportFromDir(MODULE_DIR, (moduleExport) => {
+      moduleExport.description = description;
+    });
   }
 
   async function searchExactModuleByName(moduleName: string): Promise<{ id: string; name: string } | null> {
@@ -85,11 +93,34 @@ describe('module-import CLI', () => {
     const moduleJson = JSON.parse(await fs.readFile(moduleJsonPath, 'utf8')) as {
       name: string;
       description?: string;
+      permissions?: Array<Record<string, unknown>>;
     };
     moduleJson.name = moduleName;
     moduleJson.description = `${moduleJson.description ?? ''} (shell push coverage)`;
     await fs.writeFile(moduleJsonPath, JSON.stringify(moduleJson, null, 2));
 
+    return tempDir;
+  }
+
+  async function createPermissionedModuleCopy(moduleName: string, description: string): Promise<string> {
+    const tempDir = await createRenamedModuleCopy(MODULE_DIR, moduleName);
+    const moduleJsonPath = path.join(tempDir, 'module.json');
+    const moduleJson = JSON.parse(await fs.readFile(moduleJsonPath, 'utf8')) as {
+      description?: string;
+      permissions?: Array<Record<string, unknown>>;
+    };
+
+    moduleJson.description = description;
+    moduleJson.permissions = [
+      {
+        permission: 'HELLO_USE',
+        friendlyName: 'Use Hello World',
+        description: 'Allows a player or role to use the hello world module.',
+        canHaveCount: true,
+      },
+    ];
+
+    await fs.writeFile(moduleJsonPath, JSON.stringify(moduleJson, null, 2));
     return tempDir;
   }
 
@@ -412,6 +443,12 @@ describe('module-import CLI', () => {
                   },
                   {
                     id: 'old-var-4',
+                    key: 'server_messages_test_force_state_write_failure',
+                    value: '{"stale":true}',
+                    gameServerId: 'gs-1',
+                  },
+                  {
+                    id: 'old-var-5',
                     key: 'expired_config_snapshot',
                     value: '{"stale":true}',
                     gameServerId: 'gs-1',
@@ -1025,6 +1062,92 @@ describe('module-import CLI', () => {
       if (mockCtx) {
         await stopMockServer(mockCtx.server, client, mockCtx.gameServer.id);
         mockCtx = undefined;
+      }
+    }
+  });
+
+  it('restores durable variables and rebinds role permissions during a real replacement import', async () => {
+    const moduleName = `test-hello-world-live-rebind-${Date.now()}`;
+    const baselineDir = await createPermissionedModuleCopy(moduleName, 'Baseline replacement migration test');
+    const updatedDir = await createPermissionedModuleCopy(moduleName, 'Updated replacement migration test');
+    const baselineExport = await createModuleExportFromDir(baselineDir);
+    const updatedExport = await createModuleExportFromDir(updatedDir);
+    let localMockCtx: MockServerContext | undefined;
+    let roleId: string | undefined;
+
+    try {
+      const baselineModule = await importModuleExport(client, JSON.parse(await fs.readFile(baselineExport, 'utf8')) as any);
+      const baselineDetails = await client.module.moduleControllerGetOne(baselineModule.id);
+      localMockCtx = await startMockServer(client);
+      await installModule(client, baselineDetails.data.data.latestVersion.id, localMockCtx.gameServer.id);
+
+      await client.variable.variableControllerCreate({
+        moduleId: baselineModule.id,
+        gameServerId: localMockCtx.gameServer.id,
+        key: 'hello_state',
+        value: JSON.stringify({ counter: 7 }),
+      });
+      await client.variable.variableControllerCreate({
+        moduleId: baselineModule.id,
+        gameServerId: localMockCtx.gameServer.id,
+        key: 'hello_test_force_failure',
+        value: JSON.stringify({ shouldNotRestore: true }),
+      });
+
+      const baselinePermission = (await client.role.roleControllerGetPermissions()).data.data.find(
+        (permission) => permission.module?.id === baselineModule.id && permission.permission === 'HELLO_USE',
+      );
+      assert.ok(baselinePermission, 'Expected baseline module permission to exist before replacement');
+
+      roleId = (await client.role.roleControllerCreate({
+        name: `tr-${Date.now().toString(36)}`,
+        permissions: [{ permissionId: baselinePermission.id, count: 5 }],
+      })).data.data.id;
+
+      const replacementModule = await importModuleExport(client, JSON.parse(await fs.readFile(updatedExport, 'utf8')) as any);
+      const replacementPermission = (await client.role.roleControllerGetPermissions()).data.data.find(
+        (permission) => permission.module?.id === replacementModule.id && permission.permission === 'HELLO_USE',
+      );
+      assert.ok(replacementPermission, 'Expected replacement module permission to exist after import');
+      assert.notEqual(replacementPermission.id, baselinePermission.id, 'Expected replacement import to create a fresh permission id');
+
+      const restoredVariable = await client.variable.variableControllerSearch({
+        filters: {
+          moduleId: [replacementModule.id],
+          gameServerId: [localMockCtx.gameServer.id],
+          key: ['hello_state'],
+        },
+      });
+      assert.equal(restoredVariable.data.data.length, 1, 'Expected durable module variable to be restored onto the replacement module');
+      assert.equal(restoredVariable.data.data[0].value, JSON.stringify({ counter: 7 }));
+
+      const transientVariable = await client.variable.variableControllerSearch({
+        filters: {
+          moduleId: [replacementModule.id],
+          gameServerId: [localMockCtx.gameServer.id],
+          key: ['hello_test_force_failure'],
+        },
+      });
+      assert.equal(transientVariable.data.data.length, 0, 'Expected transient operational module variables to be skipped during replacement');
+
+      const role = await client.role.roleControllerGetOne(roleId);
+      const helloPermission = role.data.data.permissions.find((permission) => permission.permission?.permission === 'HELLO_USE');
+      assert.ok(helloPermission, 'Expected role to keep the HELLO_USE permission after replacement');
+      assert.equal(helloPermission?.permissionId, replacementPermission.id, 'Expected role binding to point at the replacement permission id');
+      assert.equal(helloPermission?.count, 5, 'Expected permission counts to survive replacement rebinding');
+    } finally {
+      await cleanupRole(client, roleId);
+      if (localMockCtx) {
+        await stopMockServer(localMockCtx.server, client, localMockCtx.gameServer.id);
+      }
+      await fs.rm(baselineExport, { force: true });
+      await fs.rm(updatedExport, { force: true });
+      await fs.rm(baselineDir, { recursive: true, force: true });
+      await fs.rm(updatedDir, { recursive: true, force: true });
+
+      const existing = await searchExactModuleByName(moduleName);
+      if (existing) {
+        await deleteModule(client, existing.id);
       }
     }
   });

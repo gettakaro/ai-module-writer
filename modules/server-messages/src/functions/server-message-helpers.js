@@ -15,42 +15,16 @@ const LOCK_RETRY_DELAY_MS = 250;
 const PLAYER_COUNT_PAGE_SIZE = 100;
 const MAX_PLAYER_COUNT_PAGES = 100;
 
-function getUnsupportedPlaceholders(template) {
-  if (typeof template !== 'string' || template.length === 0) return [];
-
-  const unsupported = new Set();
-  template.replace(/\{([^{}]+)\}/g, (_match, token) => {
-    if (!SUPPORTED_PLACEHOLDERS.includes(token)) {
-      unsupported.add(token);
-    }
-    return _match;
-  });
-
-  return [...unsupported];
-}
-
-function validateMessageTemplate(template) {
-  const unsupported = getUnsupportedPlaceholders(template);
-  if (unsupported.length === 0) return;
-
-  throw new Error(
-    `server-message-helpers: unsupported placeholders [${unsupported.join(', ')}]; supported placeholders: ${SUPPORTED_PLACEHOLDERS.join(', ')}`,
-  );
-}
-
 export function normalizeMessages(rawMessages) {
   if (!Array.isArray(rawMessages)) return [];
 
   return rawMessages
     .slice(0, MAX_MESSAGE_COUNT)
     .filter((message) => message && typeof message.text === 'string' && message.text.trim().length > 0)
-    .map((message) => {
-      validateMessageTemplate(message.text);
-      return {
-        text: message.text,
-        weight: normalizeWeight(message.weight),
-      };
-    });
+    .map((message) => ({
+      text: message.text,
+      weight: normalizeWeight(message.weight),
+    }));
 }
 
 export function normalizeWeight(weight) {
@@ -336,15 +310,14 @@ async function waitForNextLockAttempt(delayMs) {
     return;
   }
 
-  if (typeof SharedArrayBuffer === 'function' && typeof Atomics?.wait === 'function') {
-    const signal = new Int32Array(new SharedArrayBuffer(4));
-    Atomics.wait(signal, 0, 0, delayMs);
+  if (typeof setTimeout === 'function') {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
     return;
   }
 
   const deadline = Date.now() + delayMs;
   while (Date.now() < deadline) {
-    // Busy wait only as a last-resort sandbox fallback when timers are unavailable.
+    await Promise.resolve();
   }
 }
 

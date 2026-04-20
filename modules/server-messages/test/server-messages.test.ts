@@ -493,13 +493,18 @@ describe('server-messages: broadcast cronjob', () => {
     }
   });
 
-  it('rejects unknown placeholders at install time so typoed configs fail early', async () => {
-    await assert.rejects(
-      reinstall({
-        order: 'sequential',
-        messages: [{ text: 'Server={serverNmae}' }],
-      }),
-      /playerCount|serverName|validation|config|userConfig/i,
+  it('leaves unknown placeholders unchanged so legacy typoed configs still install and broadcast', async () => {
+    await reinstall({
+      order: 'sequential',
+      messages: [{ text: 'Server={serverNmae}' }],
+    });
+
+    const result = await triggerCronjobAndCollectMessages();
+    assert.equal(result.success, true, `Expected unknown-placeholder run to succeed, logs: ${JSON.stringify(result.logs)}`);
+    assert.deepEqual(result.chatMessages, ['Server={serverNmae}']);
+    assert.ok(
+      result.logs.some((log) => log.includes('left unknown placeholders unchanged [serverNmae]')),
+      `Expected unknown-placeholder warning log, got: ${JSON.stringify(result.logs)}`,
     );
   });
 
@@ -1067,7 +1072,7 @@ describe('server-messages: broadcast cronjob', () => {
     }
   });
 
-  it('documents placeholder support, validation behavior, and bounded message lists in module.json', async () => {
+  it('documents placeholder support, preservation behavior, and bounded message lists in module.json', async () => {
     const moduleJson = JSON.parse(await fs.readFile(path.join(SOURCE_MODULE_DIR, 'module.json'), 'utf8')) as {
       config: {
         required?: string[];
@@ -1087,16 +1092,13 @@ describe('server-messages: broadcast cronjob', () => {
     };
 
     assert.match(moduleJson.config.properties.messages.description ?? '', /\{playerCount\}.*\{serverName\}/);
-    assert.match(moduleJson.config.properties.messages.description ?? '', /Unknown placeholders are rejected at install time/);
+    assert.match(moduleJson.config.properties.messages.description ?? '', /Unknown placeholders are left unchanged/);
     assert.match(moduleJson.config.properties.messages.description ?? '', /at least one non-whitespace character/);
     assert.deepEqual(moduleJson.config.required ?? [], []);
     assert.equal(moduleJson.config.properties.messages.maxItems, 100);
     const textSchema = moduleJson.config.properties.messages.items.properties.text;
-    assert.deepEqual(
-      textSchema.allOf?.map((entry) => entry.pattern),
-      ['\\S', '^(?:[^{}]|\\{playerCount\\}|\\{serverName\\})+$'],
-    );
-    assert.match(moduleJson.config.properties.messages.items.properties.text.description ?? '', /Unknown placeholders are rejected at install time/);
+    assert.equal(textSchema.pattern, '\\S');
+    assert.match(moduleJson.config.properties.messages.items.properties.text.description ?? '', /Unknown placeholders are left unchanged/);
     assert.match(moduleJson.config.properties.messages.items.properties.text.description ?? '', /Whitespace-only messages are rejected at install time/);
     assert.equal(moduleJson.config.properties.messages.items.properties.weight.type, 'integer');
     assert.equal(moduleJson.config.properties.messages.items.properties.weight.minimum, 1);
