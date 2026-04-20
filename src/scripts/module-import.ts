@@ -68,12 +68,12 @@ interface VariableSnapshot {
   playerId?: string;
 }
 
-const TRANSIENT_MODULE_VARIABLE_PATTERNS = [
-  /(?:^|_)lock$/i,
-  /(?:^|_)delivery_receipt$/i,
-  /(?:^|_)test(?:_|$)/i,
-  /(?:^|_)force(?:_|$)/i,
-];
+const TRANSIENT_MODULE_VARIABLE_KEYS = new Set([
+  'server_messages_lock',
+  'server_messages_delivery_receipt',
+  'server_messages_test_force_state_write_failure',
+  'server_messages_test_force_receipt_write_failure',
+]);
 
 interface RolePermissionSnapshot {
   permissionId: string;
@@ -146,7 +146,7 @@ function isExpiredVariable(variable: VariableSnapshot, now = Date.now()): boolea
 }
 
 function isTransientModuleVariable(variable: VariableSnapshot): boolean {
-  return TRANSIENT_MODULE_VARIABLE_PATTERNS.some((pattern) => pattern.test(variable.key));
+  return TRANSIENT_MODULE_VARIABLE_KEYS.has(variable.key);
 }
 
 function shouldRestoreModuleVariable(variable: VariableSnapshot): boolean {
@@ -531,31 +531,32 @@ async function rebindRolesToReplacementPermissions(
   }
 
   const newPermissionCodeToId = await ops.getModulePermissionCodeToId(replacementModule.id);
+  const missingCodes = [...new Set(
+    [...snapshot.permissionIdToCode.values()].filter((code) => !newPermissionCodeToId.has(code)),
+  )];
 
-  for (const [oldPermissionId, code] of snapshot.permissionIdToCode.entries()) {
-    if (!newPermissionCodeToId.has(code)) {
-      throw new Error(
-        `Replacement module '${replacementModule.name}' is missing permission '${code}' required to preserve existing role assignments from permission '${oldPermissionId}'`,
-      );
-    }
+  if (missingCodes.length > 0) {
+    console.warn(
+      `Replacement module '${replacementModule.name}' no longer defines permissions [${missingCodes.join(', ')}]; existing role bindings for those permissions will be removed during rebind.`,
+    );
   }
 
   for (const role of snapshot.rolesUsingModulePermissions) {
-    const reboundPermissions = role.permissions.map((permission) => {
+    const reboundPermissions = role.permissions.flatMap((permission) => {
       const code = snapshot.permissionIdToCode.get(permission.permissionId);
       if (!code) {
-        return permission;
+        return [permission];
       }
 
       const replacementPermissionId = newPermissionCodeToId.get(code);
       if (!replacementPermissionId) {
-        throw new Error(`Could not find replacement permission '${code}' while updating role '${role.id}'`);
+        return [];
       }
 
-      return {
+      return [{
         permissionId: replacementPermissionId,
         count: permission.count,
-      };
+      }];
     });
 
     await ops.updateRolePermissions(role.id, reboundPermissions);

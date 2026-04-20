@@ -15,6 +15,7 @@ import {
   getTakaroAuthConfig,
   importModuleExport,
   importModuleExportWithToken,
+  readModuleExport,
   REPO_ROOT,
   withOptionalLoginRetry,
 } from '../../../src/scripts/module-import.js';
@@ -196,6 +197,51 @@ describe('module-import CLI', () => {
     assert.equal(attempts, 2);
     assert.equal(loginCalls, 1);
     assert.equal(domainSetTo, 'domain-123');
+  });
+
+  it('fails fast when the local export file is malformed JSON', async () => {
+    const badExport = path.join(os.tmpdir(), `takaro-module-import-malformed-${Date.now()}.json`);
+
+    try {
+      await fs.writeFile(badExport, '{"name":');
+      assert.throws(
+        () => readModuleExport(badExport),
+        /Failed to parse module export/,
+      );
+    } finally {
+      await fs.rm(badExport, { force: true });
+    }
+  });
+
+  it('fails fast when the local export file omits the required name field', async () => {
+    const namelessExport = path.join(os.tmpdir(), `takaro-module-import-nameless-${Date.now()}.json`);
+
+    try {
+      await fs.writeFile(namelessExport, JSON.stringify({ versions: [] }, null, 2));
+      assert.throws(
+        () => readModuleExport(namelessExport),
+        /missing required field 'name'/i,
+      );
+    } finally {
+      await fs.rm(namelessExport, { force: true });
+    }
+  });
+
+  it('fails fast when local auth configuration is missing before any API call is attempted', async () => {
+    assert.throws(
+      () => getTakaroAuthConfig({} as NodeJS.ProcessEnv),
+      /TAKARO_HOST is required/,
+    );
+    assert.throws(
+      () => getTakaroAuthConfig({
+        TAKARO_HOST: 'https://takaro.invalid',
+        TAKARO_DOMAIN_ID: 'domain-1',
+        TAKARO_TOKEN: '',
+        TAKARO_USERNAME: '',
+        TAKARO_PASSWORD: '',
+      } as NodeJS.ProcessEnv),
+      /TAKARO_TOKEN or TAKARO_USERNAME\/TAKARO_PASSWORD is required/,
+    );
   });
 
   it('push script imports a module end-to-end through the documented shell workflow', async () => {
@@ -449,6 +495,12 @@ describe('module-import CLI', () => {
                   },
                   {
                     id: 'old-var-5',
+                    key: 'guild_lock',
+                    value: '{"count":4}',
+                    gameServerId: 'gs-1',
+                  },
+                  {
+                    id: 'old-var-6',
                     key: 'expired_config_snapshot',
                     value: '{"stale":true}',
                     gameServerId: 'gs-1',
@@ -512,6 +564,14 @@ describe('module-import CLI', () => {
           playerId: undefined,
           expiresAt: undefined,
         },
+        {
+          moduleId: 'new-module',
+          key: 'guild_lock',
+          value: '{"count":4}',
+          gameServerId: 'gs-1',
+          playerId: undefined,
+          expiresAt: undefined,
+        },
       ],
       'Expected only durable module-scoped variables to migrate to the replacement module id',
     );
@@ -528,6 +588,79 @@ describe('module-import CLI', () => {
       ],
       'Expected roles to be rebound from deleted permission ids to the replacement module permissions',
     );
+  });
+
+  it('drops bindings for deleted module permissions instead of aborting the whole replacement import', async () => {
+    const updatedRoles: Array<{ roleId: string; permissions: Array<{ permissionId: string; count?: number }> }> = [];
+
+    let searchCalls = 0;
+
+    const fakeClient = {
+      module: {
+        moduleControllerSearch: async () => {
+          searchCalls += 1;
+          if (searchCalls === 1) {
+            return {
+              data: {
+                data: [{ id: 'old-module', name: MODULE_NAME, latestVersion: { id: 'old-version' } }],
+              },
+            };
+          }
+
+          return {
+            data: {
+              data: [{ id: 'new-module', name: MODULE_NAME, latestVersion: { id: 'new-version' } }],
+            },
+          };
+        },
+        moduleInstallationsControllerGetInstalledModules: async () => ({ data: { data: [], meta: { total: 0 } } }),
+        moduleControllerExport: async () => ({ data: { data: { name: MODULE_NAME, versions: [] } } }),
+        moduleControllerRemove: async () => ({ data: { data: {} } }),
+        moduleControllerImport: async () => ({ data: { data: {} } }),
+      },
+      variable: {
+        variableControllerSearch: async () => ({ data: { data: [], meta: { total: 0 } } }),
+      },
+      role: {
+        roleControllerGetPermissions: async () => ({
+          data: {
+            data: [
+              { id: 'old-perm', permission: 'HELLO_USE', module: { id: 'old-module', name: MODULE_NAME } },
+              { id: 'other-perm', permission: 'UNRELATED', module: { id: 'other-module', name: 'other' } },
+            ],
+          },
+        }),
+        roleControllerSearch: async () => ({
+          data: {
+            data: [
+              {
+                id: 'role-1',
+                permissions: [
+                  { permissionId: 'old-perm', count: 3 },
+                  { permissionId: 'other-perm', count: 1 },
+                ],
+              },
+            ],
+            meta: { total: 1 },
+          },
+        }),
+        roleControllerUpdate: async (roleId: string, payload: { permissions?: Array<{ permissionId: string; count?: number }> }) => {
+          updatedRoles.push({ roleId, permissions: payload.permissions ?? [] });
+          return { data: { data: {} } };
+        },
+      },
+    } as unknown as Client;
+
+    await importModuleExport(fakeClient, { name: MODULE_NAME, versions: [] } as any);
+
+    assert.deepEqual(updatedRoles, [
+      {
+        roleId: 'role-1',
+        permissions: [
+          { permissionId: 'other-perm', count: 1 },
+        ],
+      },
+    ]);
   });
 
   it('reinstalls prior installations again when a replacement import rolls back', async () => {
@@ -1091,7 +1224,7 @@ describe('module-import CLI', () => {
         moduleId: baselineModule.id,
         gameServerId: localMockCtx.gameServer.id,
         key: 'hello_test_force_failure',
-        value: JSON.stringify({ shouldNotRestore: true }),
+        value: JSON.stringify({ shouldRestore: true }),
       });
 
       const baselinePermission = (await client.role.roleControllerGetPermissions()).data.data.find(
@@ -1121,14 +1254,15 @@ describe('module-import CLI', () => {
       assert.equal(restoredVariable.data.data.length, 1, 'Expected durable module variable to be restored onto the replacement module');
       assert.equal(restoredVariable.data.data[0].value, JSON.stringify({ counter: 7 }));
 
-      const transientVariable = await client.variable.variableControllerSearch({
+      const similarlyNamedDurableVariable = await client.variable.variableControllerSearch({
         filters: {
           moduleId: [replacementModule.id],
           gameServerId: [localMockCtx.gameServer.id],
           key: ['hello_test_force_failure'],
         },
       });
-      assert.equal(transientVariable.data.data.length, 0, 'Expected transient operational module variables to be skipped during replacement');
+      assert.equal(similarlyNamedDurableVariable.data.data.length, 1, 'Expected similarly-named durable module variables to survive replacement');
+      assert.equal(similarlyNamedDurableVariable.data.data[0].value, JSON.stringify({ shouldRestore: true }));
 
       const role = await client.role.roleControllerGetOne(roleId);
       const helloPermission = role.data.data.permissions.find((permission) => permission.permission?.permission === 'HELLO_USE');

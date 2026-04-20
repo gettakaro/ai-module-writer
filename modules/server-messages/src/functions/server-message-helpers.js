@@ -370,9 +370,13 @@ export function startExecutionLockHeartbeat(lock, options = {}) {
   }
 
   const ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : LOCK_TTL_MS;
+  const intervalMs = Number.isFinite(options.intervalMs)
+    ? options.intervalMs
+    : Math.max(1000, Math.floor(ttlMs / 3));
   let stopped = false;
   let inFlightBeat = Promise.resolve();
   let lastError = null;
+  let timer = null;
 
   const beatOnce = async (label = 'checkpoint') => {
     if (stopped) return;
@@ -393,10 +397,39 @@ export function startExecutionLockHeartbeat(lock, options = {}) {
     return inFlightBeat;
   };
 
+  const clearTimer = () => {
+    if (timer !== null && typeof clearTimeout === 'function') {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+
+  const scheduleNextBeat = () => {
+    if (stopped || lastError || typeof setTimeout !== 'function' || !Number.isFinite(intervalMs) || intervalMs <= 0) {
+      return;
+    }
+
+    timer = setTimeout(() => {
+      timer = null;
+      queueBeat('interval').catch(() => {
+        // stop() rethrows the normalized error.
+      }).finally(() => {
+        scheduleNextBeat();
+      });
+    }, intervalMs);
+
+    if (typeof timer?.unref === 'function') {
+      timer.unref();
+    }
+  };
+
+  scheduleNextBeat();
+
   return {
     beat: async (label = 'checkpoint') => queueBeat(label),
     stop: async () => {
       stopped = true;
+      clearTimer();
 
       try {
         await inFlightBeat;
