@@ -1,5 +1,5 @@
 {
-  "name": "utils",
+  "name": "test-utils",
   "description": "Cross-game utility commands for server info, rules, moderation, and simple economy administration.",
   "version": "latest",
   "supportedGames": [

@@ -1,4 +1,4 @@
-import { data } from '@takaro/helpers';
+import { data, TakaroUserError } from '@takaro/helpers';
 import { compactRules, safePrivateMessage } from './utils-helpers.js';
 
 async function main() {
@@ -7,7 +7,10 @@ async function main() {
 
   if (rules.length === 0) {
     const message = 'This server has not configured any rules yet.';
-    await safePrivateMessage(pog, message);
+    const delivered = await safePrivateMessage(pog, message);
+    if (!delivered) {
+      throw new TakaroUserError('I could not deliver the server rules right now. Please try again in a moment.');
+    }
     return;
   }
 
@@ -17,7 +20,10 @@ async function main() {
   }
 
   const message = lines.join('\n');
-  await safePrivateMessage(pog, message);
+  const delivered = await safePrivateMessage(pog, message);
+  if (!delivered) {
+    throw new TakaroUserError('I could not deliver the server rules right now. Please try again in a moment.');
+  }
 }
 
 await main();

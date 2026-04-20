@@ -28,6 +28,7 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const MODULE_DIR = path.resolve(__dirname, '..');
+const MODULE_NAME = 'test-utils';
 
 describe('utils: admin commands', () => {
   let client: Client;
@@ -507,7 +508,11 @@ describe('utils: admin commands', () => {
     const res = await trigger(ctx.players[0].playerId, `${prefix}kick definitely-not-a-real-player-name`);
 
     assert.equal(res.success, false, 'Expected /kick with an invalid player to fail');
-    assert.ok(res.logs.some((msg) => msg.includes('not currently online')), JSON.stringify(res.logs));
+    assert.ok(
+      res.logs.some((msg) => msg.includes('Please specify a valid player to kick.'))
+        || res.logs.some((msg) => msg.includes('No player found with the name or ID')),
+      JSON.stringify(res.logs),
+    );
   });
 
   it('rejects /kick when the player exists globally but is not online on this server', async () => {
@@ -630,10 +635,10 @@ describe('test helper: pushModule rollback', () => {
     });
 
     const originalSearch = await client.module.moduleControllerSearch({
-      filters: { name: ['utils'] },
+      filters: { name: [MODULE_NAME] },
     });
-    const originalRecord = originalSearch.data.data.find((module) => module.name === 'utils') as (Record<string, any> | undefined);
-    assert.ok(originalRecord, `Expected original utils module, got: ${JSON.stringify(originalSearch.data.data)}`);
+    const originalRecord = originalSearch.data.data.find((module) => module.name === MODULE_NAME) as (Record<string, any> | undefined);
+    assert.ok(originalRecord, `Expected original ${MODULE_NAME} module, got: ${JSON.stringify(originalSearch.data.data)}`);
 
     tempModuleDir = await mkdtemp(path.join(os.tmpdir(), 'utils-rollback-'));
     await cp(MODULE_DIR, tempModuleDir, { recursive: true });
@@ -658,11 +663,11 @@ describe('test helper: pushModule rollback', () => {
     }
 
     const searchResult = await client.module.moduleControllerSearch({
-      filters: { name: ['utils'] },
+      filters: { name: [MODULE_NAME] },
     });
-    const restored = searchResult.data.data.find((module) => module.name === 'utils') as (Record<string, any> | undefined);
+    const restored = searchResult.data.data.find((module) => module.name === MODULE_NAME) as (Record<string, any> | undefined);
 
-    assert.ok(restored, `Expected restored utils module, got: ${JSON.stringify(searchResult.data.data)}`);
+    assert.ok(restored, `Expected restored ${MODULE_NAME} module, got: ${JSON.stringify(searchResult.data.data)}`);
     assert.equal(restored.description, originalRecord.description, 'Expected rollback to restore the original module metadata');
     restoredModuleId = restored.id;
     const restoredModuleIdValue = String(restored.id);

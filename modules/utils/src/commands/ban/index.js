@@ -70,7 +70,10 @@ async function main() {
     ? `Banned ${targetName} permanently. Reason: ${reason}`
     : `Banned ${targetName} for ${parsedDuration.humanDuration}. Reason: ${reason}`;
 
-  await safePrivateMessage(pog, confirmationMessage);
+  const confirmationDelivered = await safePrivateMessage(pog, confirmationMessage);
+  if (!confirmationDelivered) {
+    throw new TakaroUserError('The ban was created, but I could not deliver your confirmation message. Please verify the ban list before repeating the command.');
+  }
 
   if (mod.userConfig.broadcastBans) {
     const template = String(mod.userConfig.banBroadcastMessage);

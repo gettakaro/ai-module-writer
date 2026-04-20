@@ -227,8 +227,8 @@ async function main() {
     }
 
     const completedCycle = Number.isFinite(newCycle) && newCycle > 0 ? newCycle : 1;
-    const activeRound = completedCycle + 1;
-    const playerMessage = `You contributed ${amount} to the community fund. The community fund goal has been met!${carryoverMessage} New fund total: ${carryover}/${threshold}. Current round: ${activeRound}.`;
+    const nextRound = completedCycle + 1;
+    const playerMessage = `You contributed ${amount} to the community fund. The community fund goal has been met!${carryoverMessage} New fund total: ${carryover}/${threshold}. Completed round: ${completedCycle}. Next round: ${nextRound}.`;
 
     console.log(playerMessage);
     try {

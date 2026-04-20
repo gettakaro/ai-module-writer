@@ -401,6 +401,7 @@ export async function pushModule(
     let existingInstallations: ModuleInstallationBackup[] = [];
     let existingVariables: ModuleVariableBackup[] = [];
     let existingRoles: RoleBindingBackup[] = [];
+    const protectedModuleIds: string[] = [];
 
     for (const existingModule of existingModules) {
       const candidateBackup = (await moduleApi.moduleControllerExport(existingModule.id, {})).data.data as unknown as Record<string, unknown>;
@@ -416,6 +417,7 @@ export async function pushModule(
           console.warn(
             `pushModule: leaving protected module '${name}' (${existingModule.id}) in place because Takaro rejected deletion with HTTP 400`,
           );
+          protectedModuleIds.push(existingModule.id);
           continue;
         }
         throw err;
@@ -429,6 +431,12 @@ export async function pushModule(
       existingInstallations = candidateInstallations;
       existingVariables = candidateVariables;
       existingRoles = candidateRoles;
+    }
+
+    if (protectedModuleIds.length > 0) {
+      throw new Error(
+        `Cannot import module '${name}' because Takaro already has protected module(s) with that exact name (${protectedModuleIds.join(', ')}). Use a unique local development name such as 'test-${name}'.`,
+      );
     }
 
     let importedModule: ModuleOutputDTO | undefined;

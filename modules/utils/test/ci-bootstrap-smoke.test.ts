@@ -33,14 +33,23 @@ async function createMockBootstrapBin() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ci-bootstrap-mock-bin-'));
   const realNode = process.execPath;
 
-  await fs.writeFile(path.join(dir, 'docker'), '#!/usr/bin/env bash\nexit 0\n');
-  await fs.writeFile(path.join(dir, 'curl'), '#!/usr/bin/env bash\nexit 0\n');
+  await fs.writeFile(path.join(dir, 'docker'), `#!/usr/bin/env bash
+set -euo pipefail
+printf 'docker %s\n' "$*" >> "\${MOCK_BOOTSTRAP_LOG:?}"
+exit 0
+`);
+  await fs.writeFile(path.join(dir, 'curl'), `#!/usr/bin/env bash
+set -euo pipefail
+printf 'curl %s\n' "$*" >> "\${MOCK_BOOTSTRAP_LOG:?}"
+exit 0
+`);
   await fs.writeFile(path.join(dir, 'sleep'), '#!/usr/bin/env bash\nexit 0\n');
   await fs.writeFile(path.join(dir, 'node'), `#!/usr/bin/env bash
 set -euo pipefail
 REAL_NODE=${JSON.stringify(realNode)}
 for arg in "$@"; do
   if [[ "$arg" == *"ci-create-domain.ts" ]]; then
+    printf 'node %s\n' "$*" >> "\${MOCK_BOOTSTRAP_LOG:?}"
     cat <<'EOF'
 TAKARO_DOMAIN_ID=test-domain-id
 TAKARO_USERNAME=test-user@example.com
@@ -80,6 +89,7 @@ describe('ci bootstrap smoke', () => {
 
   it('exercises the bootstrap success path outside CI with mocked infrastructure and exports usable credentials', async () => {
     const envFile = path.join(REPO_ROOT, `.tmp-ci-bootstrap-mocked-${Date.now()}.env`);
+    const mockLog = path.join(os.tmpdir(), `ci-bootstrap-mocked-${Date.now()}.log`);
     const mockBin = await createMockBootstrapBin();
 
     try {
@@ -87,6 +97,7 @@ describe('ci bootstrap smoke', () => {
         ...process.env,
         PATH: `${mockBin}:${process.env.PATH}`,
         AWS_ECR_REGISTRY: process.env.AWS_ECR_REGISTRY || 'mock.registry.local',
+        MOCK_BOOTSTRAP_LOG: mockLog,
       };
 
       const { stdout, stderr } = await execFileAsync('bash', [SCRIPT_PATH], {
@@ -98,6 +109,7 @@ describe('ci bootstrap smoke', () => {
         timeout: 60_000,
       });
       const exported = await fs.readFile(envFile, 'utf8');
+      const bootstrapLog = await fs.readFile(mockLog, 'utf8');
       assert.match(stdout + stderr, /Bootstrap complete\. Takaro stack is ready\./);
       assert.match(exported, /^TAKARO_HOST=http:\/\/localhost:13000$/m);
       assert.match(exported, /^TAKARO_WS_URL=ws:\/\/localhost:3004$/m);
@@ -105,6 +117,19 @@ describe('ci bootstrap smoke', () => {
       assert.match(exported, /^TAKARO_USERNAME=test-user@example.com$/m);
       assert.match(exported, /^TAKARO_PASSWORD=test-password$/m);
       assert.match(exported, /^TAKARO_REGISTRATION_TOKEN=test-registration-token$/m);
+      assert.match(bootstrapLog, /docker compose -f .*docker-compose\.ci\.yml down --remove-orphans --volumes/);
+      assert.match(bootstrapLog, /docker compose -f .*docker-compose\.ci\.yml up -d postgresql postgresql_kratos redis mailhog/);
+      assert.match(bootstrapLog, /docker compose -f .*docker-compose\.ci\.yml exec postgresql pg_isready -U postgres -d takaro-ci-db/);
+      assert.match(bootstrapLog, /docker compose -f .*docker-compose\.ci\.yml run --rm kratos-migrate/);
+      assert.match(bootstrapLog, /docker compose -f .*docker-compose\.ci\.yml up -d kratos/);
+      assert.match(bootstrapLog, /docker compose -f .*docker-compose\.ci\.yml run --rm takaro_api npm -w packages\/app-api run db:migrate/);
+      assert.match(bootstrapLog, /docker compose -f .*docker-compose\.ci\.yml up -d takaro_api/);
+      assert.match(bootstrapLog, /docker compose -f .*docker-compose\.ci\.yml up -d takaro_connector takaro_mock_gameserver/);
+      assert.match(bootstrapLog, /curl -sf -o \/dev\/null http:\/\/localhost:4433\/health\/ready/);
+      assert.match(bootstrapLog, /curl -sf -o \/dev\/null http:\/\/localhost:13000\/healthz/);
+      assert.match(bootstrapLog, /curl -sf -o \/dev\/null http:\/\/localhost:3003\/healthz/);
+      assert.match(bootstrapLog, /curl -sf -o \/dev\/null http:\/\/localhost:3002\/healthz/);
+      assert.match(bootstrapLog, /node --import=ts-node-maintained\/register\/esm .*ci-create-domain\.ts/);
 
       const shellEnvJson = execFileSync(
         'bash',
@@ -126,6 +151,7 @@ describe('ci bootstrap smoke', () => {
       assert.equal(exportedShellEnv.TAKARO_REGISTRATION_TOKEN, 'test-registration-token');
     } finally {
       await fs.rm(envFile, { force: true });
+      await fs.rm(mockLog, { force: true });
       await fs.rm(mockBin, { recursive: true, force: true });
     }
   });

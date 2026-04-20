@@ -65,7 +65,11 @@ async function main() {
 
   console.log(`utils:givecurrency admin=${adminName} target=${targetName} amount=${amount}`);
 
-  await safePrivateMessage(pog, `Gave ${amount} currency to ${targetName}.`);
+  const confirmationDelivered = await safePrivateMessage(pog, `Gave ${amount} currency to ${targetName}.`);
+  if (!confirmationDelivered) {
+    throw new TakaroUserError('The currency was granted, but I could not deliver your confirmation message. Please verify the new balance before trying again.');
+  }
+
   await safeDirectMessage(
     gameServerId,
     target,

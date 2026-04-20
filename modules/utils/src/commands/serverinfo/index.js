@@ -1,4 +1,4 @@
-import { data } from '@takaro/helpers';
+import { data, TakaroUserError } from '@takaro/helpers';
 import { fetchOnlinePlayers, getGameServerName, safePrivateMessage, trimOrEmpty } from './utils-helpers.js';
 
 async function main() {
@@ -19,7 +19,10 @@ async function main() {
   }
 
   const message = lines.join('\n');
-  await safePrivateMessage(pog, message);
+  const delivered = await safePrivateMessage(pog, message);
+  if (!delivered) {
+    throw new TakaroUserError('I could not deliver the server information message right now. Please try again in a moment.');
+  }
 }
 
 await main();

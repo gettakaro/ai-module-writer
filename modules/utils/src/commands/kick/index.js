@@ -20,6 +20,10 @@ async function main() {
   }
 
   const target = getCommandTargetPlayer(args.player);
+  if (!target) {
+    throw new TakaroUserError('Please specify a valid player to kick.');
+  }
+
   const sameServerRequirementError = getSameServerOnlineRequirementError(target, gameServerId);
   if (sameServerRequirementError) {
     throw new TakaroUserError(sameServerRequirementError);
@@ -53,7 +57,10 @@ async function main() {
 
   console.log(`utils:kick admin=${adminName} target=${targetName} reason=${reason}`);
 
-  await safePrivateMessage(pog, `Kicked ${targetName}. Reason: ${reason}`);
+  const confirmationDelivered = await safePrivateMessage(pog, `Kicked ${targetName}. Reason: ${reason}`);
+  if (!confirmationDelivered) {
+    throw new TakaroUserError('The player was kicked, but I could not deliver your confirmation message. Please check the server logs and the player list.');
+  }
 
   if (mod.userConfig.broadcastKicks) {
     const message = renderTemplate(mod.userConfig.kickBroadcastMessage, {
