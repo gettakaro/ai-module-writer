@@ -27,11 +27,11 @@ async function main() {
   }
 
   if (!Number.isInteger(amount) || amount <= 0) {
-    throw new TakaroUserError('Usage: /givecurrency <player> <amount> — Amount must be a positive whole number.');
+    throw new TakaroUserError('Usage: givecurrency <player> <amount> — Amount must be a positive whole number.');
   }
 
   if (!await isEconomyEnabled(gameServerId)) {
-    throw new TakaroUserError('Currency is not available on this game server. Ask an admin to enable economy support before using /givecurrency.');
+    throw new TakaroUserError('Currency is not available on this game server. Ask an admin to enable economy support before using givecurrency.');
   }
 
   const [adminName, targetName, targetPog] = await Promise.all([
@@ -57,7 +57,7 @@ async function main() {
     console.error(`utils:givecurrency failed for target=${target.playerId} amount=${amount}: ${err}`);
 
     if (/economy|currency is not available|enable economy|Currency is not enabled/i.test(errorMessage)) {
-      throw new TakaroUserError('Currency is not available on this game server. Ask an admin to enable economy support before using /givecurrency.');
+      throw new TakaroUserError('Currency is not available on this game server. Ask an admin to enable economy support before using givecurrency.');
     }
 
     throw new TakaroUserError('The currency grant could not be completed because the game server API returned an error. Please try again or check the server logs.');

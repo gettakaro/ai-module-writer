@@ -19,9 +19,90 @@ export interface InstallModuleConfig {
   systemConfig?: Record<string, unknown>;
 }
 
+interface ModuleInstallationBackup {
+  gameServerId: string;
+  userConfig?: Record<string, unknown>;
+  systemConfig?: Record<string, unknown>;
+}
+
+interface ModuleVariableBackup {
+  key: string;
+  value: string;
+  gameServerId: string;
+}
+
+async function collectModuleInstallations(client: Client, moduleId: string): Promise<ModuleInstallationBackup[]> {
+  const result = await client.module.moduleInstallationsControllerGetInstalledModules({
+    filters: { moduleId: [moduleId] },
+    limit: 100,
+  });
+
+  return result.data.data.map((installation) => ({
+    gameServerId: installation.gameserverId,
+    userConfig: installation.userConfig as Record<string, unknown> | undefined,
+    systemConfig: installation.systemConfig as Record<string, unknown> | undefined,
+  }));
+}
+
+async function collectModuleVariables(client: Client, moduleId: string): Promise<ModuleVariableBackup[]> {
+  const result = await client.variable.variableControllerSearch({
+    filters: { moduleId: [moduleId] },
+    limit: 1000,
+  });
+
+  return result.data.data
+    .filter((variable) => typeof variable.gameServerId === 'string' && variable.gameServerId !== '')
+    .map((variable) => ({
+      key: variable.key,
+      value: variable.value,
+      gameServerId: variable.gameServerId as string,
+    }));
+}
+
+async function findModuleByName(client: Client, name: string): Promise<ModuleOutputDTO> {
+  const searchResult = await client.module.moduleControllerSearch({
+    filters: { name: [name] },
+  });
+
+  const found = searchResult.data.data.find((m) => m.name === name);
+  if (!found) throw new Error(`Module '${name}' not found after import`);
+
+  return found;
+}
+
+async function restoreModuleState(
+  client: Client,
+  moduleName: string,
+  moduleExport: Record<string, unknown>,
+  installations: ModuleInstallationBackup[],
+  variables: ModuleVariableBackup[],
+): Promise<ModuleOutputDTO> {
+  await client.module.moduleControllerImport(moduleExport);
+  const restoredModule = await findModuleByName(client, moduleName);
+
+  for (const installation of installations) {
+    await installModule(client, restoredModule.latestVersion.id, installation.gameServerId, {
+      userConfig: installation.userConfig,
+      systemConfig: installation.systemConfig,
+    });
+  }
+
+  for (const variable of variables) {
+    await client.variable.variableControllerCreate({
+      key: variable.key,
+      value: variable.value,
+      gameServerId: variable.gameServerId,
+      moduleId: restoredModule.id,
+    });
+  }
+
+  return restoredModule;
+}
+
 /**
  * Push a local module to Takaro via the import API.
- * If a module with the same name already exists, backs it up, replaces it, and restores it on import failure.
+ * If a module with the same name already exists, preserve its installations/state across replacement
+ * and restore the prior module if the replacement import fails.
  * Returns the imported module (found by name from module.json).
  */
 export async function pushModule(
@@ -53,48 +134,62 @@ export async function pushModule(
     }
     const { name } = moduleJson;
 
-    // Keep a backup of the current module so a failed replacement import can be rolled back.
     const existing = await client.module.moduleControllerSearch({
       filters: { name: [name] },
     });
     const existingModule = existing.data.data.find((m) => m.name === name);
     const existingBackup = existingModule
-      ? (await client.module.moduleControllerExport(existingModule.id, {})).data.data
+      ? (await client.module.moduleControllerExport(existingModule.id, {})).data.data as unknown as Record<string, unknown>
       : null;
+    const existingInstallations = existingModule
+      ? await collectModuleInstallations(client, existingModule.id)
+      : [];
+    const existingVariables = existingModule
+      ? await collectModuleVariables(client, existingModule.id)
+      : [];
 
     if (existingModule) {
       await client.module.moduleControllerRemove(existingModule.id);
     }
 
-    // Import via API (returns void — second search below retrieves the module data)
     try {
       await client.module.moduleControllerImport(moduleJson);
-    } catch (err) {
-      if (existingBackup) {
-        try {
-          await client.module.moduleControllerImport(existingBackup);
-        } catch (restoreErr) {
-          throw new Error(
-            `Import of '${name}' failed and restoring the previous module also failed. Import error: ${err}. Restore error: ${restoreErr}`,
-          );
-        }
+      const importedModule = await findModuleByName(client, name);
 
+      for (const installation of existingInstallations) {
+        await installModule(client, importedModule.latestVersion.id, installation.gameServerId, {
+          userConfig: installation.userConfig,
+          systemConfig: installation.systemConfig,
+        });
+      }
+
+      for (const variable of existingVariables) {
+        await client.variable.variableControllerCreate({
+          key: variable.key,
+          value: variable.value,
+          gameServerId: variable.gameServerId,
+          moduleId: importedModule.id,
+        });
+      }
+
+      return importedModule;
+    } catch (err) {
+      if (!existingBackup) {
+        throw err;
+      }
+
+      try {
+        await restoreModuleState(client, name, existingBackup, existingInstallations, existingVariables);
+      } catch (restoreErr) {
         throw new Error(
-          `Import of '${name}' failed, but the previous module was restored. Cause: ${err}`,
+          `Import of '${name}' failed and restoring the previous module also failed. Import error: ${err}. Restore error: ${restoreErr}`,
         );
       }
-      throw err;
+
+      throw new Error(
+        `Import of '${name}' failed, but the previous module was restored. Cause: ${err}`,
+      );
     }
-
-    // Find the module by name after import (import API returns void, no module data in response)
-    const searchResult = await client.module.moduleControllerSearch({
-      filters: { name: [name] },
-    });
-
-    const found = searchResult.data.data.find((m) => m.name === name);
-    if (!found) throw new Error(`Module '${name}' not found after import`);
-
-    return found;
   } finally {
     if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
   }

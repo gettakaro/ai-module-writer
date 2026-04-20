@@ -157,3 +157,73 @@ describe('utils: admin commands default no-broadcast behavior', () => {
     await waitForOnline(target.playerId, true);
   });
 });
+
+describe('utils: default ban broadcast template with permanent bans', () => {
+  let client: Client;
+  let ctx: MockServerContext;
+  let moduleId: string;
+  let versionId: string;
+  let prefix: string;
+  let adminRoleId: string | undefined;
+
+  before(async () => {
+    client = await createClient();
+    await cleanupTestModules(client);
+    await cleanupTestGameServers(client);
+    ctx = await startMockServer(client);
+
+    const mod = await pushModule(client, MODULE_DIR);
+    moduleId = mod.id;
+    versionId = mod.latestVersion.id;
+
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        broadcastBans: true,
+      },
+    });
+    prefix = await getCommandPrefix(client, ctx.gameServer.id);
+    adminRoleId = await assignPermissions(client, ctx.players[0].playerId, ctx.gameServer.id, ['UTILS_BAN']);
+  });
+
+  after(async () => {
+    await cleanupRole(client, adminRoleId);
+    try {
+      await uninstallModule(client, moduleId, ctx.gameServer.id);
+    } catch (err) {
+      console.error('Cleanup: failed to uninstall permanent-ban module:', err);
+    }
+    try {
+      await deleteModule(client, moduleId);
+    } catch (err) {
+      console.error('Cleanup: failed to delete permanent-ban module:', err);
+    }
+    await stopMockServer(ctx.server, client, ctx.gameServer.id);
+  });
+
+  async function trigger(playerId: string, msg: string) {
+    const before = new Date();
+    await client.command.commandControllerTrigger(ctx.gameServer.id, { msg, playerId });
+    const event = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    return {
+      success: meta?.result?.success ?? false,
+      logs: (meta?.result?.logs ?? []).map((l) => l.msg),
+    };
+  }
+
+  it('renders "permanently" with the default broadcast template for permanent bans', async () => {
+    const targetName = (await client.player.playerControllerGetOne(ctx.players[1].playerId)).data.data.name;
+    const res = await trigger(ctx.players[0].playerId, `${prefix}ban ${targetName} perm`);
+
+    assert.equal(res.success, true, JSON.stringify(res.logs));
+    assert.ok(
+      res.logs.some((msg) => msg.includes(`${targetName} was banned by`) && msg.includes('permanently') && msg.includes('Reason: Banned by an admin.')),
+      JSON.stringify(res.logs),
+    );
+  });
+});

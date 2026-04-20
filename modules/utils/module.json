@@ -121,7 +121,7 @@
     "kick": {
       "trigger": "kick",
       "description": "Kick an online player",
-      "helpText": "Usage: /kick <player> [reason] — target must be online on this server.",
+      "helpText": "Usage: kick <player> [reason] — use your server's command prefix; target must be online on this server.",
       "function": "src/commands/kick/index.js",
       "arguments": [
         {
@@ -142,7 +142,7 @@
     "ban": {
       "trigger": "ban",
       "description": "Ban a Takaro-resolvable player temporarily or permanently",
-      "helpText": "Usage: /ban <player> <duration> [reason] — works for players already known to Takaro, including offline players it can resolve.",
+      "helpText": "Usage: ban <player> <duration> [reason] — use your server's command prefix; works for players already known to Takaro, including offline players it can resolve.",
       "function": "src/commands/ban/index.js",
       "arguments": [
         {
@@ -169,7 +169,7 @@
     "givecurrency": {
       "trigger": "givecurrency",
       "description": "Grant currency to a player",
-      "helpText": "Usage: /givecurrency <player> <amount> — target must currently be online on this server.",
+      "helpText": "Usage: givecurrency <player> <amount> — use your server's command prefix; target must currently be online on this server.",
       "function": "src/commands/givecurrency/index.js",
       "arguments": [
         {

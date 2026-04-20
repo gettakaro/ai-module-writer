@@ -32,11 +32,11 @@ async function main() {
   const moduleId = mod.moduleId;
 
   if (amount === undefined || amount === null) {
-    throw new TakaroUserError('Usage: /fund <amount> — Amount must be a positive whole number.');
+    throw new TakaroUserError('Usage: fund <amount> — Amount must be a positive whole number.');
   }
 
   if (!Number.isInteger(amount) || amount < 1) {
-    throw new TakaroUserError('Usage: /fund <amount> — Amount must be a positive whole number.');
+    throw new TakaroUserError('Usage: fund <amount> — Amount must be a positive whole number.');
   }
 
   if (amount < config.minimumContribution) {
@@ -132,6 +132,7 @@ async function main() {
       }
 
       if (refunded) {
+        let stateRestored = true;
         try {
           await assertFundStateLock(gameServerId, moduleId, lockOwner);
           if (previousTotalVariable) {
@@ -161,7 +162,12 @@ async function main() {
             }
           }
         } catch (restoreErr) {
-          console.error(`Fund: failed to restore shared state after refunding player ${player.name}. Manual inspection recommended. Error: ${restoreErr}`);
+          stateRestored = false;
+          console.error(`Fund: CRITICAL shared-state restore failure after refunding player ${player.name}. Manual intervention required. Error: ${restoreErr}`);
+        }
+
+        if (!stateRestored) {
+          throw new TakaroUserError('Your currency was refunded, but the community fund state could not be restored cleanly. Please contact an admin before trying again.');
         }
 
         throw new TakaroUserError('Your contribution could not be recorded, so your currency was refunded. Please try again.');

@@ -1,10 +1,8 @@
 import { takaro } from '@takaro/helpers';
 
-export {
-  UTILS_DEBUG_FORCE_GIVECURRENCY_API_FAILURE_KEY,
-  UTILS_DEBUG_FORCE_KICK_API_FAILURE_KEY,
-  UTILS_DEBUG_FORCE_BAN_API_FAILURE_KEY,
-} from './utils-debug-keys.js';
+export const UTILS_DEBUG_FORCE_GIVECURRENCY_API_FAILURE_KEY = '__debug_force_givecurrency_api_failure';
+export const UTILS_DEBUG_FORCE_KICK_API_FAILURE_KEY = '__debug_force_kick_api_failure';
+export const UTILS_DEBUG_FORCE_BAN_API_FAILURE_KEY = '__debug_force_ban_api_failure';
 
 export function isBlank(value) {
   return value === undefined || value === null || String(value).trim() === '';
@@ -293,7 +291,7 @@ export async function isEconomyEnabled(gameServerId) {
     return String(result.data.data.value).toLowerCase() === 'true';
   } catch (err) {
     console.error(`utils-helpers: failed to load economyEnabled for ${gameServerId}: ${err}`);
-    return true;
+    return false;
   }
 }
 

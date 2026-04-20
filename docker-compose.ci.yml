@@ -1,10 +1,13 @@
 services:
   postgresql:
     image: postgres:15
+    ports:
+      - "5432:5432"
     environment:
       POSTGRES_USER: takaro-ci
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-takaro-ci}
       POSTGRES_DB: takaro-ci-db
+      POSTGRES_HOST_AUTH_METHOD: trust
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U takaro-ci -d takaro-ci-db"]
       interval: 5s
@@ -13,10 +16,13 @@ services:
 
   postgresql_kratos:
     image: postgres:15
+    ports:
+      - "5433:5432"
     environment:
       POSTGRES_USER: takaro-ci
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-takaro-ci}
       POSTGRES_DB: takaro-ci-db
+      POSTGRES_HOST_AUTH_METHOD: trust
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U takaro-ci -d takaro-ci-db"]
       interval: 5s

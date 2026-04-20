@@ -353,7 +353,7 @@ describe('community-fund: fund-contribute command', () => {
       `Expected log to mention "positive whole number", got: ${JSON.stringify(logMessages)}`,
     );
     assert.ok(
-      logMessages.some((msg) => msg.includes('Usage: /fund <amount>')),
+      logMessages.some((msg) => msg.includes('Usage: fund <amount>')),
       `Expected log to mention the in-game command form, got: ${JSON.stringify(logMessages)}`,
     );
   });
@@ -724,6 +724,106 @@ describe('community-fund: fund-contribute command', () => {
       statusLogs.some((msg) => msg.includes('total=20')),
       `Expected both serialized deposits to persist in fund state, got: ${JSON.stringify(statusLogs)}`,
     );
+  });
+});
+
+describe('community-fund: completion commands', () => {
+  let client: Client;
+  let ctx: MockServerContext;
+  let moduleId: string;
+  let versionId: string;
+  let prefix: string;
+  let contributeRoleId: string;
+
+  before(async () => {
+    client = await createClient();
+    await cleanupTestModules(client);
+    await cleanupTestGameServers(client);
+    ctx = await startMockServer(client);
+
+    await client.settings.settingsControllerSet('economyEnabled', {
+      gameServerId: ctx.gameServer.id,
+      value: 'true',
+    });
+
+    const mod = await pushModule(client, MODULE_DIR);
+    moduleId = mod.id;
+    versionId = mod.latestVersion.id;
+
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        fundThreshold: 100,
+        minimumContribution: 10,
+        completionMessage: 'The community fund reached {threshold}!',
+        completionCommands: ['disconnectAll'],
+        broadcastContributions: false,
+      },
+    });
+    prefix = await getCommandPrefix(client, ctx.gameServer.id);
+
+    contributeRoleId = await assignPermissions(
+      client,
+      ctx.players[0].playerId,
+      ctx.gameServer.id,
+      ['COMMUNITY_FUND_CONTRIBUTE'],
+    );
+
+    await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(ctx.gameServer.id, ctx.players[0].playerId, {
+      currency: 100,
+    });
+  });
+
+  after(async () => {
+    await cleanupRole(client, contributeRoleId);
+    try {
+      await uninstallModule(client, moduleId, ctx.gameServer.id);
+    } catch (err) {
+      console.error('Cleanup: failed to uninstall completion-command module:', err);
+    }
+    try {
+      await deleteModule(client, moduleId);
+    } catch (err) {
+      console.error('Cleanup: failed to delete completion-command module:', err);
+    }
+    await stopMockServer(ctx.server, client, ctx.gameServer.id);
+  });
+
+  async function getOnlineCount() {
+    const result = await client.playerOnGameserver.playerOnGameServerControllerSearch({
+      filters: {
+        gameServerId: [ctx.gameServer.id],
+        online: [true],
+      },
+      limit: 20,
+    });
+    return result.data.data.length;
+  }
+
+  it('executes configured completion commands after the threshold is reached', async () => {
+    const before = new Date();
+    await client.command.commandControllerTrigger(ctx.gameServer.id, {
+      msg: `${prefix}fund 100`,
+      playerId: ctx.players[0].playerId,
+    });
+
+    const event = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(meta?.result?.success, true, 'Expected completion contribution to succeed');
+
+    const deadline = Date.now() + 30000;
+    let onlineCount = await getOnlineCount();
+    while (onlineCount !== 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      onlineCount = await getOnlineCount();
+    }
+
+    assert.equal(onlineCount, 0, 'Expected the disconnectAll completion command to run after fund completion');
   });
 });
 

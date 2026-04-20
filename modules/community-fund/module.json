@@ -61,7 +61,7 @@
     "fund-contribute": {
       "trigger": "fund",
       "description": "Contribute currency to the community fund",
-      "helpText": "Contribute currency to the community fund. Amount must be a positive whole number.",
+      "helpText": "Usage: fund <amount> — use your server's command prefix. Amount must be a positive whole number.",
       "function": "src/commands/fund-contribute/index.js",
       "arguments": [
         {

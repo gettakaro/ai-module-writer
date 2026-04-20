@@ -519,26 +519,48 @@ describe('utils: admin commands', () => {
 
 describe('test helper: pushModule rollback', () => {
   let client: Client;
+  let ctx: MockServerContext;
   let restoredModuleId: string | undefined;
   let tempModuleDir: string | undefined;
 
   before(async () => {
     client = await createClient();
     await cleanupTestModules(client);
+    await cleanupTestGameServers(client);
+    ctx = await startMockServer(client);
   });
 
   after(async () => {
     if (restoredModuleId) {
+      try {
+        await uninstallModule(client, restoredModuleId, ctx.gameServer.id);
+      } catch {
+        // Best-effort cleanup only.
+      }
       await deleteModule(client, restoredModuleId);
     }
     if (tempModuleDir) {
       await rm(tempModuleDir, { recursive: true, force: true });
     }
+    await stopMockServer(ctx.server, client, ctx.gameServer.id);
   });
 
-  it('restores the previous module when a replacement import fails', async () => {
+  it('restores the previous module, installation, and module state when a replacement import fails', async () => {
     const original = await pushModule(client, MODULE_DIR);
     restoredModuleId = original.id;
+
+    await installModule(client, original.latestVersion.id, ctx.gameServer.id, {
+      userConfig: {
+        discordLink: 'https://discord.gg/rollback-check',
+      },
+    });
+
+    await client.variable.variableControllerCreate({
+      key: '__rollback_marker',
+      value: JSON.stringify({ ok: true }),
+      gameServerId: ctx.gameServer.id,
+      moduleId: original.id,
+    });
 
     const originalSearch = await client.module.moduleControllerSearch({
       filters: { name: ['test-utils'] },
@@ -549,16 +571,24 @@ describe('test helper: pushModule rollback', () => {
     tempModuleDir = await mkdtemp(path.join(os.tmpdir(), 'test-utils-rollback-'));
     await cp(MODULE_DIR, tempModuleDir, { recursive: true });
 
-    const moduleJsonPath = path.join(tempModuleDir, 'module.json');
-    const moduleJson = JSON.parse(await readFile(moduleJsonPath, 'utf8')) as Record<string, any>;
-    moduleJson.description = 'BROKEN replacement that should never survive rollback';
-    moduleJson.commands.kick.arguments[0].type = 'definitely-not-a-valid-argument-type';
-    await writeFile(moduleJsonPath, `${JSON.stringify(moduleJson, null, 2)}\n`);
+    const originalImport = client.module.moduleControllerImport.bind(client.module);
+    let importCallCount = 0;
+    client.module.moduleControllerImport = (async (...args: Parameters<typeof originalImport>) => {
+      importCallCount += 1;
+      if (importCallCount === 1) {
+        throw new Error('synthetic replacement import failure');
+      }
+      return originalImport(...args);
+    }) as typeof client.module.moduleControllerImport;
 
-    await assert.rejects(
-      pushModule(client, tempModuleDir),
-      /previous module was restored|failed/i,
-    );
+    try {
+      await assert.rejects(
+        pushModule(client, tempModuleDir),
+        /previous module was restored|failed|synthetic replacement import failure/i,
+      );
+    } finally {
+      client.module.moduleControllerImport = originalImport;
+    }
 
     const searchResult = await client.module.moduleControllerSearch({
       filters: { name: ['test-utils'] },
@@ -568,5 +598,48 @@ describe('test helper: pushModule rollback', () => {
     assert.ok(restored, `Expected restored test-utils module, got: ${JSON.stringify(searchResult.data.data)}`);
     assert.equal(restored.description, originalRecord.description, 'Expected rollback to restore the original module metadata');
     restoredModuleId = restored.id;
+    const restoredModuleIdValue = String(restored.id);
+
+    const installations = await client.module.moduleInstallationsControllerGetInstalledModules({
+      filters: {
+        moduleId: [restoredModuleIdValue],
+        gameserverId: [ctx.gameServer.id],
+      },
+      limit: 10,
+    });
+    assert.equal(installations.data.data.length, 1, `Expected restored module installation, got: ${JSON.stringify(installations.data.data)}`);
+    assert.equal(
+      (installations.data.data[0].userConfig as Record<string, unknown>)?.discordLink,
+      'https://discord.gg/rollback-check',
+      `Expected restored installation config, got: ${JSON.stringify(installations.data.data[0])}`,
+    );
+
+    const variables = await client.variable.variableControllerSearch({
+      filters: {
+        moduleId: [restoredModuleIdValue],
+        gameServerId: [ctx.gameServer.id],
+        key: ['__rollback_marker'],
+      },
+      limit: 10,
+    });
+    assert.equal(variables.data.data.length, 1, `Expected restored module variable, got: ${JSON.stringify(variables.data.data)}`);
+    assert.equal(variables.data.data[0].value, JSON.stringify({ ok: true }));
+
+    const prefix = await getCommandPrefix(client, ctx.gameServer.id);
+    const before = new Date();
+    await client.command.commandControllerTrigger(ctx.gameServer.id, {
+      msg: `${prefix}discord`,
+      playerId: ctx.players[0].playerId,
+    });
+    const event = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    const logs = (meta?.result?.logs ?? []).map((entry) => entry.msg);
+    assert.equal(meta?.result?.success, true, `Expected restored installation to execute commands, logs: ${JSON.stringify(logs)}`);
+    assert.ok(logs.some((msg) => msg.includes('https://discord.gg/rollback-check')), JSON.stringify(logs));
   });
 });
