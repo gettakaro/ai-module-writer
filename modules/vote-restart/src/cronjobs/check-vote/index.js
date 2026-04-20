@@ -107,7 +107,7 @@ async function main() {
     const restartCommand = restartPending.restartCommand || config.restartCommand;
     const elapsedSincePassed = (Date.now() - new Date(restartPending.passedAt).getTime()) / 1000;
 
-    if (restartPending.status === 'executed') {
+    if (restartPending.status === 'executed' && restartPending.executedAt) {
       console.log('check-vote: restart already issued previously, retrying cleanup only');
       await cleanupRestartState(gameServerId, moduleId, 'previously issued restart');
       return;
@@ -131,7 +131,7 @@ async function main() {
           console.log('check-vote: restart-pending disappeared before execution');
           return;
         }
-        if (currentPending.status === 'executed') {
+        if (currentPending.status === 'executed' && currentPending.executedAt) {
           console.log('check-vote: restart already issued previously, retrying cleanup only');
           await cleanupRestartState(gameServerId, moduleId, 'concurrently observed executed marker');
           return;

@@ -63,7 +63,7 @@ async function main() {
     `Daily puzzles: ${enabledDaily.length > 0 ? `${enabledDaily.join(', ')}, ${prefix}puzzle` : `${prefix}puzzle (all daily puzzle games are disabled)`}`,
     `Live rounds: ${liveSummary.length > 0 ? liveSummary.join('; ') : 'all live round games are disabled'}`,
     `Stats: ${prefix}minigamestats [player], ${prefix}minigamesleaderboard <points|wordle|hangman|streak>`,
-    ...(contentNotes.length > 0 ? [`Content status: ${contentNotes.join('; ')}.`] : ['Content status: seed the Variables banks to enable every configured game.']),
+    ...(contentNotes.length > 0 ? [`Content status: ${contentNotes.join('; ')}.`] : ['Content status: healthy — configured games are ready to play.']),
     ...(isManager ? [`Admin: ${prefix}minigamesfirenow [game], ${prefix}minigamesskiproundnow, ${prefix}minigamesban <player> [hours], ${prefix}minigamesunban <player>, ${prefix}minigamesresetstats <player>, ${prefix}minigamesreport [days].`] : []),
     `Live round cadence: every ~${config.liveRoundIntervalMinutes} min when enough players are online.`,
   ].join('\n');

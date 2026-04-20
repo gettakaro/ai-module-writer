@@ -1,5 +1,5 @@
 import { data, checkPermission, TakaroUserError } from '@takaro/helpers';
-import { getConfig, maybeFireLiveRound, normalizeOptionalStringArg } from './minigames-helpers.js';
+import { getConfig, maybeFireLiveRound, normalizeOptionalStringArg, getGameDisplayName } from './minigames-helpers.js';
 
 async function main() {
   const { gameServerId, pog, module: mod, arguments: args } = data;
@@ -8,13 +8,13 @@ async function main() {
   const forcedGame = normalizeOptionalStringArg(args.game).toLowerCase() || undefined;
   const validGames = ['trivia', 'scramble', 'mathrace', 'reactionrace'];
   if (forcedGame && !validGames.includes(forcedGame)) {
-    const message = `Unknown live game "${forcedGame}". Try: ${validGames.join(', ')}.`;
+    const message = `Unknown live game "${forcedGame}". Try: ${validGames.map((game) => getGameDisplayName(game)).join(', ')}.`;
     console.log(`minigames: ${message}`);
     await pog.pm(message);
     return;
   }
   if (forcedGame && !config.games[forcedGame]) {
-    const message = `${forcedGame} is disabled on this server. Enabled live games: ${validGames.filter((game) => config.games[game]).join(', ') || 'none'}.`;
+    const message = `${getGameDisplayName(forcedGame)} is disabled on this server. Enabled live games: ${validGames.filter((game) => config.games[game]).map((game) => getGameDisplayName(game)).join(', ') || 'none'}.`;
     console.log(`minigames: ${message}`);
     await pog.pm(message);
     return;
@@ -35,7 +35,7 @@ async function main() {
     await pog.pm(message);
     return;
   }
-  await pog.pm(`🚀 Fired ${round.game}.`);
+  await pog.pm(`🚀 Fired ${getGameDisplayName(round.game)}.`);
 }
 
 await main();
