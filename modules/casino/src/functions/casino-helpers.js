@@ -797,73 +797,186 @@ export async function placeBet({ gameServerId, moduleId, pog, player, config, ga
   return await withCasinoLocks(gameServerId, moduleId, [`player:${player.id}`], run);
 }
 
-export async function settle({ gameServerId, moduleId, player, config, game, betAmount, payout, jackpotWin = false, skipLock = false, announceBigWin = true }) {
+export async function settle({ gameServerId, moduleId, player, config, game, betAmount, payout, jackpotWin = false, skipLock = false, announceBigWin = true, mutateJackpot = null }) {
   const run = async () => {
     const safeBet = roundCurrency(betAmount);
     const safePayout = roundCurrency(payout);
     const net = safePayout - safeBet;
     const settledAt = nowIso();
-
-    const stats = await getPlayerStats(gameServerId, moduleId, player.id);
-    const isWinningRound = safePayout > safeBet;
-    const currentGame = stats.perGame[game] ?? { wagered: 0, won: 0, plays: 0, wins: 0 };
-    currentGame.wagered += safeBet;
-    currentGame.won += safePayout;
-    currentGame.plays += 1;
-    currentGame.wins = Number(currentGame.wins ?? 0) + (isWinningRound ? 1 : 0);
-    stats.perGame[game] = currentGame;
-    stats.wagered += safeBet;
-    stats.won += safePayout;
-    stats.net += net;
-    stats.gamesPlayed += 1;
-    stats.wins = Number(stats.wins ?? 0) + (isWinningRound ? 1 : 0);
-    if (safePayout > Number(stats.biggestWin?.amount ?? 0)) {
-      stats.biggestWin = { amount: safePayout, game, at: settledAt };
-    }
-
+    const reportDay = settledAt.slice(0, 10);
+    const reportDayKey = `${KEY_REPORT_DAY_PREFIX}:${reportDay}`;
     let jackpotContribution = 0;
-    let jackpot = await getJackpot(gameServerId, moduleId);
-    if (net < 0) {
-      const windowData = await getWindowData(gameServerId, moduleId, player.id, config);
-      windowData.lost += Math.abs(net);
-      await setWindowData(gameServerId, moduleId, player.id, windowData.windowKey, windowData);
+    let jackpot = null;
+    let payoutCredited = false;
+    let previousStats = null;
+    let previousStatsRow = null;
+    let previousWindowData = null;
+    let previousWindowRow = null;
+    let previousJackpot = null;
+    let previousJackpotRow = null;
+    let previousReportDay = null;
 
-      jackpotContribution = roundCurrency(Math.abs(net) * (config.jackpotContributionPct / 100));
-      jackpot.amount += jackpotContribution;
-    }
+    try {
+      previousStatsRow = await findVariable(gameServerId, moduleId, KEY_STATS, player.id);
+      previousStats = await getPlayerStats(gameServerId, moduleId, player.id);
+      previousJackpotRow = await findVariable(gameServerId, moduleId, KEY_JACKPOT);
+      previousJackpot = await getJackpot(gameServerId, moduleId);
+      previousReportDay = await readJsonVariable(gameServerId, moduleId, reportDayKey, undefined, null);
+      if (net < 0) {
+        previousWindowData = await getWindowData(gameServerId, moduleId, player.id, config);
+        previousWindowRow = await findVariable(gameServerId, moduleId, getWindowKey(previousWindowData.windowKey), player.id);
+      }
 
-    if (jackpotWin) {
-      jackpot.lastWinner = player.name;
-      jackpot.lastWinAt = settledAt;
-      jackpot.lastWinGame = game;
-    }
+      if (safePayout > 0) {
+        await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, player.id, {
+          currency: safePayout,
+        });
+        payoutCredited = true;
+      }
 
-    await setPlayerStats(gameServerId, moduleId, player.id, stats);
-    if (net < 0 || jackpotWin) {
-      await setJackpot(gameServerId, moduleId, jackpot);
-    }
+      const stats = {
+        ...previousStats,
+        perGame: { ...(previousStats?.perGame ?? {}) },
+      };
+      const isWinningRound = safePayout > safeBet;
+      const currentGame = stats.perGame[game] ?? { wagered: 0, won: 0, plays: 0, wins: 0 };
+      currentGame.wagered += safeBet;
+      currentGame.won += safePayout;
+      currentGame.plays += 1;
+      currentGame.wins = Number(currentGame.wins ?? 0) + (isWinningRound ? 1 : 0);
+      stats.perGame[game] = currentGame;
+      stats.wagered += safeBet;
+      stats.won += safePayout;
+      stats.net += net;
+      stats.gamesPlayed += 1;
+      stats.wins = Number(stats.wins ?? 0) + (isWinningRound ? 1 : 0);
+      if (safePayout > Number(stats.biggestWin?.amount ?? 0)) {
+        stats.biggestWin = { amount: safePayout, game, at: settledAt };
+      }
 
-    await recordReportDay(gameServerId, moduleId, {
-      playerId: player.id,
-      playerName: player.name,
-      game,
-      betAmount: safeBet,
-      payout: safePayout,
-      occurredAt: settledAt,
-    });
+      let nextWindowData = previousWindowData ? { ...previousWindowData } : null;
+      let shouldPersistJackpot = false;
+      jackpot = { ...previousJackpot };
+      if (net < 0) {
+        nextWindowData.lost += Math.abs(net);
+        jackpotContribution = roundCurrency(Math.abs(net) * (config.jackpotContributionPct / 100));
+        jackpot.amount += jackpotContribution;
+        shouldPersistJackpot = true;
+      }
 
-    if (safePayout > 0) {
-      await takaro.playerOnGameserver.playerOnGameServerControllerAddCurrency(gameServerId, player.id, {
-        currency: safePayout,
+      if (jackpotWin) {
+        jackpot.lastWinner = player.name;
+        jackpot.lastWinAt = settledAt;
+        jackpot.lastWinGame = game;
+        shouldPersistJackpot = true;
+      }
+
+      if (mutateJackpot) {
+        const nextJackpot = await mutateJackpot({ ...jackpot }, {
+          settledAt,
+          safeBet,
+          safePayout,
+          net,
+          jackpotContribution,
+        });
+        if (nextJackpot) {
+          jackpot = nextJackpot;
+          shouldPersistJackpot = true;
+        }
+      }
+
+      const nextReportDay = await withCasinoLocks(gameServerId, moduleId, [`report-day:${reportDay}`], async () => {
+        const current = previousReportDay ?? {
+          day: reportDay,
+          totalWagered: 0,
+          totalWon: 0,
+          houseProfit: 0,
+          perGame: {},
+          players: {},
+        };
+
+        current.totalWagered = Number(current.totalWagered ?? 0) + safeBet;
+        current.totalWon = Number(current.totalWon ?? 0) + safePayout;
+        current.houseProfit = Number(current.houseProfit ?? 0) + safeBet - safePayout;
+
+        const gameRow = current.perGame?.[game] ?? { wagered: 0, won: 0, plays: 0 };
+        gameRow.wagered += safeBet;
+        gameRow.won += safePayout;
+        gameRow.plays += 1;
+        current.perGame = { ...(current.perGame ?? {}), [game]: gameRow };
+
+        const playerRow = current.players?.[player.id] ?? { name: player.name, wagered: 0, won: 0, net: 0, perGame: {} };
+        playerRow.name = player.name;
+        playerRow.wagered += safeBet;
+        playerRow.won += safePayout;
+        playerRow.net += safePayout - safeBet;
+        const playerGameRow = playerRow.perGame?.[game] ?? { wagered: 0, won: 0, plays: 0 };
+        playerGameRow.wagered += safeBet;
+        playerGameRow.won += safePayout;
+        playerGameRow.plays += 1;
+        playerRow.perGame = { ...(playerRow.perGame ?? {}), [game]: playerGameRow };
+        current.players = { ...(current.players ?? {}), [player.id]: playerRow };
+
+        return current;
       });
-    }
 
-    if (announceBigWin) {
-      await maybeAnnounceBigWin({ gameServerId, moduleId, playerId: player.id, playerName: player.name, game, net, config, jackpotWin, payout: safePayout, betAmount: safeBet });
-    }
+      if (nextWindowData) {
+        await setWindowData(gameServerId, moduleId, player.id, nextWindowData.windowKey, nextWindowData);
+      }
+      await setPlayerStats(gameServerId, moduleId, player.id, stats);
+      if (shouldPersistJackpot) {
+        await setJackpot(gameServerId, moduleId, jackpot);
+      }
+      await writeVariable(gameServerId, moduleId, reportDayKey, nextReportDay);
 
-    const balance = await getPlayerBalance(gameServerId, player.id);
-    return { net, balance, jackpotContribution, jackpot };
+      if (announceBigWin) {
+        await maybeAnnounceBigWin({ gameServerId, moduleId, playerId: player.id, playerName: player.name, game, net, config, jackpotWin, payout: safePayout, betAmount: safeBet });
+      }
+
+      const balance = await getPlayerBalance(gameServerId, player.id);
+      return { net, balance, jackpotContribution, jackpot };
+    } catch (err) {
+      try {
+        if (previousWindowData) {
+          if (previousWindowRow) {
+            await setWindowData(gameServerId, moduleId, player.id, previousWindowData.windowKey, previousWindowData);
+          } else {
+            await deleteVariable(gameServerId, moduleId, getWindowKey(previousWindowData.windowKey), player.id);
+          }
+        }
+        if (previousStatsRow) {
+          await setPlayerStats(gameServerId, moduleId, player.id, previousStats);
+        } else {
+          await deleteVariable(gameServerId, moduleId, KEY_STATS, player.id);
+        }
+        if (previousJackpotRow) {
+          await setJackpot(gameServerId, moduleId, previousJackpot);
+        } else {
+          await deleteVariable(gameServerId, moduleId, KEY_JACKPOT);
+        }
+        await withCasinoLocks(gameServerId, moduleId, [`report-day:${reportDay}`], async () => {
+          if (previousReportDay) {
+            await writeVariable(gameServerId, moduleId, reportDayKey, previousReportDay);
+          } else {
+            await deleteVariable(gameServerId, moduleId, reportDayKey);
+          }
+        });
+      } catch (rollbackStateErr) {
+        console.error(`casino-helpers: failed to roll back settlement state for ${player.name}: ${rollbackStateErr}`);
+      }
+
+      if (payoutCredited && safePayout > 0) {
+        try {
+          await takaro.playerOnGameserver.playerOnGameServerControllerDeductCurrency(gameServerId, player.id, {
+            currency: safePayout,
+          });
+          console.error(`casino-helpers: rolled back credited payout for ${player.name} after settlement failure`);
+        } catch (rollbackErr) {
+          console.error(`casino-helpers: failed to roll back credited payout for ${player.name} after settlement failure: ${rollbackErr}`);
+        }
+      }
+      throw err;
+    }
   };
 
   if (skipLock) return await run();
@@ -1291,6 +1404,49 @@ export async function handleDisconnect(gameServerId, moduleId, playerId, config)
   return refunds;
 }
 
+async function listSessionRowsByKey(gameServerId, moduleId, key) {
+  const rows = [];
+  let page = 0;
+  while (page < 100) {
+    const res = await takaro.variable.variableControllerSearch({
+      filters: { key: [key], gameServerId: [gameServerId], moduleId: [moduleId] },
+      page,
+      limit: 100,
+    });
+    const batch = res.data.data ?? [];
+    rows.push(...batch);
+    if (batch.length < 100) break;
+    page += 1;
+  }
+  return rows;
+}
+
+export async function sweepDisconnectedCasinoState(gameServerId, moduleId, config) {
+  const actions = [];
+
+  for (const key of [KEY_HILO_SESSION, KEY_BLACKJACK_SESSION]) {
+    const rows = await listSessionRowsByKey(gameServerId, moduleId, key);
+    for (const row of rows) {
+      if (!row.playerId) continue;
+      const pog = await getPlayerOnGameserver(gameServerId, row.playerId);
+      if (pog?.online) continue;
+      const refunded = await handleDisconnect(gameServerId, moduleId, row.playerId, config);
+      actions.push(...refunded);
+    }
+  }
+
+  const duels = await listDuels(gameServerId, moduleId);
+  for (const { challengerId, duel } of duels) {
+    const challengerPog = challengerId ? await getPlayerOnGameserver(gameServerId, challengerId) : null;
+    const opponentPog = duel?.opponentId ? await getPlayerOnGameserver(gameServerId, duel.opponentId) : null;
+    if (challengerPog?.online && opponentPog?.online) continue;
+    const refunded = await handleDisconnect(gameServerId, moduleId, challengerId, config);
+    actions.push(...refunded);
+  }
+
+  return actions;
+}
+
 export async function removePlayerFromRacePool(gameServerId, moduleId, playerId) {
   let removedEntries = [];
   await mutateRacePool(gameServerId, moduleId, async (pool) => {
@@ -1322,10 +1478,11 @@ export function getNextWindowResetAt(capWindow) {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
 }
 
-export async function settleJackpotWin({ gameServerId, moduleId, player, config, game, betAmount }) {
+export async function settleJackpotWin({ gameServerId, moduleId, player, config, game, betAmount, basePayout = 0 }) {
   return await withCasinoLocks(gameServerId, moduleId, ['jackpot', `player:${player.id}`], async () => {
     const jackpot = await getJackpot(gameServerId, moduleId);
-    const payout = roundCurrency(jackpot.amount);
+    const jackpotAmount = roundCurrency(jackpot.amount);
+    const payout = roundCurrency(basePayout) + jackpotAmount;
     const result = await settle({
       gameServerId,
       moduleId,
@@ -1334,14 +1491,14 @@ export async function settleJackpotWin({ gameServerId, moduleId, player, config,
       game,
       betAmount,
       payout,
+      jackpotWin: true,
       skipLock: true,
       announceBigWin: false,
+      mutateJackpot: (currentJackpot) => ({
+        ...currentJackpot,
+        amount: 0,
+      }),
     });
-    jackpot.amount = 0;
-    jackpot.lastWinner = player.name;
-    jackpot.lastWinAt = nowIso();
-    jackpot.lastWinGame = game;
-    await setJackpot(gameServerId, moduleId, jackpot);
     await maybeAnnounceBigWin({
       gameServerId,
       moduleId,
@@ -1354,7 +1511,7 @@ export async function settleJackpotWin({ gameServerId, moduleId, player, config,
       payout,
       betAmount,
     });
-    return { ...result, payout, jackpot };
+    return { ...result, payout, jackpot: { ...result.jackpot, amount: 0 } };
   });
 }
 

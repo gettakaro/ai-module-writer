@@ -131,6 +131,16 @@
         { "name": "selection", "type": "string", "helpText": "Roulette selection", "position": 1 }
       ]
     },
+    "roulette": {
+      "trigger": "roulette",
+      "description": "Play roulette",
+      "helpText": "Usage: /roulette <amount> <red|black|odd|even|green|0-36>",
+      "function": "src/commands/bet/index.js",
+      "arguments": [
+        { "name": "amount", "type": "number", "helpText": "Bet amount", "position": 0 },
+        { "name": "selection", "type": "string", "helpText": "Roulette selection", "position": 1 }
+      ]
+    },
     "slots": {
       "trigger": "slots",
       "description": "Spin the slot machine",
@@ -144,6 +154,15 @@
       "trigger": "bj",
       "description": "Play blackjack",
       "helpText": "Usage: /bj <amount> | /bj <hit|stand|double>",
+      "function": "src/commands/bj/index.js",
+      "arguments": [
+        { "name": "action", "type": "string", "helpText": "A bet amount or one of hit/stand/double", "position": 0 }
+      ]
+    },
+    "blackjack": {
+      "trigger": "blackjack",
+      "description": "Play blackjack",
+      "helpText": "Usage: /blackjack <amount> | /blackjack <hit|stand|double>",
       "function": "src/commands/bj/index.js",
       "arguments": [
         { "name": "action", "type": "string", "helpText": "A bet amount or one of hit/stand/double", "position": 0 }

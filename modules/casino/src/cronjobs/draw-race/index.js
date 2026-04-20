@@ -9,6 +9,14 @@ function emptyPool() {
   };
 }
 
+function removeParticipant(pool, ticketId) {
+  const participants = (pool.participants ?? []).filter((entry) => entry.ticketId !== ticketId);
+  return {
+    ...pool,
+    participants,
+  };
+}
+
 async function main() {
   const { gameServerId, module: mod } = data;
   const config = getDefaultConfig(mod.userConfig);
@@ -17,34 +25,46 @@ async function main() {
     const pool = await getRacePool(gameServerId, mod.moduleId);
     const participants = Array.isArray(pool.participants) ? [...pool.participants] : [];
     const due = pool.drawAt && new Date(pool.drawAt).getTime() <= Date.now();
+    const isRetry = pool.status === 'drawing' && participants.length > 0;
 
-    if (!due || participants.length === 0) {
+    if ((!due && !isRetry) || participants.length === 0) {
       return null;
     }
 
-    const totalPot = participants.reduce((sum, p) => sum + Number(p.amount ?? 0), 0);
-    const cancelled = participants.length < 2;
-    const winner = cancelled ? null : pickWeightedWinner(participants);
-    const payout = cancelled ? 0 : Math.round(totalPot * (1 - (config.houseEdgePct / 100)));
+    if (!isRetry) {
+      const totalPot = participants.reduce((sum, p) => sum + Number(p.amount ?? 0), 0);
+      const cancelled = participants.length < 2;
+      const winner = cancelled ? null : pickWeightedWinner(participants);
+      const payout = cancelled ? 0 : Math.round(totalPot * (1 - (config.houseEdgePct / 100)));
 
-    await setRacePool(gameServerId, mod.moduleId, {
-      ...pool,
-      participants,
-      status: 'drawing',
-      totalPot,
-      cancelled,
-      winnerId: winner?.playerId ?? null,
-      winnerName: winner?.name ?? null,
-      payout,
-    });
+      await setRacePool(gameServerId, mod.moduleId, {
+        ...pool,
+        participants,
+        status: 'drawing',
+        totalPot,
+        cancelled,
+        winnerId: winner?.playerId ?? null,
+        winnerName: winner?.name ?? null,
+        payout,
+      });
+
+      return {
+        participants,
+        totalPot,
+        cancelled,
+        winnerId: winner?.playerId ?? null,
+        winnerName: winner?.name ?? null,
+        payout,
+      };
+    }
 
     return {
       participants,
-      totalPot,
-      cancelled,
-      winnerId: winner?.playerId ?? null,
-      winnerName: winner?.name ?? null,
-      payout,
+      totalPot: Number(pool.totalPot ?? participants.reduce((sum, p) => sum + Number(p.amount ?? 0), 0)),
+      cancelled: Boolean(pool.cancelled),
+      winnerId: pool.winnerId ?? null,
+      winnerName: pool.winnerName ?? null,
+      payout: Number(pool.payout ?? 0),
     };
   });
 
@@ -57,17 +77,22 @@ async function main() {
     for (const participant of snapshot.participants) {
       if (snapshot.cancelled) {
         await refund({ gameServerId, moduleId: mod.moduleId, playerId: participant.playerId, amount: participant.amount, config });
-        continue;
+      } else {
+        await settle({
+          gameServerId,
+          moduleId: mod.moduleId,
+          player: { id: participant.playerId, name: participant.name },
+          config,
+          game: 'race',
+          betAmount: participant.amount,
+          payout: participant.playerId === snapshot.winnerId ? Number(snapshot.payout ?? 0) : 0,
+        });
       }
 
-      await settle({
-        gameServerId,
-        moduleId: mod.moduleId,
-        player: { id: participant.playerId, name: participant.name },
-        config,
-        game: 'race',
-        betAmount: participant.amount,
-        payout: participant.playerId === snapshot.winnerId ? Number(snapshot.payout ?? 0) : 0,
+      await withCasinoLocks(gameServerId, mod.moduleId, ['race-pool'], async () => {
+        const current = await getRacePool(gameServerId, mod.moduleId);
+        if (current.status !== 'drawing') return;
+        await setRacePool(gameServerId, mod.moduleId, removeParticipant(current, participant.ticketId));
       });
     }
 
@@ -94,10 +119,13 @@ async function main() {
     }
 
     await withCasinoLocks(gameServerId, mod.moduleId, ['race-pool'], async () => {
-      await setRacePool(gameServerId, mod.moduleId, emptyPool());
+      const current = await getRacePool(gameServerId, mod.moduleId);
+      if ((current.participants?.length ?? 0) === 0) {
+        await setRacePool(gameServerId, mod.moduleId, emptyPool());
+      }
     });
   } catch (err) {
-    console.error(`casino.drawRace: draw failed, preserved pool for retry: ${err}`);
+    console.error(`casino.drawRace: draw failed, preserved remaining participants for retry: ${err}`);
     throw err;
   }
 }

@@ -21,9 +21,9 @@ async function main() {
   const result = await settle({ gameServerId, moduleId: mod.moduleId, player, config, game: 'dice', betAmount: placed.amount, payout });
 
   if (win) {
-    await pog.pm(`🎲 Rolled ${roll} (${direction} ${target}). Won ${formatCurrency(payout)} coin. (Balance: ${formatCurrency(result.balance)})`);
+    await pog.pm(`🎲 Rolled ${roll}. You bet ${direction} ${target} and won ${formatCurrency(payout)} coin. (Balance: ${formatCurrency(result.balance)})`);
   } else {
-    await pog.pm(`🎲 Rolled ${roll} (needed ${direction} ${target}). Lost ${formatCurrency(placed.amount)} coin. (Balance: ${formatCurrency(result.balance)})`);
+    await pog.pm(`🎲 Rolled ${roll}. You bet ${direction} ${target} and lost ${formatCurrency(placed.amount)} coin. (Balance: ${formatCurrency(result.balance)})`);
   }
 }
 

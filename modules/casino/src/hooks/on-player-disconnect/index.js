@@ -1,5 +1,5 @@
 import { data } from '@takaro/helpers';
-import { getDefaultConfig, handleDisconnect, resolveCasinoPlayerId } from './casino-helpers.js';
+import { getDefaultConfig, handleDisconnect, resolveCasinoPlayerId, sweepDisconnectedCasinoState } from './casino-helpers.js';
 
 async function main() {
   const { gameServerId, player, eventData, module: mod } = data;
@@ -16,7 +16,8 @@ async function main() {
     return;
   }
   const actions = await handleDisconnect(gameServerId, mod.moduleId, playerId, config);
-  console.log(`casino.onPlayerDisconnect: player=${playerName} actions=${actions.length}`);
+  const swept = await sweepDisconnectedCasinoState(gameServerId, mod.moduleId, config);
+  console.log(`casino.onPlayerDisconnect: player=${playerName} actions=${actions.length} swept=${swept.length}`);
 }
 
 await main();

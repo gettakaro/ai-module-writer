@@ -76,7 +76,7 @@ async function main() {
 
   // 6. Broadcast
   const snapshotNote = initiatorIsImmune
-    ? ` ${player.name} is immune, so the vote starts at 0/${threshold} and they do not auto-vote.`
+    ? ` ${player.name} is immune, so the vote starts at 0/${threshold}. They do not auto-vote.`
     : '';
 
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {

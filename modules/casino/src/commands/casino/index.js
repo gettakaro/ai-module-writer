@@ -10,11 +10,11 @@ async function main() {
     flip: '🪙 /flip <amount> <heads|tails> — fast 50/50 coin flip.',
     dice: '🎲 /dice <amount> <over|under> <2-98> — higher risk, higher payout.',
     hilo: '🎴 /hilo <amount> to start, then /hilo higher, /hilo lower, or /hilo cashout.',
-    roulette: '🎡 Roulette uses /bet <amount> <red|black|odd|even|green|0-36> — the trigger is /bet, not /casino roulette.',
-    bet: '🎡 /bet <amount> <red|black|odd|even|green|0-36> — European roulette.',
+    roulette: '🎡 /roulette <amount> <red|black|odd|even|green|0-36> — European roulette. /bet works as an alias.',
+    bet: '🎡 /roulette <amount> <red|black|odd|even|green|0-36> — /bet also works as a roulette alias.',
     slots: '🎰 /slots <amount> — 3 reels, pairs pay, triple 7s hit the jackpot.',
-    blackjack: '🃏 Blackjack uses /bj <amount> to deal, then /bj hit, /bj stand, or /bj double — the trigger is /bj.',
-    bj: '🃏 /bj <amount> to deal, then /bj hit, /bj stand, or /bj double.',
+    blackjack: '🃏 /blackjack <amount> to deal, then /blackjack hit, /blackjack stand, or /blackjack double. /bj also works.',
+    bj: '🃏 /blackjack <amount> to deal, then /blackjack hit, /blackjack stand, or /blackjack double. /bj also works.',
     crash: '🚀 /crash <amount> <cashoutAt> — auto-cashout crash game.',
     duel: '⚔️ /duel <player> <amount> to challenge, then accept/decline and pick rock/paper/scissors.',
     race: '🏁 /race [amount] — view the current weighted race pot or join it with a stake.',
@@ -36,9 +36,9 @@ async function main() {
 
   let playUnavailableReason = null;
   if (!checkPermission(pog, 'CASINO_PLAY')) {
-    playUnavailableReason = 'You do not currently have permission to play casino games on this server.';
+    playUnavailableReason = 'You do not currently have access to casino games on this server.';
   } else if (checkPermission(pog, 'CASINO_BANNED')) {
-    playUnavailableReason = 'You are explicitly banned from the casino.';
+    playUnavailableReason = 'You are banned from the casino.';
   } else {
     const ban = await getBan(gameServerId, mod.moduleId, player.id);
     if (ban) {
@@ -74,9 +74,9 @@ async function main() {
     if (config.games.flip) enabled.push('flip');
     if (config.games.dice) enabled.push('dice');
     if (config.games.hilo) enabled.push('hilo');
-    if (config.games.roulette) enabled.push('roulette (/bet)');
+    if (config.games.roulette) enabled.push('roulette');
     if (config.games.slots) enabled.push('slots');
-    if (config.games.blackjack) enabled.push('blackjack (/bj)');
+    if (config.games.blackjack) enabled.push('blackjack');
     if (config.games.crash) enabled.push('crash');
     if (config.games.duel) enabled.push('duel');
     if (config.games.race) enabled.push('race');
@@ -98,9 +98,9 @@ async function main() {
   }
 
   if (playUnavailableReason) {
-    lines.push('Ask an admin to grant CASINO_PLAY, remove conflicting legacy gambling modules, or clear your casino ban if this is unexpected.');
+    lines.push('If this seems wrong, ask an admin to grant you casino access, remove conflicting legacy gambling modules, or clear your casino ban.');
   } else {
-    lines.push('Tip: /casino <game> shows focused help for one game. Roulette is /bet and blackjack is /bj.');
+    lines.push('Tip: /casino <game> shows focused help for one game. You can use /roulette or /bet, and /blackjack or /bj.');
   }
   await sendPlayerMessage(pog, lines.join('\n'));
 }

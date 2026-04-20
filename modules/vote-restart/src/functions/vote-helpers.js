@@ -77,7 +77,8 @@ export async function acquireVoteLock(gameServerId, moduleId, { ttlMs = 15000, t
           for (const row of rows) {
             try {
               const parsed = JSON.parse(row.value);
-              if (parsed?.owner === owner) {
+              const expired = parsed?.expiresAt && new Date(parsed.expiresAt).getTime() <= Date.now();
+              if (parsed?.owner === owner || expired) {
                 await takaro.variable.variableControllerDelete(row.id);
               }
             } catch {
@@ -125,20 +126,24 @@ export async function getVoteState(gameServerId, moduleId) {
   try {
     parsed = JSON.parse(variable.value);
   } catch (err) {
-    console.error(`vote-helpers: failed to parse voteState: ${err}`);
+    console.error(`vote-helpers: failed to parse voteState, deleting corrupt row: ${err}`);
+    await takaro.variable.variableControllerDelete(variable.id);
     return null;
   }
   if (!parsed || typeof parsed.status !== 'string' || !Array.isArray(parsed.voters) || !parsed.startedAt) {
-    console.error('vote-helpers: voteState is structurally invalid, ignoring');
+    console.error('vote-helpers: voteState is structurally invalid, deleting corrupt row');
+    await takaro.variable.variableControllerDelete(variable.id);
     return null;
   }
   if (isNaN(new Date(parsed.startedAt).getTime())) {
-    console.error('vote-helpers: voteState.startedAt is not a valid date, ignoring');
+    console.error('vote-helpers: voteState.startedAt is not a valid date, deleting corrupt row');
+    await takaro.variable.variableControllerDelete(variable.id);
     return null;
   }
   if (parsed.status === 'passed') {
     if (!parsed.passedAt || isNaN(new Date(parsed.passedAt).getTime())) {
-      console.error('vote-helpers: voteState.passedAt is missing or invalid for passed vote, ignoring');
+      console.error('vote-helpers: voteState.passedAt is missing or invalid for passed vote, deleting corrupt row');
+      await takaro.variable.variableControllerDelete(variable.id);
       return null;
     }
   }
@@ -158,10 +163,15 @@ export async function getRestartState(gameServerId, moduleId) {
   if (!variable) return null;
   try {
     const parsed = JSON.parse(variable.value);
-    if (!parsed?.passedAt || isNaN(new Date(parsed.passedAt).getTime())) return null;
+    if (!parsed?.passedAt || isNaN(new Date(parsed.passedAt).getTime())) {
+      console.error('vote-helpers: restartState is invalid, deleting corrupt row');
+      await takaro.variable.variableControllerDelete(variable.id);
+      return null;
+    }
     return parsed;
   } catch (err) {
-    console.error(`vote-helpers: failed to parse restartState: ${err}`);
+    console.error(`vote-helpers: failed to parse restartState, deleting corrupt row: ${err}`);
+    await takaro.variable.variableControllerDelete(variable.id);
     return null;
   }
 }
