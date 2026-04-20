@@ -544,6 +544,17 @@ describe('module-import CLI', () => {
             meta: { total: 1 },
           },
         }),
+        roleControllerGetOne: async () => ({
+          data: {
+            data: {
+              id: 'role-1',
+              permissions: [
+                { permissionId: 'other-perm', count: 1 },
+                { permissionId: 'concurrent-perm', count: 9 },
+              ],
+            },
+          },
+        }),
         roleControllerUpdate: async (roleId: string, payload: { permissions?: Array<{ permissionId: string; count?: number }> }) => {
           updatedRoles.push({ roleId, permissions: payload.permissions ?? [] });
           return { data: { data: {} } };
@@ -589,8 +600,9 @@ describe('module-import CLI', () => {
         {
           roleId: 'role-1',
           permissions: [
-            { permissionId: 'new-perm', count: 3 },
             { permissionId: 'other-perm', count: 1 },
+            { permissionId: 'concurrent-perm', count: 9 },
+            { permissionId: 'new-perm', count: 3 },
           ],
         },
       ],
@@ -654,6 +666,14 @@ describe('module-import CLI', () => {
               },
             ],
             meta: { total: 1 },
+          },
+        }),
+        roleControllerGetOne: async () => ({
+          data: {
+            data: {
+              id: 'role-1',
+              permissions: [],
+            },
           },
         }),
         roleControllerUpdate: async (roleId: string, payload: { permissions?: Array<{ permissionId: string; count?: number }> }) => {
@@ -725,6 +745,14 @@ describe('module-import CLI', () => {
               },
             ],
             meta: { total: 1 },
+          },
+        }),
+        roleControllerGetOne: async () => ({
+          data: {
+            data: {
+              id: 'role-1',
+              permissions: [{ permissionId: 'other-perm', count: 1 }],
+            },
           },
         }),
         roleControllerUpdate: async (roleId: string, payload: { permissions?: Array<{ permissionId: string; count?: number }> }) => {
@@ -928,6 +956,10 @@ describe('module-import CLI', () => {
         });
       }
 
+      if (requestPath === '/role/role-1' && method === 'GET') {
+        return json({ data: { id: 'role-1', permissions: [] } });
+      }
+
       if (requestPath === '/role/role-1' && method === 'PUT') {
         return json({ data: {} });
       }
@@ -1090,6 +1122,10 @@ describe('module-import CLI', () => {
             meta: { total: 101 },
           });
         }
+      }
+
+      if (requestPath.startsWith('/role/') && method === 'GET') {
+        return json({ data: { id: requestPath.split('/').at(-1), permissions: [] } });
       }
 
       if (requestPath.startsWith('/role/') && method === 'PUT') {

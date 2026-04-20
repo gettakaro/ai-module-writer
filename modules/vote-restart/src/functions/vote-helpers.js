@@ -106,8 +106,8 @@ export async function getOnlineNonImmunePlayers(gameServerId) {
   let allPlayers = [];
   let page = 0;
   const limit = 100;
-  while (true) {
-    if (page > 100) break;
+
+  while (page <= 100) {
     const res = await takaro.playerOnGameserver.playerOnGameServerControllerSearch({
       filters: {
         gameServerId: [gameServerId],
@@ -116,9 +116,19 @@ export async function getOnlineNonImmunePlayers(gameServerId) {
       page,
       limit,
     });
-    const batch = res.data.data;
+
+    const batch = Array.isArray(res.data.data) ? res.data.data : [];
     allPlayers = allPlayers.concat(batch);
-    if (allPlayers.length >= res.data.meta.total) break;
+
+    const total = res.data.meta?.total;
+    if (typeof total === 'number') {
+      if (allPlayers.length >= total) {
+        break;
+      }
+    } else if (batch.length < limit) {
+      break;
+    }
+
     page++;
   }
 

@@ -68,11 +68,8 @@ interface VariableSnapshot {
   playerId?: string;
 }
 
-const TRANSIENT_MODULE_VARIABLE_KEYS = new Set([
-  'server_messages_lock',
-  'server_messages_test_force_state_write_failure',
-  'server_messages_test_force_receipt_write_failure',
-]);
+const TEST_CONTROL_VARIABLE_KEY_PATTERN = /(^|_)test_force(?:_|$)/i;
+const LOCK_LIKE_VARIABLE_KEY_PATTERN = /(^|_)lock(?:_|$)/i;
 
 interface RolePermissionSnapshot {
   permissionId: string;
@@ -82,6 +79,11 @@ interface RolePermissionSnapshot {
 interface RoleSnapshot {
   id: string;
   permissions: RolePermissionSnapshot[];
+}
+
+interface RoleDetailPermissionSnapshot {
+  permissionId: string;
+  count?: number;
 }
 
 interface ReplacementSnapshot {
@@ -129,6 +131,7 @@ interface ImportOps {
   getModulePermissionIdToCode(moduleId: string): Promise<Map<string, string>>;
   getRolesUsingModulePermissions(moduleId: string, permissionIdToCode: Map<string, string>): Promise<RolesUsingModulePermissionsSnapshot>;
   getModulePermissionCodeToId(moduleId: string): Promise<Map<string, string>>;
+  getRolePermissions(roleId: string): Promise<RoleDetailPermissionSnapshot[]>;
   updateRolePermissions(roleId: string, permissions: RolePermissionSnapshot[]): Promise<void>;
 }
 
@@ -166,8 +169,30 @@ function isExpiredVariable(variable: VariableSnapshot, now = Date.now()): boolea
   return Number.isFinite(expiresAt) && expiresAt <= now;
 }
 
+function looksLikeLockPayload(value: string): boolean {
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return false;
+    }
+
+    return ['token', 'acquiredAt', 'heartbeatAt', 'ownerToken', 'ownerId']
+      .some((key) => Object.prototype.hasOwnProperty.call(parsed, key));
+  } catch {
+    return false;
+  }
+}
+
 function isTransientModuleVariable(variable: VariableSnapshot): boolean {
-  return TRANSIENT_MODULE_VARIABLE_KEYS.has(variable.key);
+  if (TEST_CONTROL_VARIABLE_KEY_PATTERN.test(variable.key)) {
+    return true;
+  }
+
+  if (LOCK_LIKE_VARIABLE_KEY_PATTERN.test(variable.key) && looksLikeLockPayload(variable.value)) {
+    return true;
+  }
+
+  return false;
 }
 
 function shouldRestoreModuleVariable(variable: VariableSnapshot): boolean {
@@ -519,6 +544,18 @@ async function getModulePermissionCodeToId(
   );
 }
 
+async function getRolePermissions(
+  client: Client,
+  roleId: string,
+  request: <T>(operation: () => Promise<T>) => Promise<T> = async <T>(operation: () => Promise<T>) => operation(),
+): Promise<RoleDetailPermissionSnapshot[]> {
+  const role = await request(() => client.role.roleControllerGetOne(roleId));
+  return (role.data.data.permissions ?? []).map((permission) => ({
+    permissionId: permission.permissionId,
+    count: permission.count,
+  }));
+}
+
 async function updateRolePermissions(
   client: Client,
   roleId: string,
@@ -556,6 +593,7 @@ function createClientImportOps(
     getModulePermissionIdToCode: async (moduleId) => getModulePermissionIdToCode(client, moduleId, request),
     getRolesUsingModulePermissions: async (moduleId, permissionIdToCode) => getRolesUsingModulePermissions(client, moduleId, permissionIdToCode, request),
     getModulePermissionCodeToId: async (moduleId) => getModulePermissionCodeToId(client, moduleId, request),
+    getRolePermissions: async (roleId) => getRolePermissions(client, roleId, request),
     updateRolePermissions: async (roleId, permissions) => updateRolePermissions(client, roleId, permissions, request),
   };
 }
@@ -603,11 +641,18 @@ async function rebindRolesToReplacementPermissions(
     );
   }
 
+  const previousModulePermissionIds = new Set(snapshot.permissionIdToCode.keys());
+
   for (const role of snapshot.rolesUsingModulePermissions) {
-    const reboundPermissions = role.permissions.flatMap((permission) => {
+    const currentPermissions = await ops.getRolePermissions(role.id);
+    const preservedCurrentPermissions = currentPermissions.filter(
+      (permission) => !previousModulePermissionIds.has(permission.permissionId),
+    );
+
+    const replacementPermissions = role.permissions.flatMap((permission) => {
       const code = snapshot.permissionIdToCode.get(permission.permissionId);
       if (!code) {
-        return [permission];
+        return [];
       }
 
       const replacementPermissionId = newPermissionCodeToId.get(code);
@@ -621,7 +666,12 @@ async function rebindRolesToReplacementPermissions(
       }];
     });
 
-    await ops.updateRolePermissions(role.id, reboundPermissions);
+    const mergedPermissions = new Map<string, RolePermissionSnapshot>();
+    for (const permission of [...preservedCurrentPermissions, ...replacementPermissions]) {
+      mergedPermissions.set(permission.permissionId, permission);
+    }
+
+    await ops.updateRolePermissions(role.id, [...mergedPermissions.values()]);
   }
 }
 
@@ -966,6 +1016,15 @@ function createTokenImportOps(
           .filter((permission) => permission.module?.id === moduleId)
           .map((permission) => [permission.permission, permission.id]),
       );
+    },
+    getRolePermissions: async (roleId) => {
+      const role = await takaroTokenRequest<{ data: { permissions?: Array<{ permissionId: string; count?: number }> } }>(auth, `/role/${roleId}`, {
+        method: 'GET',
+      });
+      return (role.data.permissions ?? []).map((permission) => ({
+        permissionId: permission.permissionId,
+        count: permission.count,
+      }));
     },
     updateRolePermissions: async (roleId, permissions) => {
       await takaroTokenRequest(auth, `/role/${roleId}`, {

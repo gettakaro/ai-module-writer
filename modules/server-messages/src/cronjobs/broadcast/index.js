@@ -161,12 +161,13 @@ async function main() {
       await heartbeat.stop();
     } catch (err) {
       stopError = err;
+      console.warn(`server-messages: failed to stop execution lock heartbeat cleanly after cronjob completion: ${err}`);
     }
 
     await releaseExecutionLock(lock);
 
     if (stopError) {
-      throw stopError;
+      console.warn('server-messages: heartbeat stop failure was suppressed because the execution outcome was already determined');
     }
   }
 }
