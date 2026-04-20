@@ -37,7 +37,7 @@ async function main() {
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),
   ]);
-  const reason = normalizeReason(extractReason(args.reason, chatMessage, [target.name, args.duration]), 'Banned by an admin.');
+  const reason = normalizeReason(extractReason(args.reason, chatMessage, 2), 'Banned by an admin.');
 
   const payload = {
     reason,
@@ -70,13 +70,18 @@ async function main() {
   await safePrivateMessage(pog, confirmationMessage);
 
   if (mod.userConfig.broadcastBans) {
-    const template = mod.userConfig.banBroadcastMessage;
-    const usesLegacyForPrefix = String(template).includes('for {duration}');
+    const template = String(mod.userConfig.banBroadcastMessage);
+    const usesLegacyForPrefix = template.includes('for {duration}');
+
+    const normalizedTemplate = parsedDuration.isPermanent && usesLegacyForPrefix
+      ? template.replace(/for\s+\{duration\}/i, 'permanently')
+      : template;
+
     const duration = usesLegacyForPrefix
       ? parsedDuration.humanDuration
       : (parsedDuration.isPermanent ? 'permanently' : `for ${parsedDuration.humanDuration}`);
 
-    const message = renderTemplate(template, {
+    const message = renderTemplate(normalizedTemplate, {
       player: targetName,
       reason,
       admin: adminName,

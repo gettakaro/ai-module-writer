@@ -829,7 +829,7 @@ describe('test helper: pushModule successful replacement migration', () => {
     assert.ok(logs.some((msg) => msg.includes('Kicked')), JSON.stringify(logs));
   });
 
-  it('does not restore transient debug flags or lock variables during replacement', async () => {
+  it('drops transient debug flags but preserves non-debug lock variables during replacement', async () => {
     const original = await pushModule(client, MODULE_DIR);
     moduleId = original.id;
 
@@ -863,9 +863,11 @@ describe('test helper: pushModule successful replacement migration', () => {
 
     assert.equal(
       transientVariables.data.data.length,
-      0,
-      `Expected transient debug/lock variables to be dropped during replacement, got: ${JSON.stringify(transientVariables.data.data)}`,
+      1,
+      `Expected only the debug flag to be dropped during replacement, got: ${JSON.stringify(transientVariables.data.data)}`,
     );
+    assert.equal(transientVariables.data.data[0].key, 'fund_state_lock');
+    assert.equal(transientVariables.data.data[0].value, JSON.stringify({ owner: 'stale-test-lock' }));
   });
 
   it('keeps role rebinding working when the replacement removes a previously assigned permission', async () => {

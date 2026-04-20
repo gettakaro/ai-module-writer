@@ -32,7 +32,7 @@ async function main() {
     getPlayerName(player.id, player.name),
     getPlayerName(target.playerId, target.name),
   ]);
-  const reason = normalizeReason(extractReason(args.reason, chatMessage, [target.name]), 'Kicked by an admin.');
+  const reason = normalizeReason(extractReason(args.reason, chatMessage, 1), 'Kicked by an admin.');
 
   try {
     if (await consumeUtilsDebugFlag(gameServerId, mod.moduleId, UTILS_DEBUG_FORCE_KICK_API_FAILURE_KEY)) {

@@ -45,7 +45,7 @@ interface RoleBindingBackup {
 }
 
 function shouldPreserveModuleVariable(key: string): boolean {
-  return !key.startsWith('__debug_') && !key.endsWith('_state_lock');
+  return !key.startsWith('__debug_');
 }
 
 async function collectAllPages<T>(
@@ -206,12 +206,41 @@ async function findModuleByName(client: Client, name: string): Promise<ModuleOut
   return found;
 }
 
+async function waitForInstalledModule(
+  client: Client,
+  moduleId: string,
+  gameServerId: string,
+  { timeoutMs = 30000 }: { timeoutMs?: number } = {},
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const installations = await client.module.moduleInstallationsControllerGetInstalledModules({
+      filters: {
+        moduleId: [moduleId],
+        gameserverId: [gameServerId],
+      },
+      limit: 10,
+    });
+
+    if (installations.data.data.length > 0) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  throw new Error(`Timed out waiting for module '${moduleId}' to appear as installed on game server '${gameServerId}'`);
+}
+
 async function restoreInstallations(client: Client, module: ModuleOutputDTO, installations: ModuleInstallationBackup[]): Promise<void> {
   for (const installation of installations) {
     await installModule(client, module.latestVersion.id, installation.gameServerId, {
       userConfig: installation.userConfig,
       systemConfig: installation.systemConfig,
     });
+
+    await waitForInstalledModule(client, module.id, installation.gameServerId);
   }
 }
 

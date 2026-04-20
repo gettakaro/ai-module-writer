@@ -43,13 +43,32 @@ function stripConsumedPrefix(text, consumedValues = []) {
 
 export function extractReason(argsReason, chatMessage, consumedValues = []) {
   const parsedReason = trimOrEmpty(argsReason) === '?' ? '' : trimOrEmpty(argsReason);
+  const argumentTokens = getCommandArgumentTokens(chatMessage);
 
-  let remaining = trimOrEmpty(getChatMessageText(chatMessage));
-  if (remaining !== '') {
-    remaining = remaining.replace(/^\S+\s*/, '');
-    const reconstructedReason = stripConsumedPrefix(remaining, consumedValues);
-    if (reconstructedReason !== '') {
-      return reconstructedReason;
+  if (argumentTokens.length > 0) {
+    if (typeof consumedValues === 'number') {
+      const reconstructedReason = trimOrEmpty(argumentTokens.slice(consumedValues).join(' '));
+      const consumedPrefix = trimOrEmpty(argumentTokens.slice(0, consumedValues).join(' '));
+      const parsedLooksShifted = consumedPrefix !== '' && parsedReason.toLowerCase().startsWith(consumedPrefix.toLowerCase());
+
+      if (parsedReason === '') {
+        if (reconstructedReason !== '') {
+          return reconstructedReason;
+        }
+      } else if (parsedLooksShifted && reconstructedReason !== '') {
+        return reconstructedReason;
+      } else {
+        return parsedReason;
+      }
+    } else {
+      let remaining = trimOrEmpty(getChatMessageText(chatMessage));
+      if (remaining !== '') {
+        remaining = remaining.replace(/^\S+\s*/, '');
+        const reconstructedReason = stripConsumedPrefix(remaining, consumedValues);
+        if (reconstructedReason !== '') {
+          return reconstructedReason;
+        }
+      }
     }
   }
 
@@ -96,30 +115,22 @@ export function collapsePlayersById(players) {
 
 export async function collectPaginatedResults(fetchPage, { limit = 100, maxIterations = 100 } = {}) {
   const items = [];
-  let page = 0;
-  let iterations = 0;
 
-  while (true) {
-    iterations += 1;
-    if (iterations > maxIterations) {
-      console.error(`utils-pure: collectPaginatedResults exceeded ${maxIterations} iterations, aborting pagination`);
-      break;
-    }
-
+  for (let page = 0; page < maxIterations; page += 1) {
     const result = await fetchPage({ page, limit });
     const batch = Array.isArray(result?.data) ? result.data : [];
     const total = typeof result?.total === 'number' ? result.total : undefined;
 
     items.push(...batch);
 
-    if (batch.length === 0) break;
-    if (total !== undefined && items.length >= total) break;
-    if (batch.length < limit && total === undefined) break;
-
-    page += 1;
+    if (batch.length === 0) return items;
+    if (total !== undefined && items.length >= total) return items;
+    if (batch.length < limit && total === undefined) return items;
   }
 
-  return items;
+  throw new Error(
+    `collectPaginatedResults reached the ${maxIterations}-page safety limit before pagination completed. Refusing to return partial data.`,
+  );
 }
 
 export function getCommandTargetPlayer(target) {

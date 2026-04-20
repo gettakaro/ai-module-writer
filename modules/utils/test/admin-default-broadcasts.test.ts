@@ -305,3 +305,103 @@ describe('utils: default broadcast templates when enabled', () => {
     );
   });
 });
+
+describe('utils: custom ban broadcast templates without legacy duration wording', () => {
+  let client: Client;
+  let ctx: MockServerContext;
+  let moduleId: string;
+  let versionId: string;
+  let prefix: string;
+  let adminRoleId: string | undefined;
+
+  before(async () => {
+    client = await createClient();
+    await cleanupTestModules(client);
+    await cleanupTestGameServers(client);
+    ctx = await startMockServer(client);
+
+    const mod = await pushModule(client, MODULE_DIR);
+    moduleId = mod.id;
+    versionId = mod.latestVersion.id;
+
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        broadcastBans: true,
+        banBroadcastMessage: '{player} was banned by {admin}. Duration: {duration}. Reason: {reason}',
+      },
+    });
+    prefix = await getCommandPrefix(client, ctx.gameServer.id);
+    adminRoleId = await assignPermissions(client, ctx.players[0].playerId, ctx.gameServer.id, ['UTILS_BAN']);
+  });
+
+  after(async () => {
+    await cleanupRole(client, adminRoleId);
+    try {
+      await uninstallModule(client, moduleId, ctx.gameServer.id);
+    } catch (err) {
+      console.error('Cleanup: failed to uninstall custom-ban-broadcast module:', err);
+    }
+    try {
+      await deleteModule(client, moduleId);
+    } catch (err) {
+      console.error('Cleanup: failed to delete custom-ban-broadcast module:', err);
+    }
+    await stopMockServer(ctx.server, client, ctx.gameServer.id);
+  });
+
+  async function trigger(playerId: string, msg: string) {
+    const before = new Date();
+    await client.command.commandControllerTrigger(ctx.gameServer.id, { msg, playerId });
+    const event = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    return {
+      success: meta?.result?.success ?? false,
+      logs: (meta?.result?.logs ?? []).map((l) => l.msg),
+    };
+  }
+
+  async function getPlayerName(playerId: string) {
+    const result = await client.player.playerControllerGetOne(playerId);
+    return result.data.data.name;
+  }
+
+  async function clearBans(playerId: string) {
+    const bans = await client.player.banControllerSearch({
+      filters: {
+        gameServerId: [ctx.gameServer.id],
+        playerId: [playerId],
+      },
+    });
+    for (const ban of bans.data.data) {
+      await client.player.banControllerDelete(ban.id);
+    }
+  }
+
+  it('injects temporary and permanent duration wording into non-legacy ban broadcast templates', async () => {
+    const target = ctx.players[1];
+    const targetName = await getPlayerName(target.playerId);
+
+    await clearBans(target.playerId);
+    const temporary = await trigger(ctx.players[0].playerId, `${prefix}ban ${targetName} 10m custom template test`);
+    assert.equal(temporary.success, true, JSON.stringify(temporary.logs));
+    assert.ok(
+      temporary.logs.some((msg) => msg.includes(`${targetName} was banned by`) && msg.includes('Duration: for 10 minutes.') && msg.includes('Reason: custom template test')),
+      JSON.stringify(temporary.logs),
+    );
+
+    await clearBans(target.playerId);
+    const permanent = await trigger(ctx.players[0].playerId, `${prefix}ban ${targetName} perm`);
+    assert.equal(permanent.success, true, JSON.stringify(permanent.logs));
+    assert.ok(
+      permanent.logs.some((msg) => msg.includes(`${targetName} was banned by`) && msg.includes('Duration: permanently.') && msg.includes('Reason: Banned by an admin.')),
+      JSON.stringify(permanent.logs),
+    );
+
+    await clearBans(target.playerId);
+  });
+});

@@ -5,6 +5,8 @@ import {
 } from '../src/functions/fund-debug-keys.js';
 import assert from 'node:assert/strict';
 import path from 'path';
+import os from 'os';
+import { cp, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { Client, EventSearchInputAllowedFiltersEventNameEnum } from '@takaro/apiclient';
 import { createClient } from '../../../test/helpers/client.js';
@@ -1189,5 +1191,104 @@ describe('community-fund: refund handling after state-write failure', () => {
       },
     });
     assert.equal(totalVariable.data.data.length, 0, `Expected no persisted fund_total after failed refund, got: ${JSON.stringify(totalVariable.data.data)}`);
+  });
+});
+
+describe('community-fund: invalid threshold configuration', () => {
+  let client: Client;
+  let ctx: MockServerContext;
+  let moduleId: string;
+  let versionId: string;
+  let prefix: string;
+  let contributeRoleId: string;
+  let tempModuleDir: string | undefined;
+
+  before(async () => {
+    client = await createClient();
+    await cleanupTestModules(client);
+    await cleanupTestGameServers(client);
+    ctx = await startMockServer(client);
+
+    await client.settings.settingsControllerSet('economyEnabled', {
+      gameServerId: ctx.gameServer.id,
+      value: 'true',
+    });
+
+    tempModuleDir = await mkdtemp(path.join(os.tmpdir(), 'community-fund-threshold-'));
+    await cp(MODULE_DIR, tempModuleDir, { recursive: true });
+
+    const moduleJsonPath = path.join(tempModuleDir, 'module.json');
+    const moduleJson = JSON.parse(await readFile(moduleJsonPath, 'utf8')) as Record<string, any>;
+    moduleJson.config.properties.fundThreshold.minimum = 0;
+    await writeFile(moduleJsonPath, `${JSON.stringify(moduleJson, null, 2)}\n`);
+
+    const mod = await pushModule(client, tempModuleDir);
+    moduleId = mod.id;
+    versionId = mod.latestVersion.id;
+
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        fundThreshold: 0,
+        minimumContribution: 10,
+        completionMessage: 'The community fund reached {threshold}!',
+        completionCommands: [],
+        broadcastContributions: false,
+      },
+    });
+    prefix = await getCommandPrefix(client, ctx.gameServer.id);
+
+    contributeRoleId = await assignPermissions(
+      client,
+      ctx.players[0].playerId,
+      ctx.gameServer.id,
+      ['COMMUNITY_FUND_CONTRIBUTE'],
+    );
+
+    await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(ctx.gameServer.id, ctx.players[0].playerId, {
+      currency: 50,
+    });
+  });
+
+  after(async () => {
+    await cleanupRole(client, contributeRoleId);
+    try {
+      await uninstallModule(client, moduleId, ctx.gameServer.id);
+    } catch (err) {
+      console.error('Cleanup: failed to uninstall invalid-threshold module:', err);
+    }
+    try {
+      await deleteModule(client, moduleId);
+    } catch (err) {
+      console.error('Cleanup: failed to delete invalid-threshold module:', err);
+    }
+    if (tempModuleDir) {
+      await rm(tempModuleDir, { recursive: true, force: true });
+    }
+    await stopMockServer(ctx.server, client, ctx.gameServer.id);
+  });
+
+  it('rejects contributions when fundThreshold is zero and tells the player the fund is not configured', async () => {
+    const before = new Date();
+
+    await client.command.commandControllerTrigger(ctx.gameServer.id, {
+      msg: `${prefix}fund 20`,
+      playerId: ctx.players[0].playerId,
+    });
+
+    const event = await waitForEvent(client, {
+      eventName: EventSearchInputAllowedFiltersEventNameEnum.CommandExecuted,
+      gameserverId: ctx.gameServer.id,
+      after: before,
+      timeout: 30000,
+    });
+
+    const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+    assert.equal(meta?.result?.success, false, 'Expected contribution to fail when threshold is misconfigured');
+
+    const logs = (meta?.result?.logs ?? []).map((l) => l.msg);
+    assert.ok(
+      logs.some((msg) => msg.includes('community fund is not currently configured')),
+      `Expected invalid-threshold guidance, got: ${JSON.stringify(logs)}`,
+    );
   });
 });
