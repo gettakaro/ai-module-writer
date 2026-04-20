@@ -438,7 +438,7 @@ describe('module-import CLI', () => {
     assert.equal(reinstalledGameServers.at(-1), 'gs-125');
   });
 
-  it('preserves durable module-scoped variables, delivery receipts, and role permission assignments across replacement imports', async () => {
+  it('preserves all non-expired module-scoped variables and role permission assignments across replacement imports', async () => {
     const createdVariables: Array<{ moduleId?: string; key: string; value: string; gameServerId?: string }> = [];
     const updatedRoles: Array<{ roleId: string; permissions: Array<{ permissionId: string; count?: number }> }> = [];
     let searchCalls = 0;
@@ -577,8 +577,24 @@ describe('module-import CLI', () => {
         },
         {
           moduleId: 'new-module',
+          key: 'server_messages_lock',
+          value: '{"token":"transient"}',
+          gameServerId: 'gs-1',
+          playerId: undefined,
+          expiresAt: undefined,
+        },
+        {
+          moduleId: 'new-module',
           key: 'server_messages_delivery_receipt',
           value: '{"messageIndex":0}',
+          gameServerId: 'gs-1',
+          playerId: undefined,
+          expiresAt: undefined,
+        },
+        {
+          moduleId: 'new-module',
+          key: 'server_messages_test_force_state_write_failure',
+          value: '{"stale":true}',
           gameServerId: 'gs-1',
           playerId: undefined,
           expiresAt: undefined,
@@ -592,7 +608,7 @@ describe('module-import CLI', () => {
           expiresAt: undefined,
         },
       ],
-      'Expected durable module-scoped variables, including delivery receipts, to migrate to the replacement module id',
+      'Expected every non-expired module-scoped variable to migrate to the replacement module id',
     );
     assert.deepEqual(
       updatedRoles,
@@ -869,7 +885,7 @@ describe('module-import CLI', () => {
     }
   });
 
-  it('replays replacement snapshots through the token-only import path while preserving durable delivery receipts', async () => {
+  it('replays replacement snapshots through the token-only import path while preserving non-expired variables', async () => {
     const originalFetch = globalThis.fetch;
     const requests: Array<{ path: string; method: string; body?: any }> = [];
     let searchCalls = 0;
@@ -984,6 +1000,12 @@ describe('module-import CLI', () => {
       {
         key: 'server_messages_state',
         value: '{"sequentialIndex":1}',
+        gameServerId: 'gs-1',
+        moduleId: 'new-module',
+      },
+      {
+        key: 'server_messages_lock',
+        value: '{"token":"transient"}',
         gameServerId: 'gs-1',
         moduleId: 'new-module',
       },
@@ -1446,6 +1468,12 @@ describe('module-import CLI', () => {
         key: 'hello_test_force_failure',
         value: JSON.stringify({ shouldRestore: true }),
       });
+      await client.variable.variableControllerCreate({
+        moduleId: baselineModule.id,
+        gameServerId: localMockCtx.gameServer.id,
+        key: 'permanent_lock_state',
+        value: JSON.stringify({ preserved: true }),
+      });
 
       const baselinePermission = (await client.role.roleControllerGetPermissions()).data.data.find(
         (permission) => permission.module?.id === baselineModule.id && permission.permission === 'HELLO_USE',
@@ -1483,6 +1511,24 @@ describe('module-import CLI', () => {
       });
       assert.equal(similarlyNamedDurableVariable.data.data.length, 1, 'Expected similarly-named durable module variables to survive replacement');
       assert.equal(similarlyNamedDurableVariable.data.data[0].value, JSON.stringify({ shouldRestore: true }));
+
+      const replacementInstallations = await client.module.moduleInstallationsControllerGetInstalledModules({
+        filters: {
+          moduleId: [replacementModule.id],
+          gameserverId: [localMockCtx.gameServer.id],
+        },
+      });
+      assert.equal(replacementInstallations.data.data.length, 1, 'Expected the live installation to remain attached to the replacement module');
+
+      const lockLikeDurableVariable = await client.variable.variableControllerSearch({
+        filters: {
+          moduleId: [replacementModule.id],
+          gameServerId: [localMockCtx.gameServer.id],
+          key: ['permanent_lock_state'],
+        },
+      });
+      assert.equal(lockLikeDurableVariable.data.data.length, 1, 'Expected lock-like durable variables to survive replacement');
+      assert.equal(lockLikeDurableVariable.data.data[0].value, JSON.stringify({ preserved: true }));
 
       const role = await client.role.roleControllerGetOne(roleId);
       const helloPermission = role.data.data.permissions.find((permission) => permission.permission?.permission === 'HELLO_USE');

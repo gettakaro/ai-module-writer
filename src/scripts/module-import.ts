@@ -17,6 +17,8 @@ export const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const DEFAULT_TOKEN_CACHE_PATH = '/tmp/takaro-token';
 const INSTALLATION_PAGE_SIZE = 100;
 const PAGE_SIZE = 100;
+const REPLACEMENT_PERMISSION_POLL_DELAY_MS = 500;
+const REPLACEMENT_PERMISSION_POLL_TIMEOUT_MS = 15000;
 
 export function loadRepoEnv(): void {
   config({ path: path.join(REPO_ROOT, '.env') });
@@ -67,12 +69,6 @@ interface VariableSnapshot {
   gameServerId?: string;
   playerId?: string;
 }
-
-const TRANSIENT_MODULE_VARIABLE_KEYS = new Set([
-  'server_messages_test_force_state_write_failure',
-  'server_messages_test_force_receipt_write_failure',
-]);
-const LOCK_LIKE_VARIABLE_KEY_PATTERN = /(^|_)lock(?:_|$)/i;
 
 interface RolePermissionSnapshot {
   permissionId: string;
@@ -172,42 +168,8 @@ function isExpiredVariable(variable: VariableSnapshot, now = Date.now()): boolea
   return Number.isFinite(expiresAt) && expiresAt <= now;
 }
 
-function looksLikeLockPayload(value: string): boolean {
-  try {
-    const parsed = JSON.parse(value) as Record<string, unknown>;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return false;
-    }
-
-    return ['token', 'acquiredAt', 'heartbeatAt', 'ownerToken', 'ownerId']
-      .some((key) => Object.prototype.hasOwnProperty.call(parsed, key));
-  } catch {
-    return false;
-  }
-}
-
-function isTransientModuleVariable(variable: VariableSnapshot): boolean {
-  if (TRANSIENT_MODULE_VARIABLE_KEYS.has(variable.key)) {
-    return true;
-  }
-
-  if (LOCK_LIKE_VARIABLE_KEY_PATTERN.test(variable.key) && looksLikeLockPayload(variable.value)) {
-    return true;
-  }
-
-  return false;
-}
-
 function shouldRestoreModuleVariable(variable: VariableSnapshot): boolean {
-  if (isExpiredVariable(variable)) {
-    return false;
-  }
-
-  if (isTransientModuleVariable(variable)) {
-    return false;
-  }
-
-  return true;
+  return !isExpiredVariable(variable);
 }
 
 export function getTakaroAuthConfig(env: NodeJS.ProcessEnv = process.env): TakaroAuthConfig {
@@ -631,17 +593,20 @@ async function waitForReplacementPermissionMap(
 ): Promise<Map<string, string>> {
   const uniqueExpectedCodes = [...new Set(expectedCodes)];
   let lastSeen = new Map<string, string>();
+  const deadline = Date.now() + REPLACEMENT_PERMISSION_POLL_TIMEOUT_MS;
 
-  for (let attempt = 0; attempt < 10; attempt++) {
+  while (Date.now() <= deadline) {
     lastSeen = await ops.getModulePermissionCodeToId(replacementModule.id);
     const missingCodes = uniqueExpectedCodes.filter((code) => !lastSeen.has(code));
     if (missingCodes.length === 0) {
       return lastSeen;
     }
 
-    if (attempt < 9) {
-      await new Promise((resolve) => setTimeout(resolve, 250));
+    if (Date.now() + REPLACEMENT_PERMISSION_POLL_DELAY_MS > deadline) {
+      break;
     }
+
+    await new Promise((resolve) => setTimeout(resolve, REPLACEMENT_PERMISSION_POLL_DELAY_MS));
   }
 
   return lastSeen;

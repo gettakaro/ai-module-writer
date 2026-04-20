@@ -117,13 +117,18 @@ export async function startMockServer(client: Client, options: StartMockServerOp
       'discover game server',
     );
 
+    if (!gameServer) {
+      throw new Error(`Game server with identityToken ${identityToken} was discovered as undefined`);
+    }
+    const discoveredGameServer = gameServer;
+
     // Connect all players (sends player-connected events to Takaro)
     await server.executeConsoleCommand('connectAll');
 
     // Wait for players to appear in Takaro's playerOnGameserver records
     const players: PlayerOnGameserverOutputDTO[] = await retry(
       async () => {
-        const found = await fetchOnlinePlayers(client, gameServer.id, population.totalPlayers);
+        const found = await fetchOnlinePlayers(client, discoveredGameServer.id, population.totalPlayers);
         if (found.length < population.totalPlayers) throw new Error(`Waiting for ${population.totalPlayers} players to be online, only ${found.length} found so far`);
         return found;
       },
@@ -132,7 +137,7 @@ export async function startMockServer(client: Client, options: StartMockServerOp
       'wait for players',
     );
 
-    return { server, gameServer, players, identityToken };
+    return { server, gameServer: discoveredGameServer, players, identityToken };
   } catch (err) {
     // Clean up server resources before re-throwing so the process can exit cleanly
     await stopMockServer(server, client, gameServer?.id).catch((cleanupErr) => {

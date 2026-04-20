@@ -495,6 +495,30 @@ describe('vote-restart edge cases', () => {
     () => prefix2,
   );
 
+  async function withInjectedVoteStateValue<T>(value: string, action: () => Promise<T>): Promise<T> {
+    await client2.variable.variableControllerCreate({
+      key: 'vr_vote_state',
+      value,
+      gameServerId: ctx2.gameServer.id,
+      moduleId: moduleId2,
+    });
+
+    try {
+      return await action();
+    } finally {
+      const varSearch = await client2.variable.variableControllerSearch({
+        filters: {
+          key: ['vr_vote_state'],
+          gameServerId: [ctx2.gameServer.id],
+          moduleId: [moduleId2],
+        },
+      });
+      for (const v of varSearch.data.data) {
+        await client2.variable.variableControllerDelete(v.id);
+      }
+    }
+  }
+
   // ── Test: minimumPlayers enforcement ─────────────────────────────────────
   // minimumPlayers=4 but only 2 non-immune players online — should be rejected.
 
@@ -513,6 +537,69 @@ describe('vote-restart edge cases', () => {
   // Directly inject a "passed" vote state via the variable API and verify
   // /voteyes is rejected with "already passed" error.
   // This avoids reinstalling the module mid-test and is more reliable.
+
+  it('should treat malformed persisted vote JSON as no active vote', async () => {
+    const event = await withInjectedVoteStateValue('{"status":', async () => (
+      triggerCommand2(ctx2.players[0].playerId, 'votestatus')
+    ));
+
+    const { success, logs } = getResult2(event);
+    assert.equal(success, true, `Expected success=true for malformed vote state recovery, logs: ${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((l) => l.includes('No active restart vote') || l.includes('no active restart vote')),
+      `Expected malformed vote state to be ignored, got: ${JSON.stringify(logs)}`,
+    );
+  });
+
+  it('should ignore structurally invalid persisted vote state', async () => {
+    const event = await withInjectedVoteStateValue(JSON.stringify({ status: 'active', voters: 'not-an-array' }), async () => (
+      triggerCommand2(ctx2.players[0].playerId, 'votestatus')
+    ));
+
+    const { success, logs } = getResult2(event);
+    assert.equal(success, true, `Expected success=true for structurally invalid vote state recovery, logs: ${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((l) => l.includes('No active restart vote') || l.includes('no active restart vote')),
+      `Expected structurally invalid vote state to be ignored, got: ${JSON.stringify(logs)}`,
+    );
+  });
+
+  it('should ignore vote state with an invalid startedAt timestamp', async () => {
+    const event = await withInjectedVoteStateValue(JSON.stringify({
+      startedAt: 'definitely-not-a-date',
+      initiatorName: 'TestPlayer',
+      voters: [ctx2.players[0].playerId],
+      status: 'active',
+    }), async () => (
+      triggerCommand2(ctx2.players[0].playerId, 'votestatus')
+    ));
+
+    const { success, logs } = getResult2(event);
+    assert.equal(success, true, `Expected success=true for invalid startedAt recovery, logs: ${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((l) => l.includes('No active restart vote') || l.includes('no active restart vote')),
+      `Expected invalid startedAt vote state to be ignored, got: ${JSON.stringify(logs)}`,
+    );
+  });
+
+  it('should ignore passed vote state with a missing or invalid passedAt timestamp', async () => {
+    const event = await withInjectedVoteStateValue(JSON.stringify({
+      startedAt: new Date(Date.now() - 30 * 1000).toISOString(),
+      initiatorName: 'TestPlayer',
+      voters: [ctx2.players[0].playerId],
+      status: 'passed',
+      passedAt: 'not-a-date',
+    }), async () => (
+      triggerCommand2(ctx2.players[0].playerId, 'votestatus')
+    ));
+
+    const { success, logs } = getResult2(event);
+    assert.equal(success, true, `Expected success=true for invalid passedAt recovery, logs: ${JSON.stringify(logs)}`);
+    assert.ok(
+      logs.some((l) => l.includes('No active restart vote') || l.includes('no active restart vote')),
+      `Expected invalid passedAt vote state to be ignored, got: ${JSON.stringify(logs)}`,
+    );
+  });
 
   it('should reject /voteyes when the vote has already passed', async () => {
     // Directly write a "passed" vote state — bypass the minimumPlayers restriction
