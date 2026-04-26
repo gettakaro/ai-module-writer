@@ -1,7 +1,7 @@
 {
-  "name": "test-vote-restart",
-  "description": "Vote Restart — players vote democratically to restart the server. Dynamic threshold based on online non-immune players.",
-  "version": "latest",
+  "name": "vote-restart",
+  "description": "Vote Restart \u2014 players vote democratically to restart the server. Dynamic threshold based on online non-immune players.",
+  "version": "1.0.0",
   "supportedGames": [
     "all"
   ],

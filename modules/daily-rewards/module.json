@@ -1,7 +1,7 @@
 {
-  "name": "test-daily-rewards",
+  "name": "daily-rewards",
   "description": "Daily login reward system with streak tracking, milestone bonuses, and role-based multipliers.",
-  "version": "latest",
+  "version": "1.0.0",
   "supportedGames": [
     "all"
   ],
@@ -27,22 +27,22 @@
           {
             "days": 7,
             "reward": 1000,
-            "message": "🎉 Week streak! Bonus: 1000 coins!"
+            "message": "\ud83c\udf89 Week streak! Bonus: 1000 coins!"
           },
           {
             "days": 30,
             "reward": 5000,
-            "message": "🏆 Monthly streak! Bonus: 5000 coins!"
+            "message": "\ud83c\udfc6 Monthly streak! Bonus: 5000 coins!"
           },
           {
             "days": 100,
             "reward": 20000,
-            "message": "🌟 100 day streak! Legendary Bonus: 20000 coins!"
+            "message": "\ud83c\udf1f 100 day streak! Legendary Bonus: 20000 coins!"
           },
           {
             "days": 365,
             "reward": 100000,
-            "message": "👑 365 day streak! You are a legend! Bonus: 100000 coins!"
+            "message": "\ud83d\udc51 365 day streak! You are a legend! Bonus: 100000 coins!"
           }
         ],
         "items": {
@@ -72,7 +72,7 @@
         "type": "number",
         "default": 48,
         "minimum": 25,
-        "description": "Hours after which a streak expires (must be >24 so players can always reclaim before expiry). Setting this to 25 means players have only 1 hour after the 24h cooldown before their streak expires — effectively always at-risk. The default of 48h gives a comfortable window."
+        "description": "Hours after which a streak expires (must be >24 so players can always reclaim before expiry). Setting this to 25 means players have only 1 hour after the 24h cooldown before their streak expires \u2014 effectively always at-risk. The default of 48h gives a comfortable window."
       },
       "notifyOnLogin": {
         "type": "boolean",

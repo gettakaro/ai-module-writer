@@ -57,7 +57,12 @@ if (!data.versions || !Array.isArray(data.versions)) {
 const { name, author = 'Unknown', supportedGames = ['all'] } = data;
 
 // Validate module name (prevents empty, whitespace, and path traversal)
-validateEntityName(name, 'module');
+try {
+  validateEntityName(name, 'module');
+} catch (err) {
+  console.error(`ERROR: ${(err as Error).message}`);
+  process.exit(1);
+}
 
 // Pick the "latest" version, or the first one
 const version: ModuleVersion | undefined =
@@ -72,41 +77,46 @@ const repoDir = path.resolve(__dirname, '..', '..');
 const outputDir = outputDirArg ?? path.join(repoDir, 'modules', name);
 
 // Validate all entity names and function fields before writing any files
-if (version.commands) {
-  for (const cmd of version.commands) {
-    validateEntityName(cmd.name, 'command');
-    if (!cmd.function || typeof cmd.function !== 'string') {
-      console.error(`ERROR: command '${cmd.name}' is missing required field 'function' (JS code)`);
-      process.exit(1);
+try {
+  if (version.commands) {
+    for (const cmd of version.commands) {
+      validateEntityName(cmd.name, 'command');
+      if (!cmd.function || typeof cmd.function !== 'string') {
+        console.error(`ERROR: command '${cmd.name}' is missing required field 'function' (JS code)`);
+        process.exit(1);
+      }
     }
   }
-}
-if (version.hooks) {
-  for (const hook of version.hooks) {
-    validateEntityName(hook.name, 'hook');
-    if (!hook.function || typeof hook.function !== 'string') {
-      console.error(`ERROR: hook '${hook.name}' is missing required field 'function' (JS code)`);
-      process.exit(1);
+  if (version.hooks) {
+    for (const hook of version.hooks) {
+      validateEntityName(hook.name, 'hook');
+      if (!hook.function || typeof hook.function !== 'string') {
+        console.error(`ERROR: hook '${hook.name}' is missing required field 'function' (JS code)`);
+        process.exit(1);
+      }
     }
   }
-}
-if (version.cronJobs) {
-  for (const cron of version.cronJobs) {
-    validateEntityName(cron.name, 'cronJob');
-    if (!cron.function || typeof cron.function !== 'string') {
-      console.error(`ERROR: cronJob '${cron.name}' is missing required field 'function' (JS code)`);
-      process.exit(1);
+  if (version.cronJobs) {
+    for (const cron of version.cronJobs) {
+      validateEntityName(cron.name, 'cronJob');
+      if (!cron.function || typeof cron.function !== 'string') {
+        console.error(`ERROR: cronJob '${cron.name}' is missing required field 'function' (JS code)`);
+        process.exit(1);
+      }
     }
   }
-}
-if (version.functions) {
-  for (const fn of version.functions) {
-    validateEntityName(fn.name, 'function');
-    if (!fn.function || typeof fn.function !== 'string') {
-      console.error(`ERROR: function '${fn.name}' is missing required field 'function' (JS code)`);
-      process.exit(1);
+  if (version.functions) {
+    for (const fn of version.functions) {
+      validateEntityName(fn.name, 'function');
+      if (!fn.function || typeof fn.function !== 'string') {
+        console.error(`ERROR: function '${fn.name}' is missing required field 'function' (JS code)`);
+        process.exit(1);
+      }
     }
   }
+} catch (err) {
+  console.error(`ERROR: ${(err as Error).message}`);
+  process.exit(1);
 }
 
 console.error(`Extracting module '${name}' to ${outputDir}`);

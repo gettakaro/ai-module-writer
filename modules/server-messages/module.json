@@ -1,7 +1,7 @@
 {
-  "name": "test-server-messages",
+  "name": "server-messages",
   "description": "Broadcasts scheduled announcements to all connected players. Supports sequential rotation and weighted shuffle-bag rotation.",
-  "version": "latest",
+  "version": "1.0.0",
   "supportedGames": [
     "all"
   ],
@@ -27,14 +27,19 @@
               "description": "How many times this message appears in the shuffle bag (only used when order=random)."
             }
           },
-          "required": ["text"],
+          "required": [
+            "text"
+          ],
           "additionalProperties": false
         },
         "default": []
       },
       "order": {
         "type": "string",
-        "enum": ["sequential", "random"],
+        "enum": [
+          "sequential",
+          "random"
+        ],
         "default": "sequential",
         "description": "Rotation mode. sequential sends messages in order; random uses weighted shuffle-bag rotation."
       }

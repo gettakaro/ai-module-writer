@@ -1,0 +1,114 @@
+{
+  "name": "jackpot",
+  "description": "Players buy tickets with in-game currency and a daily draw picks a winner — more tickets = better odds. Prize pool grows with each ticket purchase.",
+  "version": "1.0.0",
+  "supportedGames": [
+    "all"
+  ],
+  "config": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "ticketPrice": {
+        "type": "number",
+        "default": 10,
+        "minimum": 1,
+        "description": "Cost per ticket in currency"
+      },
+      "profitMargin": {
+        "type": "number",
+        "default": 0.1,
+        "minimum": 0,
+        "maximum": 0.99,
+        "description": "Fraction of the pot the server keeps (0 = no server fee, 0.99 = server keeps 99%)"
+      },
+      "maxTicketsPerPlayer": {
+        "type": "number",
+        "default": 100,
+        "minimum": 1,
+        "description": "Maximum tickets a single player can hold for one draw"
+      },
+      "minimumParticipants": {
+        "type": "number",
+        "default": 2,
+        "minimum": 2,
+        "description": "Minimum number of unique players required to proceed with the draw"
+      },
+      "announceTicketPurchases": {
+        "type": "boolean",
+        "default": false,
+        "description": "Whether to broadcast ticket purchases to all players"
+      },
+      "rolloverOnCancel": {
+        "type": "boolean",
+        "default": false,
+        "description": "When true, pot rolls over to the next draw instead of refunding players on cancellation"
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  },
+  "permissions": [
+    {
+      "permission": "JACKPOT_BUY",
+      "friendlyName": "Buy Jackpot Tickets",
+      "description": "Allows a player to buy jackpot tickets",
+      "canHaveCount": false
+    },
+    {
+      "permission": "JACKPOT_VIEW_TICKETS",
+      "friendlyName": "View Jackpot Tickets",
+      "description": "Allows a player to view their current jackpot ticket count",
+      "canHaveCount": false
+    }
+  ],
+  "commands": {
+    "buy-ticket": {
+      "trigger": "buyticket",
+      "description": "Buy jackpot tickets",
+      "helpText": "Buy one or more jackpot tickets for the current draw. Usage: buyticket <amount>",
+      "function": "src/commands/buy-ticket/index.js",
+      "arguments": [
+        {
+          "name": "amount",
+          "type": "number",
+          "helpText": "Number of tickets to buy",
+          "position": 0
+        }
+      ]
+    },
+    "jackpot-info": {
+      "trigger": "jackpotinfo",
+      "description": "View current jackpot status",
+      "helpText": "Shows the current pot, participant count, total tickets, and ticket price for the upcoming draw.",
+      "function": "src/commands/jackpot-info/index.js",
+      "arguments": []
+    },
+    "next-draw": {
+      "trigger": "nextdraw",
+      "description": "See when the next jackpot draw is",
+      "helpText": "Shows how long until the next jackpot draw at midnight UTC.",
+      "function": "src/commands/next-draw/index.js",
+      "arguments": []
+    },
+    "view-tickets": {
+      "trigger": "viewtickets",
+      "description": "View your current jackpot ticket count",
+      "helpText": "Shows how many tickets you currently hold for the upcoming draw.",
+      "function": "src/commands/view-tickets/index.js",
+      "arguments": []
+    }
+  },
+  "cronJobs": {
+    "draw-jackpot": {
+      "temporalValue": "0 0 * * *",
+      "description": "Daily jackpot draw at midnight UTC — picks a winner weighted by ticket count",
+      "function": "src/cronjobs/draw-jackpot/index.js"
+    }
+  },
+  "functions": {
+    "jackpot-helpers": {
+      "function": "src/functions/jackpot-helpers.js"
+    }
+  }
+}
