@@ -20,6 +20,58 @@ export interface InstallModuleConfig {
 }
 
 /**
+ * Safety guard: refuse to run pushModule/cleanupTestModules against hosts that look
+ * like production. Accepts TAKARO_HOST values that contain a test/dev/local/staging
+ * indicator, or that are explicitly allowlisted via TAKARO_TEST_HOST_ALLOWLIST
+ * (comma-separated substring list).
+ *
+ * Override: set TAKARO_TEST_ALLOW_ANY_HOST=1 to skip this check entirely (CI only).
+ */
+export function assertTestSafeHost(): void {
+  if (process.env.TAKARO_TEST_ALLOW_ANY_HOST === '1') return;
+
+  const host = process.env.TAKARO_HOST ?? '';
+  if (!host) return; // no host configured — let downstream calls fail naturally
+
+  // Explicit allowlist wins
+  const allowlist = (process.env.TAKARO_TEST_HOST_ALLOWLIST ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (allowlist.some((pattern) => host.includes(pattern))) return;
+
+  // Safe-by-default patterns: local, dev subdomains under takaro.dev, staging, test, ci, mock
+  const safePatterns = [
+    'localhost', '127.0.0.1', '0.0.0.0', 'host.docker.internal',
+    '.takaro.dev',  // matches api.next.takaro.dev, staging.takaro.dev, etc. — but NOT prod.dev
+    '.dev.', '.test.', '.ci.', '.staging.', '.local',
+    '-dev-', '-test-', '-ci-', '-staging-',
+  ];
+  if (safePatterns.some((p) => host.includes(p))) return;
+
+  // Also allow single-label hostnames (no dots) — typical for internal Docker service names
+  // like `takaro_api` or `api` which are dev-only internal aliases.
+  // Single-label hostnames pass because they typically only resolve in Docker/internal networks.
+  // If your dev environment routes bare hostnames to public IPs, set TAKARO_TEST_HOST_ALLOWLIST
+  // or TAKARO_TEST_ALLOW_ANY_HOST=1 deliberately.
+  try {
+    const hostname = new URL(host).hostname;
+    // Only allow RFC 6761 reserved TLDs (.test, .localhost) that never resolve publicly.
+    // .dev is intentionally excluded — it's a real gTLD and google-prod.dev would be accepted otherwise.
+    const safeTLDs = ['.test', '.localhost'];
+    if (!hostname.includes('.') || safeTLDs.some((tld) => hostname.endsWith(tld))) return;
+  } catch {
+    // host is not a valid URL (e.g. bare hostname) — fall through to the error below
+  }
+
+  throw new Error(
+    `pushModule/cleanupTestModules refused: TAKARO_HOST='${host}' does not match any known test/dev host pattern. ` +
+    `This is a safety guard to prevent wiping modules on a production domain. ` +
+    `To override: set TAKARO_TEST_ALLOW_ANY_HOST=1 (CI only) or add a substring to TAKARO_TEST_HOST_ALLOWLIST.`
+  );
+}
+
+/**
  * Push a local module to Takaro via the import API.
  * If a module with the same name already exists, deletes it first (idempotent).
  * Returns the imported module (found by name from module.json).
@@ -28,6 +80,7 @@ export async function pushModule(
   client: Client,
   moduleDir: string,
 ): Promise<ModuleOutputDTO> {
+  assertTestSafeHost();
   const absoluteModuleDir = path.resolve(moduleDir);
 
   // Convert the module dir to JSON using the compiled script
@@ -146,16 +199,30 @@ export async function getCommandPrefix(client: Client, gameServerId: string): Pr
 }
 
 /**
- * Delete all modules whose names start with 'test-' (safety net cleanup).
+ * Discover module names from the modules/ directory at runtime.
+ * This avoids maintaining a hand-maintained list — any directory added to modules/
+ * is automatically included in cleanup without requiring a code change.
+ */
+function getKnownModuleNames(): string[] {
+  const modulesDir = path.join(REPO_ROOT, 'modules');
+  return fs
+    .readdirSync(modulesDir, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name);
+}
+
+/**
+ * Delete all orphaned modules matching the known module names (safety net cleanup).
+ * Module names are discovered from the modules/ directory — no manual list to maintain.
  * Always re-fetches page 0 until no results remain, to avoid pagination
  * shift bugs when items are deleted from the current page.
- * Uses search: { name: ['test-'] } for a partial-match search.
  * If the search fails (e.g. due to server-side errors on corrupt data), the
  * cleanup is skipped — this is non-fatal since module names are unique and
  * each test's before() also deletes specific modules by name before importing.
  */
 export async function cleanupTestModules(client: Client): Promise<void> {
-  const limit = 100;
+  assertTestSafeHost();
+  const knownModuleNames = getKnownModuleNames();
   const MAX_ITERATIONS = 50;
   let iterations = 0;
   while (true) {
@@ -165,9 +232,9 @@ export async function cleanupTestModules(client: Client): Promise<void> {
     let result;
     try {
       result = await client.module.moduleControllerSearch({
-        limit,
+        limit: 100,
         page: 0,
-        search: { name: ['test-'] },
+        filters: { name: knownModuleNames },
       });
     } catch (err) {
       // Non-fatal: cleanup search failed (e.g. server-side error on corrupt module data).
@@ -175,7 +242,7 @@ export async function cleanupTestModules(client: Client): Promise<void> {
       console.error('cleanupTestModules: search failed (non-fatal, skipping cleanup):', err);
       return;
     }
-    const mods = result.data.data.filter((m) => m.name.startsWith('test-'));
+    const mods = result.data.data.filter((m) => knownModuleNames.includes(m.name));
     if (mods.length === 0) break;
     for (const mod of mods) {
       await client.module.moduleControllerRemove(mod.id);

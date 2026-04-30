@@ -1,7 +1,7 @@
 {
-  "name": "test-referral-program",
+  "name": "referral-program",
   "description": "Players invite others via a referral code; referrers earn currency or items when their referees hit a playtime threshold, with daily/lifetime caps and VIP tiering.",
-  "version": "latest",
+  "version": "1.0.0",
   "supportedGames": [
     "all"
   ],
@@ -113,14 +113,14 @@
     "refcode": {
       "trigger": "refcode",
       "description": "Get your referral code (generates one if you don't have one yet)",
-      "helpText": "Usage: /refcode — Displays your unique referral code. Share it with new players to earn rewards when they join.",
+      "helpText": "Usage: /refcode \u2014 Displays your unique referral code. Share it with new players to earn rewards when they join.",
       "function": "src/commands/refcode/index.js",
       "arguments": []
     },
     "referral": {
       "trigger": "referral",
       "description": "Claim a referral using a referral code",
-      "helpText": "Usage: /referral <code> — Enter a referral code from the player who invited you. You must use this within the referral window of your first join (see server config).",
+      "helpText": "Usage: /referral <code> \u2014 Enter a referral code from the player who invited you. You must use this within the referral window of your first join (see server config).",
       "function": "src/commands/referral/index.js",
       "arguments": [
         {
@@ -134,21 +134,21 @@
     "refstats": {
       "trigger": "refstats",
       "description": "View your referral statistics",
-      "helpText": "Usage: /refstats — View your referral stats including total referrals, earnings, and who referred you.",
+      "helpText": "Usage: /refstats \u2014 View your referral stats including total referrals, earnings, and who referred you.",
       "function": "src/commands/refstats/index.js",
       "arguments": []
     },
     "reftop": {
       "trigger": "reftop",
       "description": "View the referral leaderboard (top 10 referrers by paid referrals)",
-      "helpText": "Usage: /reftop — Shows the top 10 players by number of successful referrals.",
+      "helpText": "Usage: /reftop \u2014 Shows the top 10 players by number of successful referrals.",
       "function": "src/commands/reftop/index.js",
       "arguments": []
     },
     "reflink": {
       "trigger": "reflink",
       "description": "Admin: Force-link a referee to a referrer and pay both rewards",
-      "helpText": "Usage: /reflink <referee> <referrer> — Admin only. Provide the full exact display name of each player (case-sensitive). Force-creates a paid link and pays both rewards.",
+      "helpText": "Usage: /reflink <referee> <referrer> \u2014 Admin only. Provide the full exact display name of each player (case-sensitive). Force-creates a paid link and pays both rewards.",
       "function": "src/commands/reflink/index.js",
       "arguments": [
         {
@@ -168,7 +168,7 @@
     "refunlink": {
       "trigger": "refunlink",
       "description": "Admin: Remove a referral link for a referee",
-      "helpText": "Usage: /refunlink <referee> — Admin only. Provide the full exact display name of the referee player (case-sensitive). Removes their referral link.",
+      "helpText": "Usage: /refunlink <referee> \u2014 Admin only. Provide the full exact display name of the referee player (case-sensitive). Removes their referral link.",
       "function": "src/commands/refunlink/index.js",
       "arguments": [
         {

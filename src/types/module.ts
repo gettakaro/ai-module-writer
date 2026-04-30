@@ -68,6 +68,21 @@ export interface TakaroModuleExport {
   versions: ModuleVersion[];
 }
 
+/** A single module entry in the registry manifest */
+export interface RegistryManifestModule {
+  name: string;
+  latestVersion: string;
+  versions: string[];
+  description?: string;
+}
+
+/** The top-level registry manifest served at {base}/registry.json */
+export interface RegistryManifest {
+  name: string;
+  description?: string;
+  modules: RegistryManifestModule[];
+}
+
 /** New consolidated module.json format — all metadata in one file */
 export interface LocalCommandDef {
   trigger: string;

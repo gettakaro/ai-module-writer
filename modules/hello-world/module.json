@@ -1,7 +1,7 @@
 {
-  "name": "test-hello-world",
-  "description": "A simple hello world module for testing",
-  "version": "latest",
+  "name": "hello-world",
+  "description": "Greets players in chat with a configurable hello message when they join or use /greet.",
+  "version": "1.0.0",
   "supportedGames": [
     "all"
   ],
@@ -9,7 +9,7 @@
     "greet": {
       "trigger": "greet",
       "description": "Greet a player by name",
-      "helpText": "Usage: /greet [name] — Greets you or the specified name",
+      "helpText": "Usage: /greet [name] \u2014 Greets you or the specified name",
       "function": "src/commands/greet/index.js",
       "arguments": [
         {

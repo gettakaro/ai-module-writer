@@ -112,7 +112,7 @@ const prefix = await getCommandPrefix(client, gameServerId);
 await uninstallModule(client, moduleId, gameServerId);
 await deleteModule(client, moduleId);
 
-// Safety net: delete orphaned test-* modules and game servers
+// Safety net: delete orphaned modules (matching modules/ directory listing) and game servers
 await cleanupTestModules(client);
 await cleanupTestGameServers(client);
 ```
@@ -121,10 +121,10 @@ await cleanupTestGameServers(client);
 
 When tests crash before `after()` runs, mock game servers and test modules are left behind in Takaro. Both cleanup functions should be called in `before()` hooks:
 
-- `cleanupTestModules(client)` — deletes modules with names starting with `test-`
+- `cleanupTestModules(client)` — deletes modules whose names match a directory under `modules/`
 - `cleanupTestGameServers(client)` — deletes game servers with names starting with `test-`
 
-Module names should start with `test-` (e.g., `test-hello-world` in `module.json`) so `cleanupTestModules` can find and remove them.
+Module names must match their directory name (e.g., for `modules/hello-world/`, set `"name": "hello-world"` in module.json — this is enforced by both the test cleanup helper and the registry build).
 
 ### Writing Tests for a New Module
 

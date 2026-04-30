@@ -64,6 +64,54 @@ Module code lives locally in `modules/` as editable files, then gets pushed to T
 **Why**: Mocked tests pass while the real system fails. The whole point of this test infrastructure is to catch integration issues (wrong API shapes, missing permissions, runtime errors in the Takaro function sandbox). Unit tests with mocked helpers bypass all of that.
 
 
+## Module Conventions
+
+### Versioning
+
+**Every change to a module requires a version bump in `module.json`.** Versions must be valid semver (e.g. `1.0.0`, `1.0.1`, `2.1.0`). The value `"latest"` is not accepted by the registry.
+
+### Module naming
+
+Module names must match their directory name under `modules/`. Names may only contain `[a-zA-Z0-9_-]` (no spaces, no dots, no slashes). Maximum 100 characters.
+
+For example: the module in `modules/afk-kick/` must have `"name": "afk-kick"` in its `module.json`.
+
+> **Known limitation**: The `name` field appears literally in the Takaro UI as the module identifier (there is no separate `displayName` field today). Choose names that are readable as-is — kebab-case slugs like `afk-kick` or `mini-games` display acceptably. This is a Takaro platform constraint that may be relaxed in a future version.
+
+### Adding a new module
+
+1. Create `modules/<name>/module.json` with `"name": "<name>"` and `"version": "1.0.0"`.
+2. Run `npm run build && npm run build:registry` to verify the registry builds cleanly.
+3. Commit and push — the publish workflow updates the `registry` branch automatically.
+
+`cleanupTestModules` discovers module names from the `modules/` directory at runtime — no manual list to update when adding a new module.
+
+See `src/scripts/build-registry.ts` for the registry build logic.
+
+### Safety guard for test helpers
+
+`pushModule` and `cleanupTestModules` refuse to touch a Takaro instance whose `TAKARO_HOST` doesn't look like a test/dev environment. This prevents accidentally wiping production modules when running tests.
+
+**If you see this error:**
+```
+pushModule/cleanupTestModules refused: TAKARO_HOST='<HOST>' does not match any known test/dev host pattern. ...
+```
+
+**Common fixes (try in this order):**
+1. Check `TAKARO_HOST` in `.env` is correct — pointing at production (`api.takaro.io`) is the most common cause.
+2. If your dev/staging host has a non-standard hostname, add a substring to `TAKARO_TEST_HOST_ALLOWLIST` (comma-separated) in `.env`.
+3. Last resort, for a single throwaway run: `TAKARO_TEST_ALLOW_ANY_HOST=1 npm test`. Use only when you're certain the target is not shared production state.
+
+**Auto-accepted hosts:** `localhost`, `127.0.0.1`, `host.docker.internal`, single-label Docker hostnames (e.g. `takaro_api`), `*.takaro.dev`, `.staging.`/`.dev.`/`.test.`/`.ci.` substrings, `.test`/`.localhost` TLDs.
+
+**CI:** uses `localhost:13000` and passes the guard automatically.
+
+### Test pretest blocking
+
+`npm test` runs `build:registry` as a `pretest` step. If any module fails registry validation (bad semver, invalid name, description too long), the entire test run is blocked — including unrelated modules. To unblock: fix the validation error in the offending module, or temporarily move the module directory out of `modules/` while debugging other tests.
+
+Workaround: bypass the pretest gate with `node --test --import=ts-node-maintained/register/esm 'modules/<name>/test/*.test.ts'`.
+
 ## Available Tools
 
 - **`scripts/takaro-auth.sh`** — Authenticate with the Takaro API

@@ -49,6 +49,8 @@ Each clone also needs a unique `TAKARO_MC_IDENTITY_TOKEN` in `.env`.
 You need:
 - `TAKARO_USERNAME` and `TAKARO_PASSWORD` — Your Takaro account credentials
 - `TAKARO_HOST` — The Takaro API URL (e.g., `https://api.takaro.io`)
+
+  Note: `npm test` will refuse to run against production hosts (e.g. `api.takaro.io`). Use a dev/staging host or see [AGENTS.md](AGENTS.md#safety-guard-for-test-helpers) for the bypass.
 - `TAKARO_DOMAIN_ID` — Your Takaro domain ID
 
 ### Minecraft Server Setup
@@ -84,6 +86,41 @@ claude
 # Now you can start creating modules!
 > Write me a module that says 'hello' to every player when they join
 ```
+
+## Published Registry
+
+This repository is the **Takaro Official Module Registry**. Modules are automatically published to the `registry` branch on every push to `main`.
+
+> **Status — end-to-end subscription currently blocked:** `raw.githubusercontent.com` serves `.json` files with `Content-Type: text/plain`, but the Takaro registry client requires `Content-Type` to contain `"json"`. This is a Takaro server-side limitation; subscriptions will work automatically once the next Takaro release ships the content-type fix (see [gettakaro/takaro#2723](https://github.com/gettakaro/takaro/pull/2723)). The `registry` branch is published and up to date in the meantime.
+
+**Public registry URL** (usable once the Takaro-side fix ships):
+
+```
+https://raw.githubusercontent.com/gettakaro/ai-module-writer/registry
+```
+
+To subscribe in Takaro, navigate to **Modules → Registries → Add Registry** and enter the URL above. Note: subscription will return an error until the content-type fix ships.
+
+### Local testing (developer workaround)
+
+While the production URL is blocked, developers can test the registry locally:
+
+```bash
+npm run build && npm run build:registry
+python3 -m http.server 8765 --directory dist/registry
+```
+
+Then subscribe to `http://host.docker.internal:8765` from a local Takaro dev stack with `TAKARO_REGISTRY_ALLOWED_PRIVATE_HOSTS` set to include `host.docker.internal`.
+
+### Versioning convention
+
+Any change to a module **requires a version bump** in that module's `module.json`. Module versions must be valid semver (e.g. `1.0.1`). Module names must match their directory name and may only contain `[a-zA-Z0-9_-]`.
+
+### Adding a new module
+
+1. Create `modules/<your-module-name>/module.json` with `"name": "<your-module-name>"` and `"version": "1.0.0"`.
+2. Run `npm run build && npm run build:registry` to verify the registry builds.
+3. Push to `main` — the publish workflow will update the `registry` branch automatically.
 
 ## How it Works
 

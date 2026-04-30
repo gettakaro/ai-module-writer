@@ -1,0 +1,209 @@
+{
+  "name": "server-toolkit",
+  "description": "Cross-game utility commands for server info, rules, moderation, and simple economy administration.",
+  "version": "1.0.0",
+  "supportedGames": [
+    "all"
+  ],
+  "config": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "discordLink": {
+        "type": "string",
+        "default": "",
+        "maxLength": 500,
+        "description": "Discord invite or community link shown by /discord"
+      },
+      "rules": {
+        "type": "array",
+        "default": [],
+        "maxItems": 20,
+        "description": "Server rules shown by /rules",
+        "items": {
+          "type": "string",
+          "maxLength": 200
+        }
+      },
+      "serverInfoMessage": {
+        "type": "string",
+        "default": "",
+        "maxLength": 300,
+        "description": "Optional extra server info line shown by /serverinfo"
+      },
+      "broadcastCurrencyGrants": {
+        "type": "boolean",
+        "default": false,
+        "description": "Whether /givecurrency should broadcast to the whole server"
+      },
+      "currencyGrantBroadcastMessage": {
+        "type": "string",
+        "default": "{player} received {amount} currency from {admin}.",
+        "maxLength": 300,
+        "description": "Broadcast template for /givecurrency. Supports {player}, {amount}, and {admin}."
+      },
+      "broadcastKicks": {
+        "type": "boolean",
+        "default": false,
+        "description": "Whether /kick should broadcast to the whole server"
+      },
+      "kickBroadcastMessage": {
+        "type": "string",
+        "default": "{player} was kicked by {admin}. Reason: {reason}",
+        "maxLength": 300,
+        "description": "Broadcast template for /kick. Supports {player}, {reason}, and {admin}."
+      },
+      "broadcastBans": {
+        "type": "boolean",
+        "default": false,
+        "description": "Whether /ban should broadcast to the whole server"
+      },
+      "banBroadcastMessage": {
+        "type": "string",
+        "default": "{player} was banned by {admin} for {duration}. Reason: {reason}",
+        "maxLength": 300,
+        "description": "Broadcast template for temporary /ban. Supports {player}, {reason}, {admin}, and {duration}."
+      },
+      "banPermBroadcastMessage": {
+        "type": "string",
+        "default": "{player} was permanently banned by {admin}. Reason: {reason}",
+        "maxLength": 300,
+        "description": "Broadcast template for permanent /ban. Supports {player}, {reason}, and {admin}."
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  },
+  "uiSchema": {},
+  "permissions": [
+    {
+      "canHaveCount": false,
+      "description": "Allows a player to kick other players",
+      "permission": "TOOLKIT_KICK",
+      "friendlyName": "Kick Players"
+    },
+    {
+      "canHaveCount": false,
+      "description": "Allows a player to ban other players",
+      "permission": "TOOLKIT_BAN",
+      "friendlyName": "Ban Players"
+    },
+    {
+      "canHaveCount": false,
+      "description": "Allows a player to grant currency to players",
+      "permission": "TOOLKIT_GIVE_CURRENCY",
+      "friendlyName": "Give Currency"
+    }
+  ],
+  "commands": {
+    "serverinfo": {
+      "trigger": "serverinfo",
+      "description": "Show basic server information",
+      "helpText": "Shows the server name, online player count, and optional server info message.",
+      "function": "src/commands/serverinfo/index.js",
+      "arguments": []
+    },
+    "online": {
+      "trigger": "online",
+      "description": "Show online players",
+      "helpText": "Shows how many players are online and lists up to 10 names.",
+      "function": "src/commands/online/index.js",
+      "arguments": []
+    },
+    "discord": {
+      "trigger": "discord",
+      "description": "Show the server Discord link",
+      "helpText": "Shows the configured Discord link for this server.",
+      "function": "src/commands/discord/index.js",
+      "arguments": []
+    },
+    "rules": {
+      "trigger": "rules",
+      "description": "Show server rules",
+      "helpText": "Shows the configured server rules as a numbered list.",
+      "function": "src/commands/rules/index.js",
+      "arguments": []
+    },
+    "kick": {
+      "trigger": "kick",
+      "description": "Kick an online player",
+      "helpText": "Usage: kick <player> [reason] — kicks a player from the server.",
+      "function": "src/commands/kick/index.js",
+      "arguments": [
+        {
+          "name": "player",
+          "type": "player",
+          "defaultValue": null,
+          "helpText": "The player to kick",
+          "position": 0
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "defaultValue": "?",
+          "helpText": "Optional reason shown to the target and in broadcasts",
+          "position": 1
+        }
+      ]
+    },
+    "ban": {
+      "trigger": "ban",
+      "description": "Ban a player temporarily or permanently",
+      "helpText": "Usage: ban <player> <duration> [reason] — duration: perm/permanent or 10m, 12h, 7d, 2w.",
+      "function": "src/commands/ban/index.js",
+      "arguments": [
+        {
+          "name": "player",
+          "type": "player",
+          "defaultValue": null,
+          "helpText": "The player to ban",
+          "position": 0
+        },
+        {
+          "name": "duration",
+          "type": "string",
+          "defaultValue": null,
+          "helpText": "perm/permanent or a value like 10m, 12h, 7d, or 2w",
+          "position": 1
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "defaultValue": "?",
+          "helpText": "Optional reason shown in the ban confirmation and broadcasts",
+          "position": 2
+        }
+      ]
+    },
+    "givecurrency": {
+      "trigger": "givecurrency",
+      "description": "Grant currency to a player",
+      "helpText": "Usage: givecurrency <player> <amount> — amount must be a positive whole number.",
+      "function": "src/commands/givecurrency/index.js",
+      "arguments": [
+        {
+          "name": "player",
+          "type": "player",
+          "defaultValue": null,
+          "helpText": "The player to receive currency",
+          "position": 0
+        },
+        {
+          "name": "amount",
+          "type": "number",
+          "defaultValue": null,
+          "helpText": "Amount of currency to give (positive whole number)",
+          "position": 1
+        }
+      ]
+    }
+  },
+  "functions": {
+    "server-toolkit-helpers": {
+      "function": "src/functions/server-toolkit-helpers.js"
+    },
+    "server-toolkit-pure": {
+      "function": "src/functions/server-toolkit-pure.js"
+    }
+  }
+}

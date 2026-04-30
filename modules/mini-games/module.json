@@ -1,9 +1,10 @@
 {
-  "name": "test-mini-games",
-  "description": "Unified mini-games module with daily puzzles (Wordle, Hangman, Hot/Cold) and live chat rounds (Trivia, Scramble, Math race, Reaction race). Skill-based, point-scoring, optional currency rewards, boost tiers, cross-game leaderboards.",
-  "version": "latest",
-  "supportedGames": ["all"],
-
+  "name": "mini-games",
+  "description": "Player-facing chat games — seven games total: daily puzzles (Wordle, Hangman, Hot/Cold) and live rounds (Trivia, Scramble, Math Race, Reaction Race) with point scoring, leaderboards, and optional currency rewards.",
+  "version": "1.0.0",
+  "supportedGames": [
+    "all"
+  ],
   "config": {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "type": "object",
@@ -71,36 +72,73 @@
       },
       "triviaQuestionSource": {
         "type": "string",
-        "enum": ["api", "custom"],
+        "enum": [
+          "api",
+          "custom"
+        ],
         "default": "api",
         "description": "Trivia source. 'api' fetches from Open Trivia DB; falls back to custom bank on failure."
       },
       "triviaApiCategory": {
         "type": "array",
-        "default": ["any"],
-        "items": { "type": "string" },
+        "default": [
+          "any"
+        ],
+        "items": {
+          "type": "string"
+        },
         "description": "OpenTDB category keys. ['any'] = no filter. Multiple = random pick per round."
       },
       "triviaApiDifficulty": {
         "type": "string",
-        "enum": ["any", "easy", "medium", "hard"],
+        "enum": [
+          "any",
+          "easy",
+          "medium",
+          "hard"
+        ],
         "default": "any"
       },
       "triviaApiType": {
         "type": "string",
-        "enum": ["any", "multiple", "boolean"],
+        "enum": [
+          "any",
+          "multiple",
+          "boolean"
+        ],
         "default": "any"
       },
       "games": {
         "type": "object",
         "properties": {
-          "wordle":       { "type": "boolean", "default": true },
-          "hangman":      { "type": "boolean", "default": true },
-          "hotcold":      { "type": "boolean", "default": true },
-          "trivia":       { "type": "boolean", "default": true },
-          "scramble":     { "type": "boolean", "default": true },
-          "mathrace":     { "type": "boolean", "default": true },
-          "reactionrace": { "type": "boolean", "default": true }
+          "wordle": {
+            "type": "boolean",
+            "default": true
+          },
+          "hangman": {
+            "type": "boolean",
+            "default": true
+          },
+          "hotcold": {
+            "type": "boolean",
+            "default": true
+          },
+          "trivia": {
+            "type": "boolean",
+            "default": true
+          },
+          "scramble": {
+            "type": "boolean",
+            "default": true
+          },
+          "mathrace": {
+            "type": "boolean",
+            "default": true
+          },
+          "reactionrace": {
+            "type": "boolean",
+            "default": true
+          }
         },
         "default": {
           "wordle": true,
@@ -116,9 +154,7 @@
     "required": [],
     "additionalProperties": false
   },
-
   "uiSchema": {},
-
   "permissions": [
     {
       "permission": "MINIGAMES_PLAY",
@@ -139,12 +175,11 @@
       "canHaveCount": false
     }
   ],
-
   "commands": {
     "minigames": {
       "trigger": "minigames",
       "description": "Help and overview for mini-games.",
-      "helpText": "Usage: /minigames [game] — Show help for all games or a specific game.",
+      "helpText": "Usage: /minigames [game] \u2014 Show help for all games or a specific game.",
       "function": "src/commands/minigames/index.js",
       "arguments": [
         {
@@ -159,7 +194,7 @@
     "wordle": {
       "trigger": "wordle",
       "description": "Daily 5-letter word puzzle.",
-      "helpText": "Usage: /wordle [guess] — No arg shows today's attempts; with 5-letter guess submits a guess.",
+      "helpText": "Usage: /wordle [guess] \u2014 No arg shows today's attempts; with 5-letter guess submits a guess.",
       "function": "src/commands/wordle/index.js",
       "arguments": [
         {
@@ -174,7 +209,7 @@
     "hangman": {
       "trigger": "hangman",
       "description": "Daily hangman puzzle.",
-      "helpText": "Usage: /hangman [letter|word] — No arg shows board; letter guesses a letter; full word attempts solve.",
+      "helpText": "Usage: /hangman [letter|word] \u2014 No arg shows board; letter guesses a letter; full word attempts solve.",
       "function": "src/commands/hangman/index.js",
       "arguments": [
         {
@@ -189,7 +224,7 @@
     "hotcold": {
       "trigger": "hotcold",
       "description": "Daily hot/cold number guessing game.",
-      "helpText": "Usage: /hotcold [number] — No arg shows attempts; number 1-1000 submits a guess.",
+      "helpText": "Usage: /hotcold [number] \u2014 No arg shows attempts; number 1-1000 submits a guess.",
       "function": "src/commands/hotcold/index.js",
       "arguments": [
         {
@@ -204,7 +239,7 @@
     "answer": {
       "trigger": "answer",
       "description": "Answer the currently active live round.",
-      "helpText": "Usage: /answer <response> — Submit your answer to the active live round.",
+      "helpText": "Usage: /answer <response> \u2014 Submit your answer to the active live round.",
       "function": "src/commands/answer/index.js",
       "arguments": [
         {
@@ -218,7 +253,7 @@
     "minigamestats": {
       "trigger": "minigamestats",
       "description": "View mini-games stats.",
-      "helpText": "Usage: /minigamestats [player] — Show lifetime and current-day stats.",
+      "helpText": "Usage: /minigamestats [player] \u2014 Show lifetime and current-day stats.",
       "function": "src/commands/minigamestats/index.js",
       "arguments": [
         {
@@ -233,7 +268,7 @@
     "minigamestop": {
       "trigger": "minigamestop",
       "description": "View mini-games leaderboards.",
-      "helpText": "Usage: /minigamestop <points|wordle|hangman|streak> — Show leaderboard.",
+      "helpText": "Usage: /minigamestop <points|wordle|hangman|streak> \u2014 Show leaderboard.",
       "function": "src/commands/minigamestop/index.js",
       "arguments": [
         {
@@ -247,14 +282,14 @@
     "puzzle": {
       "trigger": "puzzle",
       "description": "Status of today's async puzzles.",
-      "helpText": "Usage: /puzzle — Shows which daily puzzles you've played and time until rollover.",
+      "helpText": "Usage: /puzzle \u2014 Shows which daily puzzles you've played and time until rollover.",
       "function": "src/commands/puzzle/index.js",
       "arguments": []
     },
     "minigamesban": {
       "trigger": "minigamesban",
       "description": "Ban a player from mini-games.",
-      "helpText": "Usage: /minigamesban <player> [hours] — Ban permanently (no hours) or temporarily.",
+      "helpText": "Usage: /minigamesban <player> [hours] \u2014 Ban permanently (no hours) or temporarily.",
       "function": "src/commands/minigamesban/index.js",
       "arguments": [
         {
@@ -275,7 +310,7 @@
     "minigamesunban": {
       "trigger": "minigamesunban",
       "description": "Unban a player from mini-games.",
-      "helpText": "Usage: /minigamesunban <player> — Remove a mini-games ban.",
+      "helpText": "Usage: /minigamesunban <player> \u2014 Remove a mini-games ban.",
       "function": "src/commands/minigamesunban/index.js",
       "arguments": [
         {
@@ -289,7 +324,7 @@
     "minigamesresetstats": {
       "trigger": "minigamesresetstats",
       "description": "Reset a player's mini-games stats.",
-      "helpText": "Usage: /minigamesresetstats <player> — Wipe all stats for a player.",
+      "helpText": "Usage: /minigamesresetstats <player> \u2014 Wipe all stats for a player.",
       "function": "src/commands/minigamesresetstats/index.js",
       "arguments": [
         {
@@ -303,14 +338,14 @@
     "minigamesskiproundnow": {
       "trigger": "minigamesskiproundnow",
       "description": "Cancel the current live round.",
-      "helpText": "Usage: /minigamesskiproundnow — Cancel the active live round with no winner.",
+      "helpText": "Usage: /minigamesskiproundnow \u2014 Cancel the active live round with no winner.",
       "function": "src/commands/minigamesskiproundnow/index.js",
       "arguments": []
     },
     "minigamesfirenow": {
       "trigger": "minigamesfirenow",
       "description": "Fire a live round immediately.",
-      "helpText": "Usage: /minigamesfirenow [game] — Start a live round now, optionally picking the game.",
+      "helpText": "Usage: /minigamesfirenow [game] \u2014 Start a live round now, optionally picking the game.",
       "function": "src/commands/minigamesfirenow/index.js",
       "arguments": [
         {
@@ -324,12 +359,11 @@
     "minigamesreport": {
       "trigger": "minigamesreport",
       "description": "PM admin with mini-games report.",
-      "helpText": "Usage: /minigamesreport — Send a lifetime stats report (total rounds, points, top 5, per-game breakdown).",
+      "helpText": "Usage: /minigamesreport \u2014 Send a lifetime stats report (total rounds, points, top 5, per-game breakdown).",
       "function": "src/commands/minigamesreport/index.js",
       "arguments": []
     }
   },
-
   "hooks": {
     "onChatMessage": {
       "eventType": "chat-message",
@@ -342,7 +376,6 @@
       "function": "src/hooks/on-player-disconnect/index.js"
     }
   },
-
   "cronJobs": {
     "rolloverDailyPuzzles": {
       "temporalValue": "0 0 * * *",
@@ -375,7 +408,6 @@
       "function": "src/cronjobs/expire-bans/index.js"
     }
   },
-
   "functions": {
     "mini-games-helpers": {
       "function": "src/functions/mini-games-helpers.js"
