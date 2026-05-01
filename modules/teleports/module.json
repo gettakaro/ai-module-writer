@@ -1,0 +1,131 @@
+{
+  "name": "test-teleports",
+  "description": "Player-managed waypoints and fast travel",
+  "version": "latest",
+  "supportedGames": [
+    "all"
+  ],
+  "config": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "maxTeleportPoints": {
+        "type": "number",
+        "default": 3,
+        "description": "Maximum saved waypoints per player"
+      },
+      "cooldown": {
+        "type": "number",
+        "default": 60,
+        "description": "Seconds between teleport uses"
+      },
+      "tpbackEnabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Whether /tpback is available"
+      },
+      "cost": {
+        "type": "number",
+        "default": 0,
+        "description": "Currency cost per teleport (0 = free)"
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  },
+  "permissions": [
+    {
+      "permission": "TELEPORT_TP_PLAYER",
+      "friendlyName": "Teleport to Player",
+      "description": "Required to use /tpplayer (admin/moderator only)",
+      "canHaveCount": false
+    },
+    {
+      "permission": "TELEPORT_BYPASS_COOLDOWN",
+      "friendlyName": "Bypass Teleport Cooldown",
+      "description": "Skip the cooldown restriction",
+      "canHaveCount": false
+    },
+    {
+      "permission": "TELEPORT_EXTRA_POINTS",
+      "friendlyName": "Extra Teleport Points",
+      "description": "Each count grants one additional teleport point above the default limit",
+      "canHaveCount": true
+    }
+  ],
+  "commands": {
+    "settp": {
+      "trigger": "settp",
+      "description": "Save your current position as a named waypoint",
+      "helpText": "Usage: /settp <name>",
+      "function": "src/commands/settp/index.js",
+      "arguments": [
+        {
+          "name": "name",
+          "type": "string",
+          "helpText": "Name for the waypoint",
+          "position": 0
+        }
+      ]
+    },
+    "tp": {
+      "trigger": "tp",
+      "description": "Teleport to a saved waypoint",
+      "helpText": "Usage: /tp <name>",
+      "function": "src/commands/tp/index.js",
+      "arguments": [
+        {
+          "name": "name",
+          "type": "string",
+          "helpText": "Name of the waypoint",
+          "position": 0
+        }
+      ]
+    },
+    "deltp": {
+      "trigger": "deltp",
+      "description": "Delete a saved teleport point",
+      "helpText": "Usage: /deltp <name>",
+      "function": "src/commands/deltp/index.js",
+      "arguments": [
+        {
+          "name": "name",
+          "type": "string",
+          "helpText": "Name of the waypoint to delete",
+          "position": 0
+        }
+      ]
+    },
+    "listtp": {
+      "trigger": "listtp",
+      "description": "List all your saved teleport points",
+      "helpText": "Usage: /listtp",
+      "function": "src/commands/listtp/index.js",
+      "arguments": []
+    },
+    "tpback": {
+      "trigger": "tpback",
+      "description": "Teleport back to your previous location",
+      "helpText": "Usage: /tpback",
+      "function": "src/commands/tpback/index.js",
+      "arguments": []
+    },
+    "tpplayer": {
+      "trigger": "tpplayer",
+      "description": "Teleport to another player's location (requires permission)",
+      "helpText": "Usage: /tpplayer <playerName>",
+      "function": "src/commands/tpplayer/index.js",
+      "arguments": [
+        {
+          "name": "playerName",
+          "type": "string",
+          "helpText": "Name of the player to teleport to",
+          "position": 0
+        }
+      ]
+    }
+  },
+  "hooks": {},
+  "cronJobs": {},
+  "functions": {}
+}

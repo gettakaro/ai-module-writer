@@ -1,0 +1,467 @@
+{
+  "name": "casino",
+  "description": "Unified casino with multiple betting games, admin-configurable limits, cross-game analytics, leaderboards, and economy-safety guardrails.",
+  "version": "latest",
+  "supportedGames": [
+    "all"
+  ],
+  "config": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [],
+    "properties": {
+      "minBet": {
+        "type": "number",
+        "default": 1,
+        "minimum": 1,
+        "description": "Minimum bet amount."
+      },
+      "maxBet": {
+        "type": "number",
+        "default": 1000,
+        "minimum": 1,
+        "description": "Maximum bet amount (VIP multiplier applies)."
+      },
+      "capWindow": {
+        "type": "string",
+        "enum": [
+          "daily",
+          "weekly"
+        ],
+        "default": "daily",
+        "description": "Rolling window for wager/loss caps."
+      },
+      "wagerCap": {
+        "type": "number",
+        "default": 0,
+        "minimum": 0,
+        "description": "Max currency wagered per window. 0 = unlimited."
+      },
+      "lossCap": {
+        "type": "number",
+        "default": 0,
+        "minimum": 0,
+        "description": "Max net loss per window. 0 = unlimited."
+      },
+      "houseEdgePct": {
+        "type": "number",
+        "default": 2,
+        "minimum": 0,
+        "maximum": 50,
+        "description": "House edge percentage applied to all payouts."
+      },
+      "jackpotContributionPct": {
+        "type": "number",
+        "default": 1,
+        "minimum": 0,
+        "maximum": 100,
+        "description": "% of losing bets added to the jackpot pool."
+      },
+      "cooldownSeconds": {
+        "type": "number",
+        "default": 3,
+        "minimum": 0,
+        "description": "Seconds a player must wait between bets."
+      },
+      "bigWinThreshold": {
+        "type": "number",
+        "default": 1000,
+        "minimum": 0,
+        "description": "Wins at or above this value emit a server-wide announcement."
+      },
+      "enableFlip": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable the coin flip game."
+      },
+      "enableDice": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable the over/under dice game."
+      },
+      "enableHilo": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable the higher/lower card game."
+      },
+      "enableRoulette": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable the roulette game."
+      },
+      "enableSlots": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable the slot machine."
+      },
+      "enableBlackjack": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable blackjack."
+      },
+      "enableCrash": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable the crash multiplier game."
+      },
+      "enableDuel": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable PvP duel (rock-paper-scissors)."
+      },
+      "enableRace": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable the race pool game."
+      }
+    }
+  },
+  "permissions": [
+    {
+      "permission": "CASINO_PLAY",
+      "description": "Allowed to play casino games. Default-on for all roles.",
+      "friendlyName": "Casino Play",
+      "canHaveCount": false
+    },
+    {
+      "permission": "CASINO_VIP",
+      "description": "VIP tier level. Each tier level multiplies bet/daily caps and grants +0.5% win-rate bonus (capped at +2%).",
+      "friendlyName": "Casino VIP",
+      "canHaveCount": true
+    },
+    {
+      "permission": "CASINO_MANAGE",
+      "description": "Access to admin casino commands: ban, reset stats, set jackpot, reports.",
+      "friendlyName": "Casino Manage",
+      "canHaveCount": false
+    },
+    {
+      "permission": "CASINO_BANNED",
+      "description": "Explicit play-ban flag. Set by /casinoban command.",
+      "friendlyName": "Casino Banned",
+      "canHaveCount": false
+    }
+  ],
+  "commands": {
+    "casino": {
+      "trigger": "casino",
+      "helpText": "Show casino overview and list of available games.",
+      "description": "Casino help and overview.",
+      "function": "src/commands/casino/index.js",
+      "arguments": []
+    },
+    "flip": {
+      "trigger": "flip",
+      "helpText": "Coinflip: /flip <amount> <heads|tails>",
+      "description": "Bet on a coin flip.",
+      "function": "src/commands/flip/index.js",
+      "arguments": [
+        {
+          "name": "amount",
+          "type": "number",
+          "helpText": "Amount to bet.",
+          "position": 0
+        },
+        {
+          "name": "side",
+          "type": "string",
+          "helpText": "heads or tails",
+          "position": 1
+        }
+      ]
+    },
+    "dice": {
+      "trigger": "dice",
+      "helpText": "Dice over/under: /dice <amount> <over|under> <target 2-98>",
+      "description": "Bet on a dice roll over or under a target number.",
+      "function": "src/commands/dice/index.js",
+      "arguments": [
+        {
+          "name": "amount",
+          "type": "number",
+          "helpText": "Amount to bet.",
+          "position": 0
+        },
+        {
+          "name": "direction",
+          "type": "string",
+          "helpText": "over or under",
+          "position": 1
+        },
+        {
+          "name": "target",
+          "type": "number",
+          "helpText": "Target 2-98.",
+          "position": 2
+        }
+      ]
+    },
+    "hilo": {
+      "trigger": "hilo",
+      "helpText": "Higher/Lower streak: /hilo <amount> to start, /hilo higher|lower|cashout to continue.",
+      "description": "Multi-step higher/lower card game.",
+      "function": "src/commands/hilo/index.js",
+      "arguments": [
+        {
+          "name": "action",
+          "type": "string",
+          "helpText": "Amount to start, or higher/lower/cashout to continue.",
+          "position": 0
+        }
+      ]
+    },
+    "bet": {
+      "trigger": "bet",
+      "helpText": "Roulette: /bet <amount> <red|black|green|odd|even|0-36>",
+      "description": "Bet on European roulette.",
+      "function": "src/commands/bet/index.js",
+      "arguments": [
+        {
+          "name": "amount",
+          "type": "number",
+          "helpText": "Amount to bet.",
+          "position": 0
+        },
+        {
+          "name": "selection",
+          "type": "string",
+          "helpText": "red/black/green/odd/even or number 0-36.",
+          "position": 1
+        }
+      ]
+    },
+    "slots": {
+      "trigger": "slots",
+      "helpText": "Slot machine: /slots <amount>",
+      "description": "Spin the slot machine.",
+      "function": "src/commands/slots/index.js",
+      "arguments": [
+        {
+          "name": "amount",
+          "type": "number",
+          "helpText": "Amount to bet.",
+          "position": 0
+        }
+      ]
+    },
+    "bj": {
+      "trigger": "bj",
+      "helpText": "Blackjack: /bj <amount> to deal, /bj hit|stand|double to play.",
+      "description": "Play Blackjack against the dealer.",
+      "function": "src/commands/bj/index.js",
+      "arguments": [
+        {
+          "name": "action",
+          "type": "string",
+          "helpText": "Amount to deal, or hit/stand/double.",
+          "position": 0
+        }
+      ]
+    },
+    "crash": {
+      "trigger": "crash",
+      "helpText": "Crash: /crash <amount> <cashoutAt>. Auto-cashout multiplier min 1.01.",
+      "description": "Bet on a crash multiplier with an auto-cashout.",
+      "function": "src/commands/crash/index.js",
+      "arguments": [
+        {
+          "name": "amount",
+          "type": "number",
+          "helpText": "Amount to bet.",
+          "position": 0
+        },
+        {
+          "name": "cashoutAt",
+          "type": "number",
+          "helpText": "Auto-cashout multiplier (1.01+).",
+          "position": 1
+        }
+      ]
+    },
+    "duel": {
+      "trigger": "duel",
+      "helpText": "PvP Duel: /duel <player> <amount> to challenge, /duel accept|decline|rock|paper|scissors to respond.",
+      "description": "Rock-paper-scissors duel against another player.",
+      "function": "src/commands/duel/index.js",
+      "arguments": [
+        {
+          "name": "action",
+          "type": "string",
+          "helpText": "Player name + amount, or accept/decline/rock/paper/scissors.",
+          "position": 0
+        },
+        {
+          "name": "amount",
+          "type": "number",
+          "helpText": "Bet amount (only for challenge).",
+          "position": 1,
+          "defaultValue": "0"
+        }
+      ]
+    },
+    "race": {
+      "trigger": "race",
+      "helpText": "Race pool: /race <amount>. Join the next draw pool.",
+      "description": "Enter the race betting pool for a chance at the prize.",
+      "function": "src/commands/race/index.js",
+      "arguments": [
+        {
+          "name": "amount",
+          "type": "number",
+          "helpText": "Amount to enter.",
+          "position": 0
+        }
+      ]
+    },
+    "casinostats": {
+      "trigger": "casinostats",
+      "helpText": "View casino stats: /casinostats [player]",
+      "description": "View player casino statistics.",
+      "function": "src/commands/casinostats/index.js",
+      "arguments": [
+        {
+          "name": "player",
+          "type": "string",
+          "helpText": "Player name (admin only for others).",
+          "position": 0,
+          "defaultValue": "self"
+        }
+      ]
+    },
+    "casinotop": {
+      "trigger": "casinotop",
+      "helpText": "Casino leaderboard: /casinotop <wager|won|winrate|biggest>",
+      "description": "View the casino leaderboard.",
+      "function": "src/commands/casinotop/index.js",
+      "arguments": [
+        {
+          "name": "category",
+          "type": "string",
+          "helpText": "wager, won, winrate, or biggest.",
+          "position": 0
+        }
+      ]
+    },
+    "jackpot": {
+      "trigger": "jackpot",
+      "helpText": "Show current jackpot amount: /jackpot",
+      "description": "Display the current jackpot pool.",
+      "function": "src/commands/jackpot/index.js",
+      "arguments": []
+    },
+    "casinoban": {
+      "trigger": "casinoban",
+      "helpText": "Ban a player from casino: /casinoban <player> [hours]",
+      "description": "Ban a player from casino (admin).",
+      "function": "src/commands/casinoban/index.js",
+      "arguments": [
+        {
+          "name": "player",
+          "type": "string",
+          "helpText": "Player name.",
+          "position": 0
+        },
+        {
+          "name": "hours",
+          "type": "number",
+          "helpText": "Duration in hours (omit for permanent).",
+          "position": 1,
+          "defaultValue": "0"
+        }
+      ]
+    },
+    "casinounban": {
+      "trigger": "casinounban",
+      "helpText": "Unban a player from casino: /casinounban <player>",
+      "description": "Remove a casino ban (admin).",
+      "function": "src/commands/casinounban/index.js",
+      "arguments": [
+        {
+          "name": "player",
+          "type": "string",
+          "helpText": "Player name.",
+          "position": 0
+        }
+      ]
+    },
+    "casinoresetstats": {
+      "trigger": "casinoresetstats",
+      "helpText": "Reset a player's casino stats: /casinoresetstats <player>",
+      "description": "Reset player casino statistics (admin).",
+      "function": "src/commands/casinoresetstats/index.js",
+      "arguments": [
+        {
+          "name": "player",
+          "type": "string",
+          "helpText": "Player name.",
+          "position": 0
+        }
+      ]
+    },
+    "setjackpot": {
+      "trigger": "setjackpot",
+      "helpText": "Set jackpot amount: /setjackpot <amount>",
+      "description": "Manually set the jackpot amount (admin).",
+      "function": "src/commands/setjackpot/index.js",
+      "arguments": [
+        {
+          "name": "amount",
+          "type": "number",
+          "helpText": "New jackpot amount.",
+          "position": 0
+        }
+      ]
+    },
+    "casinoreport": {
+      "trigger": "casinoreport",
+      "helpText": "Casino economy report: /casinoreport [days]",
+      "description": "Generate a casino economy report (admin).",
+      "function": "src/commands/casinoreport/index.js",
+      "arguments": [
+        {
+          "name": "days",
+          "type": "number",
+          "helpText": "Number of days to cover (default 7).",
+          "position": 0,
+          "defaultValue": "7"
+        }
+      ]
+    }
+  },
+  "hooks": {
+    "onPlayerDisconnect": {
+      "eventType": "player-disconnected",
+      "description": "Settle or refund in-flight sessions when a player disconnects.",
+      "function": "src/hooks/onPlayerDisconnect/index.js"
+    }
+  },
+  "cronJobs": {
+    "refreshLeaderboards": {
+      "temporalValue": "*/5 * * * *",
+      "description": "Recompute top-10 leaderboards every 5 minutes.",
+      "function": "src/cronjobs/refreshLeaderboards/index.js"
+    },
+    "drawRace": {
+      "temporalValue": "* * * * *",
+      "description": "Process race pool draws every minute.",
+      "function": "src/cronjobs/drawRace/index.js"
+    },
+    "expireWindows": {
+      "temporalValue": "0 0 * * *",
+      "description": "Delete expired wager/loss window variables daily.",
+      "function": "src/cronjobs/expireWindows/index.js"
+    },
+    "expireSessions": {
+      "temporalValue": "*/5 * * * *",
+      "description": "Cancel and refund abandoned game sessions every 5 minutes.",
+      "function": "src/cronjobs/expireSessions/index.js"
+    },
+    "expireBans": {
+      "temporalValue": "0 * * * *",
+      "description": "Remove expired temporary casino bans every hour.",
+      "function": "src/cronjobs/expireBans/index.js"
+    }
+  },
+  "functions": {}
+}
