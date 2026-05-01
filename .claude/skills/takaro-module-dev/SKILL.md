@@ -440,3 +440,25 @@ When something doesn't work, check `references/debugging-patterns.md` for the de
 5. Repeat until all tests pass
 
 Always check the command prefix — it's configured per game server and might not be what you expect. Fetch it via the settings API.
+
+## Phase 7: Screenshot and Description Handoff
+
+When the module is intended for publication, sharing with the community, or a PR into the community module viewer, completion includes a screenshot-description handoff after automated and in-game verification pass.
+
+Use `takaro-module-screenshots` for this follow-up. It captures Takaro dashboard screenshots only and drafts or updates the Markdown module description.
+
+### Handoff contents
+
+Include enough concrete context that the screenshot pass can reproduce the verified dashboard evidence without rediscovering the module:
+
+- Module path, module name, and current `modules/<name>/module.json` status
+- Whether the description should be edited in `module.json` or only drafted in the final answer
+- Game server ID/name used during verification and the dashboard URL when known
+- Installed module ID/version ID when known
+- Exact config values used during verification
+- Command prefix, bot names, and command/chat messages that were run
+- Hook, cronjob, or event filters that produced verified evidence
+- Verification commands/tests already run and their result
+- Suggested screenshot purposes, such as `config`, command trigger names, `chat`, or `events`
+
+Do not require this handoff for throwaway test modules unless the user asks for publishable documentation.
