@@ -91,6 +91,24 @@ describe('playtime-buff-rewards', () => {
     });
   }
 
+  async function installWithCommandRewardConfig(): Promise<void> {
+    await installModule(client, versionId, ctx!.gameServer.id, {
+      userConfig: {
+        announceRewards: false,
+        buffRewards: [],
+        commandRewards: [
+          {
+            name: 'Coffee and meds pack',
+            command: 'give {playerName} coffee 3',
+            weight: 1,
+            enabled: true,
+          },
+        ],
+        currencyRewards: [],
+      },
+    });
+  }
+
   async function triggerCronjob(): Promise<{ success: boolean; logs: string[] }> {
     const before = new Date();
     await client.cronjob.cronJobControllerTrigger({
@@ -141,6 +159,26 @@ describe('playtime-buff-rewards', () => {
       assert.ok(
         logs.some((msg) => msg.includes('buffplayer') && msg.includes('CustomerBuff')),
         `Expected buff command in logs, got: ${JSON.stringify(logs)}`,
+      );
+    } finally {
+      await uninstallModule(client, moduleId, ctx!.gameServer.id);
+    }
+  });
+
+  it('hourly playtime cron grants generic item-style rewards through game commands, not shop actions', async () => {
+    await installWithCommandRewardConfig();
+    try {
+      const playerName = await fetchPlayerName(client, ctx!.players[0].playerId);
+      const { success, logs } = await triggerCronjob();
+
+      assert.equal(success, true, `Expected cronjob success, logs: ${JSON.stringify(logs)}`);
+      assert.ok(
+        logs.some((msg) => msg.includes(`give ${playerName} coffee 3`)),
+        `Expected generic reward to execute a game command for ${playerName}, got: ${JSON.stringify(logs)}`,
+      );
+      assert.ok(
+        !logs.some((msg) => msg.toLowerCase().includes('shop')),
+        `Expected generic reward path to avoid shop actions, got: ${JSON.stringify(logs)}`,
       );
     } finally {
       await uninstallModule(client, moduleId, ctx!.gameServer.id);
