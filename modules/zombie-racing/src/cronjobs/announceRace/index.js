@@ -1,5 +1,5 @@
 import { data, takaro } from '@takaro/helpers';
-import { getRaceData, getRaceLabels, getTimeUntilRace, parseEntrants } from './utils.js';
+import { getRaceData, getRaceLabels, getStartCronTemporalValue, getTimeUntilRace, nextCronJobRun, parseEntrants } from './utils.js';
 
 async function main() {
   const { gameServerId, module: mod } = data;
@@ -8,9 +8,14 @@ async function main() {
   const raceData = await getRaceData(gameServerId, mod.moduleId);
   const minBet = mod.userConfig?.minBet || 50;
   const maxBet = mod.userConfig?.maxBet || 1000;
+  if (raceData.status === 'running') {
+    console.log(`racing:announceRace skipped status=running race=${raceData.raceNumber}`);
+    return;
+  }
+  const nextRaceTime = nextCronJobRun(getStartCronTemporalValue(mod.systemConfig));
 
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-    message: `${labels.raceName} #${raceData.raceNumber} begins in ${getTimeUntilRace(raceData.nextRaceTime)}. ${raceData.bets.length} bets placed.`,
+    message: `${labels.raceName} #${raceData.raceNumber} begins in ${getTimeUntilRace(nextRaceTime)}. ${raceData.bets.length} bets placed.`,
     opts: {},
   });
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {

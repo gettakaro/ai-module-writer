@@ -26,9 +26,20 @@ async function main() {
     throw new TakaroUserError(`${labels.racerTypeLabel} "${racerName}" was not found. Available ${labels.racerTypePluralLabel}: ${entrants.map((e) => e.name).join(', ')}.`);
   }
 
+  const currentRaceData = await getRaceData(gameServerId, mod.moduleId);
+  if (currentRaceData.status === 'running') {
+    throw new TakaroUserError('Betting is closed while the race is running. Please wait for the next race before placing another bet.');
+  }
+  if (currentRaceData.completion?.raceNumber === currentRaceData.raceNumber) {
+    throw new TakaroUserError('This race is being completed. Please wait for the next race before placing another bet.');
+  }
+
   const lockOwner = await acquireRaceLock(gameServerId, mod.moduleId, 'racebet');
   try {
     const raceData = await getRaceData(gameServerId, mod.moduleId);
+    if (raceData.status === 'running') {
+      throw new TakaroUserError('Betting is closed while the race is running. Please wait for the next race before placing another bet.');
+    }
     if (raceData.completion?.raceNumber === raceData.raceNumber) {
       throw new TakaroUserError('This race is being completed. Please wait for the next race before placing another bet.');
     }

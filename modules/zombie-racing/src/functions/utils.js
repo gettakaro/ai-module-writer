@@ -7,6 +7,8 @@ export const RACING_LOCK_KEY = 'zombie_racing_lock_v1';
 
 const LOCK_TIMEOUT_MS = 30000;
 const COMPLETION_ACTIVE_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_START_CRON = '0 */2 * * *';
+const DEFAULT_RACE_DURATION_SECONDS = 60;
 
 export const DEFAULT_ENTRANTS = [
   { name: 'Biker', odds: 2 },
@@ -18,6 +20,23 @@ export const DEFAULT_ENTRANTS = [
 ];
 
 const DEFAULT_ENTRANT_LINES = DEFAULT_ENTRANTS.map((entrant) => `${entrant.name}; ${entrant.odds}`);
+const DEFAULT_COMMENTARY_TEMPLATES = {
+  early: [
+    '{leader} jumps out first, but {winner} is staying close.',
+    '{leader} takes the early lead while {winner} waits for an opening.',
+    '{leader} is setting the pace. {winner} is right behind.',
+  ],
+  middle: [
+    '{winner} is catching {leader} fast. {rival} is trying to keep pace.',
+    '{winner} closes the gap on {leader}; {rival} is still in the mix.',
+    '{leader} is under pressure now. {winner} is gaining ground.',
+  ],
+  late: [
+    '{winner} overtakes {leader} in the final stretch.',
+    '{winner} surges past {leader}; the finish line is close.',
+    '{winner} finds another gear and takes the lead from {leader}.',
+  ],
+};
 
 function toPositiveInteger(value, fallback) {
   const parsed = Number.parseInt(String(value), 10);
@@ -77,9 +96,105 @@ export function getTimeUntilRace(nextRaceTime) {
   return `${hours} hour${hours === 1 ? '' : 's'} and ${remainingMinutes} minute${remainingMinutes === 1 ? '' : 's'}`;
 }
 
+function parseCronField(field, min, max) {
+  const values = new Set();
+  for (const part of String(field || '*').split(',')) {
+    const [rangePart, stepPart] = part.split('/');
+    const step = toPositiveInteger(stepPart || 1, 1);
+    let start = min;
+    let end = max;
+    if (rangePart && rangePart !== '*') {
+      if (rangePart.includes('-')) {
+        const [rawStart, rawEnd] = rangePart.split('-');
+        start = Number.parseInt(rawStart, 10);
+        end = Number.parseInt(rawEnd, 10);
+      } else {
+        start = Number.parseInt(rangePart, 10);
+        end = start;
+      }
+    }
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    for (let value = Math.max(min, start); value <= Math.min(max, end); value += step) {
+      values.add(value);
+    }
+  }
+  return [...values].sort((a, b) => a - b);
+}
+
+export function nextCronJobRun(temporalValue, from = Date.now()) {
+  const parts = String(temporalValue || DEFAULT_START_CRON).trim().split(/\s+/);
+  if (parts.length < 2) return from + (2 * 60 * 60 * 1000);
+
+  const minutes = parseCronField(parts[0], 0, 59);
+  const hours = parseCronField(parts[1], 0, 23);
+  if (minutes.length === 0 || hours.length === 0) return from + (2 * 60 * 60 * 1000);
+
+  const cursor = new Date(from);
+  cursor.setSeconds(0, 0);
+  cursor.setMinutes(cursor.getMinutes() + 1);
+  for (let i = 0; i < 8 * 24 * 60; i++) {
+    if (minutes.includes(cursor.getMinutes()) && hours.includes(cursor.getHours())) {
+      return cursor.getTime();
+    }
+    cursor.setMinutes(cursor.getMinutes() + 1);
+  }
+  return from + (2 * 60 * 60 * 1000);
+}
+
+export function getStartCronTemporalValue(systemConfig = {}) {
+  return systemConfig?.cronJobs?.startRace?.temporalValue || DEFAULT_START_CRON;
+}
+
+export function getRaceDurationSeconds(systemConfig = {}, source = 'scheduled') {
+  const hookName = source === 'manual' ? 'finishRaceAfterManualStart' : 'finishRaceAfterScheduledStart';
+  return toPositiveInteger(systemConfig?.hooks?.[hookName]?.delay, DEFAULT_RACE_DURATION_SECONDS);
+}
+
+function configuredTemplates(config, key) {
+  const configKey = `commentary${key[0].toUpperCase()}${key.slice(1)}Templates`;
+  const templates = Array.isArray(config?.[configKey]) ? config[configKey] : DEFAULT_COMMENTARY_TEMPLATES[key];
+  const cleaned = templates.map((template) => String(template || '').trim()).filter(Boolean);
+  return cleaned.length > 0 ? cleaned : DEFAULT_COMMENTARY_TEMPLATES[key];
+}
+
+function pickTemplate(config, key) {
+  const templates = configuredTemplates(config, key);
+  return templates[Math.floor(Math.random() * templates.length)];
+}
+
+function renderCommentaryTemplate(template, values) {
+  return String(template).replace(/\{([a-zA-Z]+)\}/g, (_match, key) => {
+    return values[key] ?? '';
+  }).replace(/\s+/g, ' ').trim();
+}
+
+export function buildRaceCommentary(config = {}, results = []) {
+  const labels = getRaceLabels(config);
+  const winner = results[0]?.name || 'The favorite';
+  const leader = results[1]?.name || winner;
+  const rival = results[2]?.name || leader;
+  const values = {
+    raceName: labels.raceName,
+    racer: labels.racerTypeLabel,
+    racers: labels.racerTypePluralLabel,
+    racerPlural: labels.racerTypePluralLabel,
+    winner,
+    leader,
+    chaser: winner,
+    rival,
+  };
+
+  return ['early', 'middle', 'late'].map((stage) => ({
+    stage,
+    message: renderCommentaryTemplate(pickTemplate(config, stage), values),
+    sentAt: null,
+  }));
+}
+
 export function initialRaceState() {
   return {
-    nextRaceTime: Date.now() + (2 * 60 * 60 * 1000),
+    status: 'betting',
+    nextRaceTime: nextCronJobRun(DEFAULT_START_CRON),
     bets: [],
     lastRaceResults: null,
     raceNumber: 1,
@@ -103,7 +218,18 @@ export async function writeVariable(gameServerId, moduleId, key, value, playerId
 
   const payload = { key, value: serialized, gameServerId, moduleId };
   if (playerId) payload.playerId = playerId;
-  await takaro.variable.variableControllerCreate(payload);
+  try {
+    await takaro.variable.variableControllerCreate(payload);
+  } catch (err) {
+    const status = err?.response?.status ?? err?.status;
+    if (status !== 409) throw err;
+    const conflicted = await findVariable(gameServerId, moduleId, key, playerId);
+    if (conflicted) {
+      await takaro.variable.variableControllerUpdate(conflicted.id, { value: serialized });
+      return;
+    }
+    throw err;
+  }
 }
 
 function parseVariableValue(variable) {
@@ -193,11 +319,17 @@ export async function getRaceData(gameServerId, moduleId) {
 
   try {
     const parsed = JSON.parse(variable.value);
+    const status = parsed.status === 'running' ? 'running' : 'betting';
     return {
       ...initialRaceState(),
       ...parsed,
+      status,
       bets: Array.isArray(parsed.bets) ? parsed.bets : [],
+      frozenBets: Array.isArray(parsed.frozenBets) ? parsed.frozenBets : undefined,
+      frozenEntrants: Array.isArray(parsed.frozenEntrants) ? parsed.frozenEntrants : undefined,
       raceNumber: toPositiveInteger(parsed.raceNumber, 1),
+      plannedResults: Array.isArray(parsed.plannedResults) ? parsed.plannedResults : undefined,
+      raceCommentary: Array.isArray(parsed.raceCommentary) ? parsed.raceCommentary : undefined,
     };
   } catch (err) {
     console.error(`racing: failed to parse race state, resetting. Error: ${err}`);
@@ -394,14 +526,51 @@ async function refreshCompletionLease(gameServerId, moduleId, lockOwner, raceDat
 
 function buildNextRaceData(raceData, result) {
   return {
-    nextRaceTime: Date.now() + (2 * 60 * 60 * 1000),
+    status: 'betting',
+    nextRaceTime: nextCronJobRun(raceData.startCronTemporalValue || DEFAULT_START_CRON),
     bets: [],
     lastRaceResults: result,
     raceNumber: raceData.raceNumber + 1,
   };
 }
 
-export async function completeRace(gameServerId, moduleId, config) {
+export async function startRace(gameServerId, moduleId, config, systemConfig = {}, source = 'scheduled') {
+  const lockOwner = await acquireRaceLock(gameServerId, moduleId, `start-race-${source}`);
+  try {
+    const raceData = await getRaceData(gameServerId, moduleId);
+    if (raceData.status === 'running') {
+      throw new TakaroUserError(`Race #${raceData.raceNumber} is already running. Please wait for it to finish.`);
+    }
+    if (raceData.completion?.raceNumber === raceData.raceNumber && raceData.completion.status !== 'completed') {
+      throw raceCompletionBusyError(raceData.raceNumber);
+    }
+
+    const entrants = parseEntrants(config).map((entrant) => ({ ...entrant }));
+    const now = Date.now();
+    const finishAt = now + (getRaceDurationSeconds(systemConfig, source) * 1000);
+    const plannedResults = simulateWeightedRace(entrants);
+    const runningRaceData = {
+      ...raceData,
+      status: 'running',
+      startedAt: now,
+      finishAt,
+      startRunId: `${source}:${raceData.raceNumber}:${now}`,
+      startSource: source,
+      startCronTemporalValue: getStartCronTemporalValue(systemConfig),
+      frozenEntrants: entrants,
+      frozenBets: raceData.bets.map((bet) => ({ ...bet })),
+      plannedResults,
+      raceCommentary: buildRaceCommentary(config, plannedResults),
+      completion: null,
+    };
+    await updateRaceData(gameServerId, moduleId, runningRaceData);
+    return runningRaceData;
+  } finally {
+    await releaseRaceLock(gameServerId, moduleId, lockOwner);
+  }
+}
+
+export async function completeRace(gameServerId, moduleId, config, systemConfig = {}) {
   const requestedRaceNumber = (await getRaceData(gameServerId, moduleId)).raceNumber;
   let lockOwner;
   try {
@@ -470,8 +639,25 @@ export async function completeRace(gameServerId, moduleId, config) {
       raceData = withCompletionProgress(raceData, result, nextRaceData, completionActiveLease(lockOwner));
       await updateRaceData(gameServerId, moduleId, raceData);
     } else {
-      const entrants = parseEntrants(config);
-      const results = simulateWeightedRace(entrants);
+      if (raceData.status !== 'running') {
+        console.warn(`racing:completeRace ignored race=${raceData.raceNumber} status=${raceData.status || 'betting'} no running race`);
+        return {
+          result: raceData.lastRaceResults,
+          nextRaceData: raceData,
+          skipped: true,
+        };
+      }
+      const entrants = Array.isArray(raceData.frozenEntrants) && raceData.frozenEntrants.length > 0
+        ? raceData.frozenEntrants
+        : parseEntrants(config);
+      raceData = {
+        ...raceData,
+        bets: Array.isArray(raceData.frozenBets) ? raceData.frozenBets : raceData.bets,
+        startCronTemporalValue: raceData.startCronTemporalValue || getStartCronTemporalValue(systemConfig),
+      };
+      const results = Array.isArray(raceData.plannedResults) && raceData.plannedResults.length > 0
+        ? raceData.plannedResults
+        : simulateWeightedRace(entrants);
       const totalWagered = raceData.bets.reduce((sum, bet) => sum + bet.amount, 0);
       jackpot = raceData.bets.length > 0 ? await checkAndCreateJackpot(gameServerId, moduleId, totalWagered) : { isJackpot: false, amount: 0 };
       result = buildRaceResult(raceData, results, jackpot.isJackpot ? jackpot.amount : 0);
@@ -529,6 +715,15 @@ export async function completeRace(gameServerId, moduleId, config) {
 
     const completedRaceData = {
       ...nextRaceData,
+      status: 'betting',
+      startedAt: null,
+      finishAt: null,
+      startRunId: null,
+      startSource: null,
+      frozenEntrants: null,
+      frozenBets: null,
+      plannedResults: null,
+      raceCommentary: null,
       completion: {
         ...raceData.completion,
         raceNumber: result.raceNumber,
@@ -542,5 +737,102 @@ export async function completeRace(gameServerId, moduleId, config) {
     return { result, nextRaceData: completedRaceData };
   } finally {
     if (lockOwner) await releaseRaceLock(gameServerId, moduleId, lockOwner);
+  }
+}
+
+export async function finishRace(gameServerId, moduleId, config, systemConfig = {}, expectedSource = null) {
+  const raceData = await getRaceData(gameServerId, moduleId);
+  if (raceData.status !== 'running') {
+    console.log(`racing:finishRace skipped status=${raceData.status || 'betting'} race=${raceData.raceNumber}`);
+    return { skipped: true, nextRaceData: raceData, result: raceData.lastRaceResults };
+  }
+  if (expectedSource && raceData.startSource !== expectedSource) {
+    console.log(`racing:finishRace skipped source=${expectedSource} runningSource=${raceData.startSource} race=${raceData.raceNumber}`);
+    return { skipped: true, nextRaceData: raceData, result: raceData.lastRaceResults };
+  }
+  return completeRace(gameServerId, moduleId, config, systemConfig);
+}
+
+export async function recoverRunningRace(gameServerId, moduleId, config, systemConfig = {}) {
+  const raceData = await getRaceData(gameServerId, moduleId);
+  if (raceData.completion?.raceNumber === raceData.raceNumber && raceData.completion.status !== 'completed') {
+    return completeRace(gameServerId, moduleId, config, systemConfig);
+  }
+  if (raceData.status !== 'running') {
+    console.log(`racing:recoverRunningRace skipped status=${raceData.status || 'betting'} race=${raceData.raceNumber}`);
+    return { skipped: true, nextRaceData: raceData, result: raceData.lastRaceResults };
+  }
+  if (Number(raceData.finishAt || 0) > Date.now()) {
+    console.log(`racing:recoverRunningRace skipped race=${raceData.raceNumber} finishAt=${raceData.finishAt}`);
+    return { skipped: true, nextRaceData: raceData, result: raceData.lastRaceResults };
+  }
+  console.warn(`racing:recoverRunningRace finishing stale running race=${raceData.raceNumber} finishAt=${raceData.finishAt || 'unknown'}`);
+  return completeRace(gameServerId, moduleId, config, systemConfig);
+}
+
+export async function broadcastRaceCommentary(gameServerId, moduleId, config, expectedSource, stage) {
+  const currentRaceData = await getRaceData(gameServerId, moduleId);
+  if (currentRaceData.status !== 'running') {
+    console.log(`racing:commentary skipped stage=${stage} status=${currentRaceData.status || 'betting'} race=${currentRaceData.raceNumber}`);
+    return { skipped: true, raceData: currentRaceData };
+  }
+  if (expectedSource && currentRaceData.startSource !== expectedSource) {
+    console.log(`racing:commentary skipped stage=${stage} source=${expectedSource} runningSource=${currentRaceData.startSource} race=${currentRaceData.raceNumber}`);
+    return { skipped: true, raceData: currentRaceData };
+  }
+
+  const currentCommentary = Array.isArray(currentRaceData.raceCommentary) && currentRaceData.raceCommentary.length > 0
+    ? currentRaceData.raceCommentary
+    : buildRaceCommentary(config, currentRaceData.plannedResults || []);
+  const currentEntry = currentCommentary.find((item) => item.stage === stage);
+  if (!currentEntry?.message) {
+    console.log(`racing:commentary skipped stage=${stage} reason=missing race=${currentRaceData.raceNumber}`);
+    return { skipped: true, raceData: currentRaceData };
+  }
+  if (currentEntry.sentAt) {
+    console.log(`racing:commentary skipped stage=${stage} reason=already-sent race=${currentRaceData.raceNumber}`);
+    return { skipped: true, raceData: currentRaceData };
+  }
+
+  const lockOwner = await acquireRaceLock(gameServerId, moduleId, `race-commentary-${stage}`);
+  try {
+    const raceData = await getRaceData(gameServerId, moduleId);
+    if (raceData.status !== 'running') {
+      console.log(`racing:commentary skipped stage=${stage} status=${raceData.status || 'betting'} race=${raceData.raceNumber}`);
+      return { skipped: true, raceData };
+    }
+    if (expectedSource && raceData.startSource !== expectedSource) {
+      console.log(`racing:commentary skipped stage=${stage} source=${expectedSource} runningSource=${raceData.startSource} race=${raceData.raceNumber}`);
+      return { skipped: true, raceData };
+    }
+
+    const commentary = Array.isArray(raceData.raceCommentary) && raceData.raceCommentary.length > 0
+      ? raceData.raceCommentary
+      : buildRaceCommentary(config, raceData.plannedResults || []);
+    const entry = commentary.find((item) => item.stage === stage);
+    if (!entry?.message) {
+      console.log(`racing:commentary skipped stage=${stage} reason=missing race=${raceData.raceNumber}`);
+      return { skipped: true, raceData };
+    }
+    if (entry.sentAt) {
+      console.log(`racing:commentary skipped stage=${stage} reason=already-sent race=${raceData.raceNumber}`);
+      return { skipped: true, raceData };
+    }
+
+    await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
+      message: entry.message,
+      opts: {},
+    });
+
+    const updatedCommentary = commentary.map((item) => item.stage === stage ? { ...item, sentAt: Date.now() } : item);
+    const updatedRaceData = {
+      ...raceData,
+      raceCommentary: updatedCommentary,
+    };
+    await updateRaceData(gameServerId, moduleId, updatedRaceData);
+    console.log(`racing:commentary stage=${stage} race=${raceData.raceNumber} message="${entry.message}"`);
+    return { skipped: false, raceData: updatedRaceData, message: entry.message };
+  } finally {
+    await releaseRaceLock(gameServerId, moduleId, lockOwner);
   }
 }

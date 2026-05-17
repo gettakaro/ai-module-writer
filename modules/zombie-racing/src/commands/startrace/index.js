@@ -1,5 +1,5 @@
 import { data, takaro, checkPermission, TakaroUserError } from '@takaro/helpers';
-import { completeRace, getRaceLabels } from './utils.js';
+import { getRaceDurationSeconds, getRaceLabels, startRace } from './utils.js';
 
 async function main() {
   const { pog, gameServerId, module: mod } = data;
@@ -8,13 +8,14 @@ async function main() {
   }
 
   const labels = getRaceLabels(mod.userConfig);
-  const { result } = await completeRace(gameServerId, mod.moduleId, mod.userConfig);
+  const raceData = await startRace(gameServerId, mod.moduleId, mod.userConfig, mod.systemConfig, 'manual');
+  const duration = getRaceDurationSeconds(mod.systemConfig, 'manual');
   await takaro.gameserver.gameServerControllerSendMessage(gameServerId, {
-    message: `${labels.raceName} #${result.raceNumber} finished. Winner: ${result.winner}.`,
+    message: `${labels.raceName} #${raceData.raceNumber} has started. Betting is closed; results arrive in about ${duration} seconds.`,
     opts: {},
   });
-  await pog.pm(`${labels.raceName} #${result.raceNumber} completed. ${result.totalBets} bets, ${result.totalPayout} paid out.`);
-  console.log(`racing:startrace race=${result.raceNumber} winner=${result.winner} bets=${result.totalBets}`);
+  await pog.pm(`${labels.raceName} #${raceData.raceNumber} started. ${raceData.frozenBets.length} bets are locked in.`);
+  console.log(`racing:startrace status=running race=${raceData.raceNumber} bets=${raceData.frozenBets.length} finishAt=${raceData.finishAt}`);
 }
 
 await main();
