@@ -1,7 +1,7 @@
 {
   "name": "test-zombie-racing",
   "author": "Limon",
-  "description": "A configurable virtual racing system where players can bet on named racers.",
+  "description": "Zombie Racing lets players bet on a configurable virtual race, locks betting when a race starts, broadcasts live race commentary while the race is running, then finishes the race through delayed hooks after the configured duration.\n\nFeatures\n- Configure racer names, odds, labels, race name, min/max bet limits, and commentary templates.\n- Scheduled races start from the `startRace` cronjob and finish through `finishRaceAfterScheduledStart`.\n- Admins can start a race with `/startrace`; `finishRaceAfterManualStart` completes it after the same delayed lifecycle.\n- Bets, entrant odds, planned finishing order, and commentary are frozen when a race starts.\n- Commentary hooks broadcast early, middle, and late race moments such as leads, chases, and overtakes.\n- `recoverRunningRace` runs every minute to finish races that remain running past their expected finish time.\n\nConfiguration\nSet the user config to define the race economy and entrant list. Entrants use `Name; Odds` lines, for example `Solo; 2`. Commentary templates can use `{winner}`, `{leader}`, `{rival}`, `{raceName}`, `{racer}`, and `{racers}` placeholders.\n\n![Zombie Racing user config](./screenshots/zombieracing_config.png)\n\nSystem config controls the enabled state, scheduled cronjobs, delayed commentary hooks, delayed finish hooks, and command availability. The finish hooks default to a 60 second delay unless overridden during install or update.\n\n![Zombie Racing system config](./screenshots/zombieracing_system_config.png)\n\nCommands\n- `/racers` lists configured racers, odds, and next race timing.\n- `/racebet <racer> <amount>` places or replaces a bet while betting is open.\n- `/myracebets` shows the player's open or locked-in race bets.\n- `/nextrace` shows the next scheduled start while betting is open, or the finish countdown while a race is running.\n- `/lastrace` shows the most recent completed race result.\n- `/racestats` shows the player's racing stats.\n- `/raceleaderboard` shows top racing bettors.\n- `/startrace` starts a race immediately for admins and announces that results will follow after the hook delay.\n\n![Zombie Racing command flow](./screenshots/zombieracing_chat.png)\n\nHooks and cronjobs\n- `announceRace` broadcasts the upcoming scheduled race from the `startRace` cron expression.\n- `startRace` closes betting and starts the scheduled race.\n- `raceCommentaryEarlyAfterScheduledStart`, `raceCommentaryMiddleAfterScheduledStart`, and `raceCommentaryLateAfterScheduledStart` broadcast scheduled-race commentary.\n- `raceCommentaryEarlyAfterManualStart`, `raceCommentaryMiddleAfterManualStart`, and `raceCommentaryLateAfterManualStart` broadcast manual-race commentary.\n- `finishRaceAfterScheduledStart` listens for `cronjob-executed` events from `startRace`.\n- `finishRaceAfterManualStart` listens for `command-executed` events from `startrace`.\n- `recoverRunningRace` finishes stale running races without double-paying already finished races.\n\nThe event feed shows successful delayed hook and recovery cronjob executions for the tested race lifecycle.\n\n![Zombie Racing events](./screenshots/zombieracing_events.png)\n\nRequirements\nPlayers need the `RACING_BET` permission to place bets. Admins need `RACING_ADMIN` for `/startrace`. The game server economy must be enabled so bets and payouts can move currency.",
   "version": "latest",
   "supportedGames": [
     "all"
@@ -59,6 +59,45 @@
         "items": {
           "type": "string"
         }
+      },
+      "commentaryEarlyTemplates": {
+        "title": "Early race commentary templates",
+        "description": "Messages used for the first live race update. Supports {winner}, {leader}, {rival}, {raceName}, {racer}, and {racers}.",
+        "default": [
+          "{leader} jumps out first, but {winner} is staying close.",
+          "{leader} takes the early lead while {winner} waits for an opening.",
+          "{leader} is setting the pace. {winner} is right behind."
+        ],
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "commentaryMiddleTemplates": {
+        "title": "Middle race commentary templates",
+        "description": "Messages used for the second live race update. Supports {winner}, {leader}, {rival}, {raceName}, {racer}, and {racers}.",
+        "default": [
+          "{winner} is catching {leader} fast. {rival} is trying to keep pace.",
+          "{winner} closes the gap on {leader}; {rival} is still in the mix.",
+          "{leader} is under pressure now. {winner} is gaining ground."
+        ],
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "commentaryLateTemplates": {
+        "title": "Late race commentary templates",
+        "description": "Messages used for the final live race update before results. Supports {winner}, {leader}, {rival}, {raceName}, {racer}, and {racers}.",
+        "default": [
+          "{winner} overtakes {leader} in the final stretch.",
+          "{winner} surges past {leader}; the finish line is close.",
+          "{winner} finds another gear and takes the lead from {leader}."
+        ],
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
       }
     }
   },
@@ -76,6 +115,34 @@
       "friendlyName": "Racing Admin"
     }
   ],
+  "defaultSystemConfig": {
+    "hooks": {
+      "raceCommentaryEarlyAfterScheduledStart": {
+        "delay": 15
+      },
+      "raceCommentaryMiddleAfterScheduledStart": {
+        "delay": 30
+      },
+      "raceCommentaryLateAfterScheduledStart": {
+        "delay": 45
+      },
+      "raceCommentaryEarlyAfterManualStart": {
+        "delay": 15
+      },
+      "raceCommentaryMiddleAfterManualStart": {
+        "delay": 30
+      },
+      "raceCommentaryLateAfterManualStart": {
+        "delay": 45
+      },
+      "finishRaceAfterScheduledStart": {
+        "delay": 60
+      },
+      "finishRaceAfterManualStart": {
+        "delay": 60
+      }
+    }
+  },
   "commands": {
     "raceleaderboard": {
       "trigger": "raceleaderboard",
@@ -155,10 +222,57 @@
       "description": "Announce each upcoming two-hour race 15 minutes before it starts",
       "function": "src/cronjobs/announceRace/index.js"
     },
-    "runRace": {
+    "startRace": {
       "temporalValue": "0 */2 * * *",
-      "description": "Run the scheduled race every two hours",
-      "function": "src/cronjobs/runRace/index.js"
+      "description": "Start the scheduled race every two hours",
+      "function": "src/cronjobs/startRace/index.js"
+    },
+    "recoverRunningRace": {
+      "temporalValue": "* * * * *",
+      "description": "Recover races that remain running after their expected finish time",
+      "function": "src/cronjobs/recoverRunningRace/index.js"
+    }
+  },
+  "hooks": {
+    "raceCommentaryEarlyAfterScheduledStart": {
+      "eventType": "cronjob-executed",
+      "description": "Broadcast the first scheduled race commentary update",
+      "function": "src/hooks/raceCommentaryEarlyAfterScheduledStart/index.js"
+    },
+    "raceCommentaryMiddleAfterScheduledStart": {
+      "eventType": "cronjob-executed",
+      "description": "Broadcast the second scheduled race commentary update",
+      "function": "src/hooks/raceCommentaryMiddleAfterScheduledStart/index.js"
+    },
+    "raceCommentaryLateAfterScheduledStart": {
+      "eventType": "cronjob-executed",
+      "description": "Broadcast the final scheduled race commentary update before results",
+      "function": "src/hooks/raceCommentaryLateAfterScheduledStart/index.js"
+    },
+    "raceCommentaryEarlyAfterManualStart": {
+      "eventType": "command-executed",
+      "description": "Broadcast the first manual race commentary update",
+      "function": "src/hooks/raceCommentaryEarlyAfterManualStart/index.js"
+    },
+    "raceCommentaryMiddleAfterManualStart": {
+      "eventType": "command-executed",
+      "description": "Broadcast the second manual race commentary update",
+      "function": "src/hooks/raceCommentaryMiddleAfterManualStart/index.js"
+    },
+    "raceCommentaryLateAfterManualStart": {
+      "eventType": "command-executed",
+      "description": "Broadcast the final manual race commentary update before results",
+      "function": "src/hooks/raceCommentaryLateAfterManualStart/index.js"
+    },
+    "finishRaceAfterScheduledStart": {
+      "eventType": "cronjob-executed",
+      "description": "Finish a scheduled race after the configured delay",
+      "function": "src/hooks/finishRaceAfterScheduledStart/index.js"
+    },
+    "finishRaceAfterManualStart": {
+      "eventType": "command-executed",
+      "description": "Finish a manually started race after the configured delay",
+      "function": "src/hooks/finishRaceAfterManualStart/index.js"
     }
   },
   "functions": {

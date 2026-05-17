@@ -28,8 +28,16 @@ type ExecutionResult = {
 };
 
 type RaceState = {
+  status?: 'betting' | 'running';
   raceNumber: number;
   nextRaceTime: number;
+  startedAt?: number;
+  finishAt?: number;
+  startRunId?: string;
+  frozenEntrants?: Array<{ name: string; odds: number }>;
+  frozenBets?: Array<{ playerId: string; playerName: string; racer: string; odds: number; amount: number }>;
+  plannedResults?: Array<{ name: string; odds: number; position: number }>;
+  raceCommentary?: Array<{ stage: string; message: string; sentAt: number | null }>;
   bets: Array<{ playerId: string; playerName: string; racer: string; odds: number; amount: number }>;
   lastRaceResults?: RaceResult | null;
   completion?: {
@@ -77,7 +85,8 @@ describe('zombie-racing: commands and race flow', () => {
   let moduleId: string;
   let versionId: string;
   let prefix: string;
-  let runRaceCronjobId: string;
+  let startRaceCronjobId: string;
+  let recoverRunningRaceCronjobId: string;
   let betAdminRoleId: string | undefined;
   let betOnlyRoleId: string | undefined;
 
@@ -101,11 +110,26 @@ describe('zombie-racing: commands and race flow', () => {
         minBet: 25,
         maxBet: 250,
       },
+      systemConfig: {
+        hooks: {
+          raceCommentaryEarlyAfterScheduledStart: { delay: 10 },
+          raceCommentaryMiddleAfterScheduledStart: { delay: 15 },
+          raceCommentaryLateAfterScheduledStart: { delay: 20 },
+          raceCommentaryEarlyAfterManualStart: { delay: 2 },
+          raceCommentaryMiddleAfterManualStart: { delay: 4 },
+          raceCommentaryLateAfterManualStart: { delay: 6 },
+          finishRaceAfterScheduledStart: { delay: 30 },
+          finishRaceAfterManualStart: { delay: 20 },
+        },
+      },
     });
 
-    const runRaceCronjob = mod.latestVersion.cronJobs.find((cronjob) => cronjob.name === 'runRace');
-    assert.ok(runRaceCronjob, 'Expected runRace cronjob to be present');
-    runRaceCronjobId = runRaceCronjob.id;
+    const startRaceCronjob = mod.latestVersion.cronJobs.find((cronjob) => cronjob.name === 'startRace');
+    assert.ok(startRaceCronjob, 'Expected startRace cronjob to be present');
+    startRaceCronjobId = startRaceCronjob.id;
+    const recoverRunningRaceCronjob = mod.latestVersion.cronJobs.find((cronjob) => cronjob.name === 'recoverRunningRace');
+    assert.ok(recoverRunningRaceCronjob, 'Expected recoverRunningRace cronjob to be present');
+    recoverRunningRaceCronjobId = recoverRunningRaceCronjob.id;
     prefix = await getCommandPrefix(client, ctx.gameServer.id);
 
     betAdminRoleId = await assignPermissions(client, ctx.players[0].playerId, ctx.gameServer.id, [
@@ -158,11 +182,11 @@ describe('zombie-racing: commands and race flow', () => {
     };
   }
 
-  async function triggerRunRace(): Promise<ExecutionResult> {
+  async function triggerCronjob(cronjobId: string): Promise<ExecutionResult> {
     const before = new Date();
     await client.cronjob.cronJobControllerTrigger({
       gameServerId: ctx.gameServer.id,
-      cronjobId: runRaceCronjobId,
+      cronjobId,
       moduleId,
     });
     const event = await waitForEvent(client, {
@@ -176,6 +200,47 @@ describe('zombie-racing: commands and race flow', () => {
       success: meta?.result?.success ?? false,
       logs: (meta?.result?.logs ?? []).map((log) => log.msg),
     };
+  }
+
+  async function triggerStartRace(): Promise<ExecutionResult> {
+    return triggerCronjob(startRaceCronjobId);
+  }
+
+  async function triggerRecoverRunningRace(): Promise<ExecutionResult> {
+    let lastResult: ExecutionResult | null = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      lastResult = await triggerCronjob(recoverRunningRaceCronjobId);
+      if (!lastResult.logs.some((msg) => msg.includes('Race state is busy'))) return lastResult;
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    return lastResult!;
+  }
+
+  async function waitForHookExecution(after: Date, marker: string): Promise<ExecutionResult> {
+    const deadline = Date.now() + 120000;
+    while (Date.now() < deadline) {
+      const result = await client.event.eventControllerSearch({
+        filters: {
+          eventName: [EventSearchInputAllowedFiltersEventNameEnum.HookExecuted],
+          gameserverId: [ctx.gameServer.id],
+        },
+        greaterThan: {
+          createdAt: after.toISOString(),
+        },
+      });
+      for (const event of result.data.data) {
+        const meta = event.meta as { result?: { success?: boolean; logs?: Array<{ msg: string }> } };
+        const logs = (meta?.result?.logs ?? []).map((log) => log.msg);
+        if (logs.some((msg) => msg.includes(marker) && !msg.includes('skipped'))) {
+          return {
+            success: meta?.result?.success ?? false,
+            logs,
+          };
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    throw new Error(`Timed out waiting for hook marker '${marker}'`);
   }
 
   async function waitForEvents(eventName: EventSearchInputAllowedFiltersEventNameEnum, after: Date, count: number) {
@@ -218,7 +283,7 @@ describe('zombie-racing: commands and race flow', () => {
     await Promise.all([
       client.cronjob.cronJobControllerTrigger({
         gameServerId: ctx.gameServer.id,
-        cronjobId: runRaceCronjobId,
+        cronjobId: startRaceCronjobId,
         moduleId,
       }),
       client.command.commandControllerTrigger(ctx.gameServer.id, {
@@ -342,6 +407,15 @@ describe('zombie-racing: commands and race flow', () => {
     return pog.data.data[0]?.currency ?? 0;
   }
 
+  async function waitUntil(assertion: () => Promise<boolean>, label: string, timeout = 45000): Promise<void> {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      if (await assertion()) return;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    throw new Error(`Timed out waiting for ${label}`);
+  }
+
   it('lists default zombie-themed racers and bet limits', async () => {
     const result = await triggerCommand(ctx.players[0].playerId, 'racers');
 
@@ -454,10 +528,36 @@ describe('zombie-racing: commands and race flow', () => {
     }
   });
 
-  it('runs a race, records the result, clears current bets, and updates stats', async () => {
-    const race = await triggerRunRace();
-    assert.equal(race.success, true, `Expected runRace to succeed, logs: ${JSON.stringify(race.logs)}`);
-    assert.ok(race.logs.some((msg) => msg.includes('racing:runRace')), `Expected runRace log, got: ${JSON.stringify(race.logs)}`);
+  it('scheduled cronjob starts a race and delayed hook finishes it', async () => {
+    await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(
+      ctx.gameServer.id,
+      ctx.players[0].playerId,
+      { currency: 25 },
+    );
+    const preRaceBet = await triggerCommand(ctx.players[0].playerId, 'racebet Biker 25');
+    assert.equal(preRaceBet.success, true, `Expected pre-race bet to succeed, logs: ${JSON.stringify(preRaceBet.logs)}`);
+
+    const startHookWindow = new Date();
+    const race = await triggerStartRace();
+    assert.equal(race.success, true, `Expected startRace to succeed, logs: ${JSON.stringify(race.logs)}`);
+    assert.ok(race.logs.some((msg) => msg.includes('racing:startRace')), `Expected startRace log, got: ${JSON.stringify(race.logs)}`);
+
+    const runningState = await getRaceState();
+    assert.equal(runningState.status, 'running', `Expected race to be running after start, got: ${JSON.stringify(runningState)}`);
+    assert.ok(runningState.finishAt && runningState.finishAt >= runningState.startedAt!, `Expected finishAt in running state, got: ${JSON.stringify(runningState)}`);
+    assert.equal(runningState.raceCommentary?.length, 3, `Expected three planned commentary updates, got: ${JSON.stringify(runningState)}`);
+    assert.ok(runningState.plannedResults?.length, `Expected planned finishing order to be frozen at start, got: ${JSON.stringify(runningState)}`);
+
+    const runningBet = await triggerCommand(ctx.players[0].playerId, 'racebet Biker 25');
+    assert.equal(runningBet.success, false, 'Expected /racebet to reject while running');
+    assert.ok(runningBet.logs.some((msg) => msg.includes('Betting is closed')), `Expected betting closed error, got: ${JSON.stringify(runningBet.logs)}`);
+
+    const runningNextRace = await triggerCommand(ctx.players[0].playerId, 'nextrace');
+    assert.equal(runningNextRace.success, true, `Expected /nextrace during running to succeed, logs: ${JSON.stringify(runningNextRace.logs)}`);
+    assert.ok(runningNextRace.logs.some((msg) => msg.includes('status=running')), `Expected running nextrace log, got: ${JSON.stringify(runningNextRace.logs)}`);
+
+    const finish = await waitForHookExecution(startHookWindow, 'racing:finishRace');
+    assert.equal(finish.success, true, `Expected delayed finish hook to succeed, logs: ${JSON.stringify(finish.logs)}`);
 
     const lastRace = await triggerCommand(ctx.players[0].playerId, 'lastrace');
     assert.equal(lastRace.success, true, `Expected /lastrace to succeed, logs: ${JSON.stringify(lastRace.logs)}`);
@@ -479,20 +579,71 @@ describe('zombie-racing: commands and race flow', () => {
     assert.ok(leaderboard.logs.some((msg) => msg.includes('leaderboard')), `Expected leaderboard output, got: ${JSON.stringify(leaderboard.logs)}`);
   });
 
-  it('allows admin-triggered no-bet races to complete', async () => {
+  it('admin command starts a no-bet race and delayed hook completes it', async () => {
+    const hookWindow = new Date();
     const result = await triggerCommand(ctx.players[0].playerId, 'startrace');
 
     assert.equal(result.success, true, `Expected no-bet /startrace to succeed, logs: ${JSON.stringify(result.logs)}`);
-    assert.ok(result.logs.some((msg) => msg.includes('racing:startrace') && msg.includes('bets=0')), `Expected no-bet completion output, got: ${JSON.stringify(result.logs)}`);
+    assert.ok(result.logs.some((msg) => msg.includes('racing:startrace') && msg.includes('status=running')), `Expected no-bet start output, got: ${JSON.stringify(result.logs)}`);
+    const runningState = await getRaceState();
+    assert.equal(runningState.status, 'running', `Expected manual race to be running, got: ${JSON.stringify(runningState)}`);
+
+    const finish = await waitForHookExecution(hookWindow, 'racing:finishRace');
+    assert.equal(finish.success, true, `Expected delayed manual finish hook to succeed, logs: ${JSON.stringify(finish.logs)}`);
+    const completedState = await getRaceState();
+    assert.equal(completedState.status, 'betting', `Expected race to return to betting after finish, got: ${JSON.stringify(completedState)}`);
+    assert.equal(completedState.lastRaceResults?.totalBets, 0, `Expected no-bet result, got: ${JSON.stringify(completedState.lastRaceResults)}`);
   });
 
-  it('does not double-pay when race completion is triggered concurrently', async () => {
+  it('broadcasts configurable race commentary during a manual race', async () => {
+    await uninstallModule(client, moduleId, ctx.gameServer.id);
+    await installModule(client, versionId, ctx.gameServer.id, {
+      userConfig: {
+        entrants: ['Solo; 2', 'Chaser; 2', 'Rival; 2'],
+        minBet: 10,
+        maxBet: 100,
+        commentaryEarlyTemplates: ['CUSTOM EARLY {leader} sees {winner} coming.'],
+        commentaryMiddleTemplates: ['CUSTOM MIDDLE {winner} is catching {leader}.'],
+        commentaryLateTemplates: ['CUSTOM LATE {winner} overtakes {leader}.'],
+      },
+      systemConfig: {
+        hooks: {
+          raceCommentaryEarlyAfterManualStart: { delay: 10 },
+          raceCommentaryMiddleAfterManualStart: { delay: 15 },
+          raceCommentaryLateAfterManualStart: { delay: 20 },
+          finishRaceAfterManualStart: { delay: 30 },
+        },
+      },
+    });
+
+    const hookWindow = new Date();
+    const start = await triggerCommand(ctx.players[0].playerId, 'startrace');
+    assert.equal(start.success, true, `Expected /startrace to succeed, logs: ${JSON.stringify(start.logs)}`);
+
+    const commentary = await waitForHookExecution(hookWindow, 'CUSTOM EARLY');
+    assert.equal(commentary.success, true, `Expected custom commentary hook to succeed, logs: ${JSON.stringify(commentary.logs)}`);
+    assert.ok(
+      commentary.logs.some((msg) => msg.includes('racing:commentary') && msg.includes('CUSTOM EARLY')),
+      `Expected custom commentary log, got: ${JSON.stringify(commentary.logs)}`,
+    );
+
+    const finish = await waitForHookExecution(hookWindow, 'racing:finishRace');
+    assert.equal(finish.success, true, `Expected delayed finish after custom commentary to succeed, logs: ${JSON.stringify(finish.logs)}`);
+  });
+
+  it('does not double-pay when duplicate finish executions run', async () => {
     await uninstallModule(client, moduleId, ctx.gameServer.id);
     await installModule(client, versionId, ctx.gameServer.id, {
       userConfig: {
         entrants: ['Solo; 2'],
         minBet: 10,
         maxBet: 100,
+      },
+      systemConfig: {
+        hooks: {
+          finishRaceAfterScheduledStart: { delay: 10 },
+          finishRaceAfterManualStart: { delay: 10 },
+        },
       },
     });
     await client.playerOnGameserver.playerOnGameServerControllerAddCurrency(
@@ -503,45 +654,45 @@ describe('zombie-racing: commands and race flow', () => {
 
     const bet = await triggerCommand(ctx.players[0].playerId, 'racebet Solo 50');
     assert.equal(bet.success, true, `Expected single-racer bet to succeed, logs: ${JSON.stringify(bet.logs)}`);
-    const beforeCompletionCurrency = await getCurrency(ctx.players[0].playerId);
-    const raceBeforeCompletion = await getRaceState();
+    const beforeFinishCurrency = await getCurrency(ctx.players[0].playerId);
+    const pendingState = await getRaceState();
+    const runningState: RaceState = {
+      ...pendingState,
+      status: 'running',
+      startedAt: Date.now() - 2000,
+      finishAt: Date.now() - 1000,
+      startRunId: `test:${pendingState.raceNumber}:${Date.now()}`,
+      frozenEntrants: [{ name: 'Solo', odds: 2 }],
+      frozenBets: pendingState.bets.map((stateBet) => ({ ...stateBet })),
+      completion: null,
+    };
+    await setRaceState({
+      ...runningState,
+      finishAt: Date.now() - 1000,
+    });
 
-    const results = await triggerRunRaceAndCommandConcurrently(ctx.players[0].playerId, 'startrace');
-
+    const recovery = await triggerRecoverRunningRace();
     assert.equal(
-      results.every((result) => result.success || result.logs.some((msg) => msg.includes('completion is still in progress') || msg.includes('Race state is busy'))),
+      recovery.success || recovery.logs.some((msg) => msg.includes('completion is still in progress')),
       true,
-      `Expected overlapping completion triggers to complete once or report busy, got: ${JSON.stringify(results)}`,
+      `Expected first finish execution to succeed or already be in progress, logs: ${JSON.stringify(recovery.logs)}`,
     );
-    const afterCompletionCurrency = await getCurrency(ctx.players[0].playerId);
-    assert.ok(
-      afterCompletionCurrency === beforeCompletionCurrency || afterCompletionCurrency === beforeCompletionCurrency + 100,
-      `Expected overlapping completion not to double-pay, before=${beforeCompletionCurrency} after=${afterCompletionCurrency}`,
-    );
-
-    let state = await getRaceState();
-    if (state.raceNumber === raceBeforeCompletion.raceNumber) {
-      if (state.completion?.activeExpiresAt) {
-        await setRaceState({
-          ...state,
-          completion: {
-            ...state.completion,
-            activeExpiresAt: Date.now() - 1000,
-          },
-        });
-      }
-      const recovery = await triggerRunRace();
-      assert.equal(recovery.success, true, `Expected any pending overlapped completion to recover, logs: ${JSON.stringify(recovery.logs)}`);
-    }
+    await waitUntil(async () => (await getCurrency(ctx.players[0].playerId)) === beforeFinishCurrency + 100, 'first duplicate-test payout');
     const afterRecoveryCurrency = await getCurrency(ctx.players[0].playerId);
-    assert.equal(afterRecoveryCurrency, beforeCompletionCurrency + 100, 'Expected exactly one winning payout after overlap recovery');
+    assert.equal(afterRecoveryCurrency, beforeFinishCurrency + 100, 'Expected first finish execution to pay the winning bet once');
 
-    state = await getRaceState();
-    assert.equal(state.lastRaceResults?.totalBets, 1, `Expected original race result to be retained, got: ${JSON.stringify(state.lastRaceResults)}`);
+    const duplicate = await triggerRecoverRunningRace();
+    assert.equal(
+      duplicate.success || duplicate.logs.some((msg) => msg.includes('completion is still in progress')),
+      true,
+      `Expected duplicate finish execution to succeed or report in-progress completion, logs: ${JSON.stringify(duplicate.logs)}`,
+    );
 
-    const stats = await triggerCommand(ctx.players[0].playerId, 'racestats');
-    assert.equal(stats.success, true, `Expected /racestats to succeed, logs: ${JSON.stringify(stats.logs)}`);
-    assert.ok(stats.logs.some((msg) => msg.includes('racing:racestats') && msg.includes('bets=2')), `Expected stats to include one prior race and one idempotent completion bet, got: ${JSON.stringify(stats.logs)}`);
+    const afterFinishCurrency = await getCurrency(ctx.players[0].playerId);
+    assert.equal(afterFinishCurrency, beforeFinishCurrency + 100, 'Expected exactly one winning payout after duplicate finish executions');
+
+    const statsAfterDuplicate = await getPlayerStats(ctx.players[0].playerId);
+    assert.equal(statsAfterDuplicate?.processedStatIds?.filter((id) => id === `${runningState.raceNumber}:${ctx.players[0].playerId}`).length, 1, `Expected one processed stat id for the duplicate-finish race, got: ${JSON.stringify(statsAfterDuplicate)}`);
   });
 
   it('recovers stranded payout-pending race completion without double-paying', async () => {
@@ -591,16 +742,22 @@ describe('zombie-racing: commands and race flow', () => {
       },
     });
 
-    const recovery = await triggerRunRace();
-    assert.equal(recovery.success, true, `Expected retry of pending completion to succeed, logs: ${JSON.stringify(recovery.logs)}`);
+    const recovery = await triggerRecoverRunningRace();
+    assert.equal(
+      recovery.success || recovery.logs.some((msg) => msg.includes('completion is still in progress')),
+      true,
+      `Expected retry of pending completion to succeed or already be in progress, logs: ${JSON.stringify(recovery.logs)}`,
+    );
+    await waitUntil(async () => (await getCurrency(ctx.players[0].playerId)) === beforeRecoveryCurrency + 100, 'recovered winner payout');
     const afterRecoveryCurrency = await getCurrency(ctx.players[0].playerId);
     assert.equal(afterRecoveryCurrency, beforeRecoveryCurrency + 100, 'Expected retry to pay the stranded winner exactly once');
 
+    await waitUntil(async () => (await getRaceState()).raceNumber === pendingState.raceNumber + 1, 'recovered race advancement');
     const completedState = await getRaceState();
     assert.equal(completedState.raceNumber, pendingState.raceNumber + 1, `Expected race to advance after recovery, got: ${JSON.stringify(completedState)}`);
     assert.equal(completedState.lastRaceResults?.raceNumber, pendingState.raceNumber, `Expected recovered result to become last race, got: ${JSON.stringify(completedState.lastRaceResults)}`);
 
-    const duplicate = await triggerRunRace();
+    const duplicate = await triggerRecoverRunningRace();
     assert.equal(duplicate.success, true, `Expected duplicate completion after recovery to succeed, logs: ${JSON.stringify(duplicate.logs)}`);
     const afterDuplicateCurrency = await getCurrency(ctx.players[0].playerId);
     assert.equal(afterDuplicateCurrency, afterRecoveryCurrency, 'Expected duplicate completion not to pay the recovered winner again');
@@ -679,8 +836,16 @@ describe('zombie-racing: commands and race flow', () => {
       },
     });
 
-    const recovery = await triggerRunRace();
-    assert.equal(recovery.success, true, `Expected stats recovery to succeed, logs: ${JSON.stringify(recovery.logs)}`);
+    const recovery = await triggerRecoverRunningRace();
+    assert.equal(
+      recovery.success || recovery.logs.some((msg) => msg.includes('completion is still in progress')),
+      true,
+      `Expected stats recovery to succeed or already be in progress, logs: ${JSON.stringify(recovery.logs)}`,
+    );
+    await waitUntil(async () => {
+      const state = await getRaceState();
+      return state.raceNumber === pendingState.raceNumber + 1;
+    }, 'stats recovery finalization');
     const recoveredStats = await getPlayerStats(pendingBet.playerId);
     assert.equal(recoveredStats?.totalBets, statsAfterCrash.totalBets, `Expected recovery not to count stats twice, got: ${JSON.stringify(recoveredStats)}`);
     assert.equal(recoveredStats?.losses, statsAfterCrash.losses, `Expected recovery not to duplicate loss stats, got: ${JSON.stringify(recoveredStats)}`);
@@ -739,7 +904,7 @@ describe('zombie-racing: commands and race flow', () => {
     });
     await createStaleRaceLock('expired-outer-lock');
 
-    const activeRetry = await triggerRunRace();
+    const activeRetry = await triggerRecoverRunningRace();
     assert.equal(activeRetry.success, false, `Expected active completion retry to report busy, logs: ${JSON.stringify(activeRetry.logs)}`);
     assert.ok(activeRetry.logs.some((msg) => msg.includes('completion is still in progress')), `Expected busy completion output, got: ${JSON.stringify(activeRetry.logs)}`);
     const afterActiveRetryCurrency = await getCurrency(ctx.players[0].playerId);
@@ -756,10 +921,16 @@ describe('zombie-racing: commands and race flow', () => {
       },
     });
 
-    const expiredRetry = await triggerRunRace();
-    assert.equal(expiredRetry.success, true, `Expected expired completion lease retry to succeed, logs: ${JSON.stringify(expiredRetry.logs)}`);
+    const expiredRetry = await triggerRecoverRunningRace();
+    assert.equal(
+      expiredRetry.success || expiredRetry.logs.some((msg) => msg.includes('completion is still in progress')),
+      true,
+      `Expected expired completion lease retry to succeed or already be in progress, logs: ${JSON.stringify(expiredRetry.logs)}`,
+    );
+    await waitUntil(async () => (await getCurrency(ctx.players[0].playerId)) === beforeRetryCurrency + 100, 'expired active lease payout');
     const afterExpiredRetryCurrency = await getCurrency(ctx.players[0].playerId);
     assert.equal(afterExpiredRetryCurrency, beforeRetryCurrency + 100, 'Expected expired active lease to allow normal pending payout recovery exactly once');
+    await waitUntil(async () => (await getRaceState()).raceNumber === pendingState.raceNumber + 1, 'expired active lease race advancement');
     const completedState = await getRaceState();
     assert.equal(completedState.raceNumber, pendingState.raceNumber + 1, `Expected expired lease retry to advance race, got: ${JSON.stringify(completedState)}`);
   });
