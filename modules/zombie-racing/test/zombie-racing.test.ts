@@ -22,6 +22,31 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const MODULE_DIR = path.resolve(__dirname, '..');
 
+const DISABLED_CRONS = {
+  startRace: { enabled: false },
+  recoverRunningRace: { enabled: false },
+  announceRace: { enabled: false },
+};
+
+async function installRacingModule(
+  client: Client,
+  versionId: string,
+  gameServerId: string,
+  config?: { userConfig?: Record<string, unknown>; systemConfig?: Record<string, unknown> },
+): Promise<void> {
+  const systemConfig = {
+    ...(config?.systemConfig ?? {}),
+    cronJobs: {
+      ...DISABLED_CRONS,
+      ...((config?.systemConfig as { cronJobs?: Record<string, unknown> } | undefined)?.cronJobs ?? {}),
+    },
+  };
+  await installModule(client, versionId, gameServerId, {
+    userConfig: config?.userConfig,
+    systemConfig,
+  });
+}
+
 type ExecutionResult = {
   success: boolean;
   logs: string[];
@@ -105,7 +130,7 @@ describe('zombie-racing: commands and race flow', () => {
     moduleId = mod.id;
     versionId = mod.latestVersion.id;
 
-    await installModule(client, versionId, ctx.gameServer.id, {
+    await installRacingModule(client, versionId, ctx.gameServer.id, {
       userConfig: {
         minBet: 25,
         maxBet: 250,
@@ -597,7 +622,7 @@ describe('zombie-racing: commands and race flow', () => {
 
   it('broadcasts configurable race commentary during a manual race', async () => {
     await uninstallModule(client, moduleId, ctx.gameServer.id);
-    await installModule(client, versionId, ctx.gameServer.id, {
+    await installRacingModule(client, versionId, ctx.gameServer.id, {
       userConfig: {
         entrants: ['Solo; 2', 'Chaser; 2', 'Rival; 2'],
         minBet: 10,
@@ -633,7 +658,7 @@ describe('zombie-racing: commands and race flow', () => {
 
   it('does not double-pay when duplicate finish executions run', async () => {
     await uninstallModule(client, moduleId, ctx.gameServer.id);
-    await installModule(client, versionId, ctx.gameServer.id, {
+    await installRacingModule(client, versionId, ctx.gameServer.id, {
       userConfig: {
         entrants: ['Solo; 2'],
         minBet: 10,
@@ -697,7 +722,7 @@ describe('zombie-racing: commands and race flow', () => {
 
   it('recovers stranded payout-pending race completion without double-paying', async () => {
     await uninstallModule(client, moduleId, ctx.gameServer.id);
-    await installModule(client, versionId, ctx.gameServer.id, {
+    await installRacingModule(client, versionId, ctx.gameServer.id, {
       userConfig: {
         entrants: ['Solo; 2'],
         minBet: 10,
@@ -765,7 +790,7 @@ describe('zombie-racing: commands and race flow', () => {
 
   it('does not update stats twice when recovering after stats were written before finalization', async () => {
     await uninstallModule(client, moduleId, ctx.gameServer.id);
-    await installModule(client, versionId, ctx.gameServer.id, {
+    await installRacingModule(client, versionId, ctx.gameServer.id, {
       userConfig: {
         entrants: ['Solo; 2', 'Other; 2'],
         minBet: 10,
@@ -856,7 +881,7 @@ describe('zombie-racing: commands and race flow', () => {
 
   it('does not resume an active long-running completion after the outer lock expires', async () => {
     await uninstallModule(client, moduleId, ctx.gameServer.id);
-    await installModule(client, versionId, ctx.gameServer.id, {
+    await installRacingModule(client, versionId, ctx.gameServer.id, {
       userConfig: {
         entrants: ['Solo; 2'],
         minBet: 10,
@@ -937,7 +962,7 @@ describe('zombie-racing: commands and race flow', () => {
 
   it('uses custom horse-themed labels and entrants', async () => {
     await uninstallModule(client, moduleId, ctx.gameServer.id);
-    await installModule(client, versionId, ctx.gameServer.id, {
+    await installRacingModule(client, versionId, ctx.gameServer.id, {
       userConfig: {
         racerTypeLabel: 'horse',
         racerTypePluralLabel: 'horses',
@@ -958,7 +983,7 @@ describe('zombie-racing: commands and race flow', () => {
   });
 
   it('falls back to legacy Horses config when entrants is absent', async () => {
-    await installModule(client, versionId, ctx.gameServer.id, {
+    await installRacingModule(client, versionId, ctx.gameServer.id, {
       userConfig: {
         racerTypeLabel: 'horse',
         racerTypePluralLabel: 'horses',
@@ -977,7 +1002,7 @@ describe('zombie-racing: commands and race flow', () => {
   });
 
   it('falls back to legacy Zombies config when entrants is absent', async () => {
-    await installModule(client, versionId, ctx.gameServer.id, {
+    await installRacingModule(client, versionId, ctx.gameServer.id, {
       userConfig: {
         raceName: 'Legacy Zombie Race',
         Zombies: ['LegacyBiter; 2', 'LegacyCrawler; 6'],
